@@ -114,6 +114,7 @@ func main() {
 	handler.NewBatchDeployHandler().RegisterRoutes(api)
 	handler.NewNotificationMsgHandler().RegisterRoutes(api)
 	handler.NewDeployHandler().RegisterRoutes(api)
+	handler.NewPostgreSQLHandler().RegisterRoutes(api)
 
 	// SPA static file serving (embedded frontend)
 	web.RegisterSPA(r)

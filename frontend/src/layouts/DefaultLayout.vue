@@ -324,6 +324,11 @@ async function handleSavePassword() {
           <template #title>制品记录</template>
         </el-menu-item>
 
+        <el-menu-item index="/postgresql">
+          <el-icon><Coin /></el-icon>
+          <template #title>PostgreSQL 管理</template>
+        </el-menu-item>
+
         <el-sub-menu index="settings-center">
           <template #title>
             <el-icon><Setting /></el-icon>

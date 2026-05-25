@@ -33,6 +33,7 @@ const routes = [
       { path: 'kubernetes/services', name: 'K8sServices', component: () => import('../views/KubernetesView.vue'), meta: { title: 'Services', k8sTab: 'services' } },
       { path: 'kubernetes/configmaps', name: 'K8sConfigMaps', component: () => import('../views/KubernetesView.vue'), meta: { title: 'ConfigMaps', k8sTab: 'configmaps' } },
       { path: 'kubernetes/ingresses', name: 'K8sIngresses', component: () => import('../views/KubernetesView.vue'), meta: { title: 'Ingress', k8sTab: 'ingresses' } },
+      { path: 'postgresql', name: 'PostgreSQL', component: () => import('../views/PostgreSQLView.vue'), meta: { title: 'PostgreSQL 管理' } },
       { path: 'settings/general', name: 'SettingsGeneral', component: () => import('../views/SettingsView.vue'), meta: { title: '全局参数', settingsTab: 'general' } },
       { path: 'settings/apps', name: 'SettingsApps', component: () => import('../views/AppListView.vue'), meta: { title: '应用管理', settingsTab: 'apps' } },
       { path: 'settings/registry', redirect: '/settings/environment' },

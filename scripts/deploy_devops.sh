@@ -72,15 +72,19 @@ log "embed.go 已就绪"
 log "开始编译后端..."
 cd "${WORK_DIR}/backend"
 
-if ! command -v go &> /dev/null; then
-    err "Go 未安装，请先安装 Go 1.22+"
+# pg_query_go 依赖 cgo，使用 Docker 在 Linux 环境内构建目标二进制，避免 macOS 交叉编译 cgo 失败。
+if ! command -v docker &> /dev/null; then
+    err "Docker 未安装，无法构建包含 pg_query_go/cgo 的 Linux 目标二进制"
 fi
-
-# 设置 Go 代理（国内加速）
-export GOPROXY=https://goproxy.cn,direct
-
-# 交叉编译为 Linux amd64（目标服务器）
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "${BINARY_NAME}" ./cmd/server || err "后端编译失败"
+docker run --rm \
+    -v "${WORK_DIR}/backend:/src" \
+    -w /src \
+    -e GOPROXY=https://goproxy.cn,direct \
+    -e CGO_ENABLED=1 \
+    -e GOOS=linux \
+    -e GOARCH=amd64 \
+    golang:1.25-bookworm \
+    go build -o "${BINARY_NAME}" ./cmd/server || err "后端编译失败"
 log "后端编译完成: ${WORK_DIR}/backend/${BINARY_NAME}"
 
 # ---------- Step 7: 上传到远程服务器 ----------

@@ -31,6 +31,9 @@ func AutoMigrate() error {
 		&model.DeployExecution{},
 		&model.DeployLog{},
 		&model.EnvironmentInfo{},
+		&model.SQLChangeFile{},
+		&model.SQLChangeStatement{},
+		&model.SQLViewBackup{},
 	)
 	if err != nil {
 		return err
