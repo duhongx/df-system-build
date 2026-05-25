@@ -44,7 +44,7 @@ func TestAnalyzeSQLRiskClassifiesColumnTypeChanges(t *testing.T) {
 		},
 		{
 			name:       "generic type change warns",
-			sql:        "ALTER TABLE patient ALTER COLUMN payload TYPE jsonb",
+			sql:        "ALTER TABLE patient ALTER COLUMN payload TYPE bytea",
 			wantLevel:  "WARN",
 			wantReason: "字段类型变更",
 		},
@@ -63,5 +63,211 @@ func TestAnalyzeSQLRiskClassifiesColumnTypeChanges(t *testing.T) {
 				t.Fatalf("expected reason containing %q, got %q", tc.wantReason, got.RiskReason)
 			}
 		})
+	}
+}
+
+func TestAnalyzeSQLRiskClassifiesAdditionalColumnTypeRisks(t *testing.T) {
+	tests := []struct {
+		name       string
+		sql        string
+		wantReason string
+	}{
+		{
+			name:       "numeric precision change",
+			sql:        "ALTER TABLE patient ALTER COLUMN amount TYPE numeric(8,2)",
+			wantReason: "numeric 精度",
+		},
+		{
+			name:       "storage format change",
+			sql:        "ALTER TABLE patient ALTER COLUMN payload TYPE jsonb",
+			wantReason: "存储格式",
+		},
+		{
+			name:       "timestamp timezone conversion",
+			sql:        "ALTER TABLE patient ALTER COLUMN created_at TYPE timestamptz",
+			wantReason: "时区语义",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AnalyzeSQLRisk(tc.sql)
+			if got.SQLType != "ALTER_COLUMN_TYPE" || got.RiskLevel != "WARN" {
+				t.Fatalf("expected ALTER_COLUMN_TYPE WARN, got %+v", got)
+			}
+			if !strings.Contains(got.RiskReason, tc.wantReason) {
+				t.Fatalf("expected reason containing %q, got %q", tc.wantReason, got.RiskReason)
+			}
+		})
+	}
+}
+
+func TestAnalyzeSQLRiskClassifiesAddColumnDefaultRisks(t *testing.T) {
+	tests := []struct {
+		name       string
+		sql        string
+		wantType   string
+		wantLevel  string
+		wantReason string
+	}{
+		{
+			name:       "volatile default warns",
+			sql:        "ALTER TABLE patient ADD COLUMN trace_id uuid DEFAULT uuid_generate_v4()",
+			wantType:   "ADD_COLUMN_DEFAULT_VOLATILE",
+			wantLevel:  "WARN",
+			wantReason: "volatile",
+		},
+		{
+			name:       "schema qualified volatile default warns",
+			sql:        "ALTER TABLE patient ADD COLUMN trace_id uuid DEFAULT public.uuid_generate_v4()",
+			wantType:   "ADD_COLUMN_DEFAULT_VOLATILE",
+			wantLevel:  "WARN",
+			wantReason: "volatile",
+		},
+		{
+			name:      "constant default stays low",
+			sql:       "ALTER TABLE patient ADD COLUMN status int DEFAULT 0",
+			wantType:  "ADD_COLUMN",
+			wantLevel: "LOW",
+		},
+		{
+			name:      "function name in literal is not volatile default",
+			sql:       "ALTER TABLE patient ADD COLUMN note text DEFAULT 'now()'",
+			wantType:  "ADD_COLUMN",
+			wantLevel: "LOW",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AnalyzeSQLRisk(tc.sql)
+			if got.SQLType != tc.wantType || got.RiskLevel != tc.wantLevel {
+				t.Fatalf("expected %s %s, got %+v", tc.wantType, tc.wantLevel, got)
+			}
+			if tc.wantReason != "" && !strings.Contains(got.RiskReason, tc.wantReason) {
+				t.Fatalf("expected reason containing %q, got %q", tc.wantReason, got.RiskReason)
+			}
+		})
+	}
+}
+
+func TestAnalyzeSQLRiskClassifiesDropIndexConcurrency(t *testing.T) {
+	tests := []struct {
+		sql        string
+		wantType   string
+		wantLevel  string
+		wantReason string
+	}{
+		{
+			sql:        "DROP INDEX idx_patient_name",
+			wantType:   "DROP_INDEX",
+			wantLevel:  "WARN",
+			wantReason: "非 CONCURRENTLY",
+		},
+		{
+			sql:        "DROP INDEX CONCURRENTLY idx_patient_name",
+			wantType:   "DROP_INDEX_CONCURRENTLY",
+			wantLevel:  "WARN",
+			wantReason: "并发删除索引",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.sql, func(t *testing.T) {
+			got := AnalyzeSQLRisk(tc.sql)
+			if got.SQLType != tc.wantType || got.RiskLevel != tc.wantLevel {
+				t.Fatalf("expected %s %s, got %+v", tc.wantType, tc.wantLevel, got)
+			}
+			if !strings.Contains(got.RiskReason, tc.wantReason) {
+				t.Fatalf("expected reason containing %q, got %q", tc.wantReason, got.RiskReason)
+			}
+		})
+	}
+}
+
+func TestAnalyzeSQLRiskClassifiesNotValidCheckAsLow(t *testing.T) {
+	got := AnalyzeSQLRisk("ALTER TABLE patient ADD CONSTRAINT chk_code CHECK (code <> '') NOT VALID")
+
+	if got.SQLType != "ADD_CHECK_NOT_VALID" || got.RiskLevel != "LOW" {
+		t.Fatalf("expected ADD_CHECK_NOT_VALID LOW, got %+v", got)
+	}
+}
+
+func TestDropAndTruncatePolicyRecognizesTemporaryNames(t *testing.T) {
+	tests := []string{
+		"DROP TABLE temp_patient",
+		"DROP TABLE patient_tmp",
+		"TRUNCATE TABLE bak_patient",
+		"TRUNCATE TABLE patient_bak",
+	}
+
+	for _, sqlText := range tests {
+		got := AnalyzeSQLRisk(sqlText)
+		if got.RiskLevel != "LOW" {
+			t.Fatalf("expected LOW for %s, got %+v", sqlText, got)
+		}
+		if !strings.Contains(got.RiskReason, "临时/备份表命名规则命中") {
+			t.Fatalf("expected temp/backup reason for %s, got %q", sqlText, got.RiskReason)
+		}
+	}
+}
+
+func TestLargeDropOrTruncateIsBlocked(t *testing.T) {
+	stats := TableStats{SchemaName: "public", TableName: "patient", TotalBytes: largeTableBytes + 1, EstimatedRows: 1}
+
+	got := classifyDestructiveTableOperation("DROP_TABLE", stats)
+
+	if got.RiskLevel != "BLOCKED" {
+		t.Fatalf("expected BLOCKED, got %+v", got)
+	}
+	if !strings.Contains(got.RiskReason, "大表") {
+		t.Fatalf("expected large table reason, got %q", got.RiskReason)
+	}
+}
+
+func TestLargeTableSensitiveOperationIsBlocked(t *testing.T) {
+	stats := TableStats{SchemaName: "public", TableName: "patient", TotalBytes: largeTableBytes + 1, EstimatedRows: largeTableRows + 1}
+	base := RiskAnalysis{SQLType: "CREATE_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 创建索引可能阻塞写入"}
+
+	got := classifyLargeTableSensitiveOperation(base, stats)
+
+	if got.RiskLevel != "BLOCKED" {
+		t.Fatalf("expected BLOCKED, got %+v", got)
+	}
+	if !strings.Contains(got.RiskReason, "大表") {
+		t.Fatalf("expected large table reason, got %q", got.RiskReason)
+	}
+}
+
+func TestExecutionStrategyForConcurrentIndex(t *testing.T) {
+	strategy := DetermineExecutionStrategy(AnalyzeSQLRisk("CREATE INDEX CONCURRENTLY idx_patient_name ON patient(name)"))
+
+	if strategy.CanRunInTransaction {
+		t.Fatalf("concurrent index must not run in transaction")
+	}
+	if strategy.Name != "DIRECT_NO_TRANSACTION" {
+		t.Fatalf("unexpected strategy: %+v", strategy)
+	}
+}
+
+func TestExecutionStrategyForDropIndexConcurrently(t *testing.T) {
+	strategy := DetermineExecutionStrategy(AnalyzeSQLRisk("DROP INDEX CONCURRENTLY idx_patient_name"))
+
+	if strategy.CanRunInTransaction {
+		t.Fatalf("drop index concurrently must not run in transaction")
+	}
+	if strategy.Name != "DIRECT_NO_TRANSACTION" {
+		t.Fatalf("unexpected strategy: %+v", strategy)
+	}
+}
+
+func TestExecutionStrategyForBlockedSQL(t *testing.T) {
+	strategy := DetermineExecutionStrategy(AnalyzeSQLRisk("ALTER SYSTEM SET work_mem = '64MB'"))
+
+	if strategy.CanRunInTransaction {
+		t.Fatalf("blocked sql should not be transaction runnable")
+	}
+	if strategy.Name != "MANUAL_EXPORT" {
+		t.Fatalf("unexpected strategy: %+v", strategy)
 	}
 }

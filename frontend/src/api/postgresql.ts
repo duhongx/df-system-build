@@ -52,6 +52,8 @@ export interface SQLChangeStatement {
   sqlType: string
   riskLevel: string
   riskReason: string
+  canRunInTransaction: boolean
+  executionStrategy: string
   executeStatus: string
   executeMessage: string
   sqlState: string

@@ -213,6 +213,20 @@ function statusTag(status: string) {
   if (status === 'SKIPPED') return 'info'
   return 'info'
 }
+
+function strategyLabel(row: SQLChangeStatement) {
+  const strategy = row.executionStrategy || 'DIRECT'
+  if (strategy === 'DIRECT_NO_TRANSACTION') return '直接执行/非事务'
+  if (strategy === 'MANUAL_EXPORT') return '导出处理'
+  return '直接执行'
+}
+
+function strategyTag(row: SQLChangeStatement) {
+  const strategy = row.executionStrategy || 'DIRECT'
+  if (strategy === 'MANUAL_EXPORT') return 'danger'
+  if (strategy === 'DIRECT_NO_TRANSACTION') return 'warning'
+  return 'info'
+}
 </script>
 
 <template>
@@ -271,6 +285,11 @@ function statusTag(status: string) {
         <el-table-column prop="executeStatus" label="状态" width="130">
           <template #default="{ row }">
             <el-tag :type="statusTag(row.executeStatus)" size="small">{{ row.executeStatus }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="策略" width="150">
+          <template #default="{ row }">
+            <el-tag :type="strategyTag(row)" size="small">{{ strategyLabel(row) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="affectedRows" label="影响行数" width="100" />

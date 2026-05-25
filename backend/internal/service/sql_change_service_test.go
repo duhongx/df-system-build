@@ -168,6 +168,35 @@ func TestInferSQLSchemaFromQualifiedStatements(t *testing.T) {
 	}
 }
 
+func TestParseCreateOrReplaceViewRef(t *testing.T) {
+	ref := parseCreateOrReplaceViewRef(`CREATE OR REPLACE VIEW "his"."v_patient" AS SELECT 1`, "public")
+
+	if ref.schema != "his" || ref.table != "v_patient" {
+		t.Fatalf("unexpected view ref: %+v", ref)
+	}
+}
+
+func TestParseTableRefForRiskOperations(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{name: "set not null", sql: "ALTER TABLE his.patient ALTER COLUMN code SET NOT NULL"},
+		{name: "add check", sql: "ALTER TABLE his.patient ADD CONSTRAINT chk_code CHECK (code <> '')"},
+		{name: "create index", sql: "CREATE INDEX idx_patient_code ON his.patient(code)"},
+		{name: "create index concurrently", sql: "CREATE INDEX CONCURRENTLY idx_patient_code ON his.patient(code)"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := parseTableRefForRiskOperation(tc.sql, "public")
+			if ref.schema != "his" || ref.table != "patient" {
+				t.Fatalf("unexpected table ref for %s: %+v", tc.sql, ref)
+			}
+		})
+	}
+}
+
 func TestParseSQLAllowsSameFileNameAcrossVersionAndSchema(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	svc := NewPostgreSQLService()
@@ -190,6 +219,28 @@ func TestParseSQLAllowsSameFileNameAcrossVersionAndSchema(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("same file name in a different version should be allowed: %v", err)
+	}
+}
+
+func TestParseSQLPersistsExecutionStrategy(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+
+	_, statements, err := NewPostgreSQLService().ParseSQL(ParseSQLRequest{
+		FileName:  "strategy.sql",
+		Content:   "CREATE INDEX CONCURRENTLY idx_patient_name ON patient(name);",
+		Overwrite: true,
+	})
+	if err != nil {
+		t.Fatalf("parse sql: %v", err)
+	}
+	if len(statements) != 1 {
+		t.Fatalf("expected one statement, got %d", len(statements))
+	}
+	if statements[0].ExecutionStrategy != "DIRECT_NO_TRANSACTION" {
+		t.Fatalf("expected DIRECT_NO_TRANSACTION, got %#v", statements[0])
+	}
+	if statements[0].CanRunInTransaction {
+		t.Fatalf("concurrent index should not run in transaction")
 	}
 }
 
@@ -303,5 +354,48 @@ func TestExportNotExecutableSQLIncludesBlockedAndFailed(t *testing.T) {
 	}
 	if !strings.Contains(out, "Line 3") || !strings.Contains(out, "timeout") {
 		t.Fatalf("expected failed sql in export: %s", out)
+	}
+}
+
+func TestBuildNotExecutableSQLForFileIncludesViewRebuildPlan(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	file := model.SQLChangeFile{FileName: "view-dep.sql", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	stmt := model.SQLChangeStatement{
+		FileID:        file.ID,
+		LineNumber:    1,
+		SQLContent:    "ALTER TABLE patient ALTER COLUMN code TYPE varchar(20)",
+		SQLType:       "ALTER_COLUMN_TYPE",
+		RiskLevel:     "BLOCKED",
+		ExecuteStatus: "NOT_EXECUTABLE",
+	}
+	if err := repository.DB.Create(&stmt).Error; err != nil {
+		t.Fatalf("create statement: %v", err)
+	}
+	backup := model.SQLViewBackup{
+		FileID:      file.ID,
+		StatementID: stmt.ID,
+		SchemaName:  "public",
+		ViewName:    "v_patient",
+		Definition:  "SELECT patient.code FROM patient",
+		DropSQL:     `DROP VIEW IF EXISTS "public"."v_patient";`,
+		CreateSQL:   `CREATE OR REPLACE VIEW "public"."v_patient" AS SELECT patient.code FROM patient;`,
+	}
+	if err := repository.DB.Create(&backup).Error; err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+
+	out, err := NewPostgreSQLService().BuildNotExecutableSQLForFile(file.ID)
+	if err != nil {
+		t.Fatalf("build export: %v", err)
+	}
+
+	if !strings.Contains(out, "View dependency rebuild plan for public.v_patient") {
+		t.Fatalf("expected view rebuild plan in export: %s", out)
+	}
+	if !strings.Contains(out, backup.DropSQL) || !strings.Contains(out, backup.CreateSQL) {
+		t.Fatalf("expected drop/create SQL in export: %s", out)
 	}
 }

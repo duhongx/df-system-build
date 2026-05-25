@@ -1,10 +1,17 @@
 package service
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
+	"google.golang.org/protobuf/reflect/protoreflect"
+)
+
+const (
+	largeTableBytes = 10 * 1024 * 1024 * 1024
+	largeTableRows  = 10_000_000
 )
 
 func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
@@ -62,28 +69,49 @@ func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
 	case regexp.MustCompile(`^CREATE\s+INDEX\b`).MatchString(upper):
 		return RiskAnalysis{SQLType: "CREATE_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 创建索引可能阻塞写入"}
 	case regexp.MustCompile(`^TRUNCATE\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "TRUNCATE", RiskLevel: "WARN", RiskReason: "TRUNCATE 会快速清空表数据，请确认对象范围"}
+		return enrichStaticRisk(sqlText, RiskAnalysis{SQLType: "TRUNCATE", RiskLevel: "WARN", RiskReason: "TRUNCATE 会快速清空表数据，请确认对象范围"})
 	case regexp.MustCompile(`^DROP\s+TABLE\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "DROP_TABLE", RiskLevel: "WARN", RiskReason: "DROP TABLE 会删除表结构和数据，请确认对象范围"}
+		return enrichStaticRisk(sqlText, RiskAnalysis{SQLType: "DROP_TABLE", RiskLevel: "WARN", RiskReason: "DROP TABLE 会删除表结构和数据，请确认对象范围"})
 	default:
 		return RiskAnalysis{SQLType: firstKeyword(upper), RiskLevel: "LOW"}
 	}
 }
 
 func enrichStaticRisk(sqlText string, risk RiskAnalysis) RiskAnalysis {
-	if risk.SQLType != "ALTER_COLUMN_TYPE" {
+	switch risk.SQLType {
+	case "ALTER_COLUMN_TYPE":
+		return classifyStaticColumnTypeChange(sqlText, risk)
+	case "ADD_COLUMN":
+		return classifyStaticAddColumn(sqlText, risk)
+	case "ADD_CHECK":
+		return classifyStaticAddCheck(sqlText, risk)
+	case "DROP_TABLE", "TRUNCATE":
+		tableName := extractDestructiveTableName(sqlText)
+		if tableName == "" {
+			return risk
+		}
+		return classifyDestructiveTableOperation(risk.SQLType, TableStats{TableName: tableName})
+	default:
 		return risk
 	}
-	return classifyStaticColumnTypeChange(sqlText, risk)
 }
 
 func classifyStaticColumnTypeChange(sqlText string, risk RiskAnalysis) RiskAnalysis {
 	targetType := extractAlterColumnTargetType(sqlText)
 	hasUsing := hasAlterColumnUsing(sqlText)
-	reasons := make([]string, 0, 3)
+	reasons := make([]string, 0, 5)
 
 	if strings.TrimSpace(targetType) != "" && isVarcharType(targetType) {
 		reasons = append(reasons, "varchar 类型变更需要结合原字段长度判断，避免缩容截断或误判扩容")
+	}
+	if strings.TrimSpace(targetType) != "" && isNumericType(targetType) {
+		reasons = append(reasons, "numeric 精度或 scale 变化需要校验已有数据范围")
+	}
+	if isStorageRewriteType(targetType) {
+		reasons = append(reasons, "目标类型可能改变存储格式，可能触发表重写或转换失败")
+	}
+	if isTimezoneSemanticType(targetType) {
+		reasons = append(reasons, "时间类型变更涉及时区语义，请确认业务含义")
 	}
 	if hasUsing {
 		reasons = append(reasons, "USING 表达式会逐行转换数据，请确认转换逻辑和执行窗口")
@@ -94,6 +122,24 @@ func classifyStaticColumnTypeChange(sqlText string, risk RiskAnalysis) RiskAnaly
 
 	risk.RiskLevel = "WARN"
 	risk.RiskReason = strings.Join(reasons, "；")
+	return risk
+}
+
+func classifyStaticAddColumn(sqlText string, risk RiskAnalysis) RiskAnalysis {
+	if hasVolatileDefault(sqlText) {
+		return RiskAnalysis{
+			SQLType:    "ADD_COLUMN_DEFAULT_VOLATILE",
+			RiskLevel:  "WARN",
+			RiskReason: "ADD COLUMN 使用 volatile 默认值，可能逐行计算并重写大表",
+		}
+	}
+	return risk
+}
+
+func classifyStaticAddCheck(sqlText string, risk RiskAnalysis) RiskAnalysis {
+	if regexp.MustCompile(`(?i)\bNOT\s+VALID\b`).MatchString(sqlText) {
+		return RiskAnalysis{SQLType: "ADD_CHECK_NOT_VALID", RiskLevel: "LOW", RiskReason: "CHECK 使用 NOT VALID，不立即校验已有数据"}
+	}
 	return risk
 }
 
@@ -115,8 +161,263 @@ func isVarcharType(typeName string) bool {
 	return strings.HasPrefix(normalized, "varchar") || strings.HasPrefix(normalized, "character varying")
 }
 
+func isNumericType(typeName string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(typeName), " "))
+	return strings.HasPrefix(normalized, "numeric") || strings.HasPrefix(normalized, "decimal")
+}
+
+func isStorageRewriteType(typeName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(typeName))
+	prefixes := []string{"jsonb", "json", "uuid", "bigint", "integer", "int4", "int8", "date", "timestamp", "timestamptz"}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTimezoneSemanticType(typeName string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(typeName), " "))
+	return strings.HasPrefix(normalized, "timestamptz") || strings.HasPrefix(normalized, "timestamp with time zone")
+}
+
+func hasVolatileDefault(sqlText string) bool {
+	if hasVolatile, parsed := hasVolatileDefaultFromAST(sqlText); parsed {
+		return hasVolatile
+	}
+	upper := strings.ToUpper(sqlText)
+	if !strings.Contains(upper, " DEFAULT ") {
+		return false
+	}
+	volatilePatterns := []string{
+		`(?i)\bnow\s*\(`,
+		`(?i)\brandom\s*\(`,
+		`(?i)\buuid_generate_v4\s*\(`,
+		`(?i)\bgen_random_uuid\s*\(`,
+		`(?i)\bclock_timestamp\s*\(`,
+		`(?i)\bstatement_timestamp\s*\(`,
+		`(?i)\btimeofday\s*\(`,
+	}
+	for _, pattern := range volatilePatterns {
+		if regexp.MustCompile(pattern).MatchString(sqlText) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasVolatileDefaultFromAST(sqlText string) (bool, bool) {
+	tree, err := pg_query.Parse(sqlText)
+	if err != nil || tree == nil || len(tree.GetStmts()) == 0 {
+		return false, false
+	}
+	for _, rawStmt := range tree.GetStmts() {
+		alterStmt := rawStmt.GetStmt().GetAlterTableStmt()
+		if alterStmt == nil {
+			continue
+		}
+		for _, cmdNode := range alterStmt.GetCmds() {
+			cmd := cmdNode.GetAlterTableCmd()
+			if cmd == nil || cmd.GetSubtype() != pg_query.AlterTableType_AT_AddColumn {
+				continue
+			}
+			column := cmd.GetDef().GetColumnDef()
+			if column == nil {
+				continue
+			}
+			if nodeContainsVolatileFunction(column.GetRawDefault()) {
+				return true, true
+			}
+			for _, constraintNode := range column.GetConstraints() {
+				constraint := constraintNode.GetConstraint()
+				if constraint == nil || constraint.GetContype() != pg_query.ConstrType_CONSTR_DEFAULT {
+					continue
+				}
+				if nodeContainsVolatileFunction(constraint.GetRawExpr()) {
+					return true, true
+				}
+			}
+		}
+	}
+	return false, true
+}
+
+func nodeContainsVolatileFunction(node *pg_query.Node) bool {
+	if node == nil {
+		return false
+	}
+	if call := node.GetFuncCall(); call != nil && isVolatileFunctionName(funcCallName(call)) {
+		return true
+	}
+	return protoMessageContainsVolatileFunction(node.ProtoReflect())
+}
+
+func protoMessageContainsVolatileFunction(message protoreflect.Message) bool {
+	if !message.IsValid() {
+		return false
+	}
+	if call, ok := message.Interface().(*pg_query.FuncCall); ok && isVolatileFunctionName(funcCallName(call)) {
+		return true
+	}
+	fields := message.Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
+			continue
+		}
+		value := message.Get(field)
+		if field.IsList() {
+			list := value.List()
+			for j := 0; j < list.Len(); j++ {
+				if protoMessageContainsVolatileFunction(list.Get(j).Message()) {
+					return true
+				}
+			}
+			continue
+		}
+		if value.Message().IsValid() && protoMessageContainsVolatileFunction(value.Message()) {
+			return true
+		}
+	}
+	return false
+}
+
+func funcCallName(call *pg_query.FuncCall) string {
+	if call == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(call.GetFuncname()))
+	for _, part := range call.GetFuncname() {
+		if str := part.GetString_(); str != nil {
+			parts = append(parts, str.GetSval())
+		}
+	}
+	return strings.ToLower(strings.Join(parts, "."))
+}
+
+func isVolatileFunctionName(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if idx := strings.LastIndex(normalized, "."); idx >= 0 {
+		normalized = normalized[idx+1:]
+	}
+	switch normalized {
+	case "now", "random", "uuid_generate_v4", "gen_random_uuid", "clock_timestamp", "statement_timestamp", "timeofday":
+		return true
+	default:
+		return false
+	}
+}
+
 func hasAlterColumnUsing(sqlText string) bool {
 	return regexp.MustCompile(`(?i)\bUSING\b`).MatchString(sqlText)
+}
+
+func classifyDestructiveTableOperation(sqlType string, stats TableStats) RiskAnalysis {
+	tableName := strings.TrimSpace(stats.TableName)
+	if isTemporaryOrBackupTableName(tableName) {
+		return RiskAnalysis{SQLType: sqlType, RiskLevel: "LOW", RiskReason: "临时/备份表命名规则命中"}
+	}
+	if stats.TotalBytes > largeTableBytes || stats.EstimatedRows > largeTableRows {
+		return RiskAnalysis{
+			SQLType:    sqlType,
+			RiskLevel:  "BLOCKED",
+			RiskReason: fmt.Sprintf("大表高危操作，表 %s 大小 %d bytes，估算行数 %d", tableName, stats.TotalBytes, stats.EstimatedRows),
+		}
+	}
+	switch sqlType {
+	case "DROP_TABLE":
+		return RiskAnalysis{SQLType: sqlType, RiskLevel: "WARN", RiskReason: "DROP TABLE 会删除表结构和数据，请确认对象范围"}
+	case "TRUNCATE":
+		return RiskAnalysis{SQLType: sqlType, RiskLevel: "WARN", RiskReason: "TRUNCATE 会快速清空表数据，请确认对象范围"}
+	default:
+		return RiskAnalysis{SQLType: sqlType, RiskLevel: "WARN", RiskReason: "破坏性表操作，请确认对象范围"}
+	}
+}
+
+func classifyLargeTableSensitiveOperation(base RiskAnalysis, stats TableStats) RiskAnalysis {
+	if base.RiskLevel == "LOW" || base.RiskLevel == "BLOCKED" {
+		return base
+	}
+	if stats.TotalBytes > largeTableBytes || stats.EstimatedRows > largeTableRows {
+		base.RiskLevel = "BLOCKED"
+		base.RiskReason = strings.TrimSpace(base.RiskReason + fmt.Sprintf("；大表高风险操作，表 %s 大小 %d bytes，估算行数 %d", stats.TableName, stats.TotalBytes, stats.EstimatedRows))
+	}
+	return base
+}
+
+func isLargeTableSensitiveSQLType(sqlType string) bool {
+	switch sqlType {
+	case "ALTER_COLUMN_TYPE", "ALTER_SET_NOT_NULL", "ADD_CHECK", "CREATE_INDEX", "ADD_COLUMN_DEFAULT_VOLATILE":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDMLRiskWithAffectedRows(sqlType string) bool {
+	return sqlType == "UPDATE" || sqlType == "DELETE"
+}
+
+func isTemporaryOrBackupTableName(name string) bool {
+	name = strings.ToLower(strings.Trim(strings.TrimSpace(name), `"`))
+	if name == "" {
+		return false
+	}
+	return strings.HasPrefix(name, "temp_") ||
+		strings.HasPrefix(name, "tmp_") ||
+		strings.HasPrefix(name, "bak_") ||
+		strings.HasPrefix(name, "backup_") ||
+		strings.HasSuffix(name, "_tmp") ||
+		strings.HasSuffix(name, "_bak")
+}
+
+func extractDestructiveTableName(sqlText string) string {
+	normalized := normalizeSQL(sqlText)
+	upper := strings.ToUpper(normalized)
+	rest := ""
+	switch {
+	case strings.HasPrefix(upper, "DROP TABLE IF EXISTS "):
+		rest = strings.TrimSpace(normalized[len("DROP TABLE IF EXISTS "):])
+	case strings.HasPrefix(upper, "DROP TABLE "):
+		rest = strings.TrimSpace(normalized[len("DROP TABLE "):])
+	case strings.HasPrefix(upper, "TRUNCATE TABLE ONLY "):
+		rest = strings.TrimSpace(normalized[len("TRUNCATE TABLE ONLY "):])
+	case strings.HasPrefix(upper, "TRUNCATE TABLE "):
+		rest = strings.TrimSpace(normalized[len("TRUNCATE TABLE "):])
+	case strings.HasPrefix(upper, "TRUNCATE ONLY "):
+		rest = strings.TrimSpace(normalized[len("TRUNCATE ONLY "):])
+	case strings.HasPrefix(upper, "TRUNCATE "):
+		rest = strings.TrimSpace(normalized[len("TRUNCATE "):])
+	default:
+		return ""
+	}
+	name := firstSQLName(rest)
+	name = strings.TrimSuffix(name, ",")
+	parts := strings.Split(name, ".")
+	return strings.Trim(parts[len(parts)-1], `"`)
+}
+
+func firstSQLName(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	var b strings.Builder
+	inDouble := false
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+		if ch == '"' {
+			inDouble = !inDouble
+			b.WriteByte(ch)
+			continue
+		}
+		if !inDouble && (ch == ' ' || ch == ',') {
+			break
+		}
+		b.WriteByte(ch)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
@@ -190,6 +491,11 @@ func analyzeDropStmt(stmt *pg_query.DropStmt) RiskAnalysis {
 		return RiskAnalysis{SQLType: "DROP_SCHEMA", RiskLevel: "BLOCKED", RiskReason: "禁止通过普通入口删除 schema"}
 	case pg_query.ObjectType_OBJECT_TABLE:
 		return RiskAnalysis{SQLType: "DROP_TABLE", RiskLevel: "WARN", RiskReason: "DROP TABLE 会删除表结构和数据，请确认对象范围"}
+	case pg_query.ObjectType_OBJECT_INDEX:
+		if stmt.GetConcurrent() {
+			return RiskAnalysis{SQLType: "DROP_INDEX_CONCURRENTLY", RiskLevel: "WARN", RiskReason: "并发删除索引耗时可能较长"}
+		}
+		return RiskAnalysis{SQLType: "DROP_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 删除索引可能阻塞访问"}
 	default:
 		return RiskAnalysis{SQLType: "DROP", RiskLevel: "WARN", RiskReason: "DROP 会删除数据库对象，请确认对象范围"}
 	}
@@ -211,7 +517,11 @@ func analyzeAlterTableStmt(stmt *pg_query.AlterTableStmt) RiskAnalysis {
 			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ALTER_SET_NOT_NULL", RiskLevel: "WARN", RiskReason: "设置 NOT NULL 可能扫描全表"})
 		case pg_query.AlterTableType_AT_AddConstraint:
 			if constraint := cmd.GetDef().GetConstraint(); constraint != nil && constraint.GetContype() == pg_query.ConstrType_CONSTR_CHECK {
-				risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_CHECK", RiskLevel: "WARN", RiskReason: "新增 CHECK 默认校验已有数据，可能扫描全表"})
+				if constraint.GetSkipValidation() {
+					risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_CHECK_NOT_VALID", RiskLevel: "LOW", RiskReason: "CHECK 使用 NOT VALID，不立即校验已有数据"})
+				} else {
+					risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_CHECK", RiskLevel: "WARN", RiskReason: "新增 CHECK 默认校验已有数据，可能扫描全表"})
+				}
 			}
 		case pg_query.AlterTableType_AT_DropColumn, pg_query.AlterTableType_AT_DropConstraint:
 			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ALTER_TABLE_DROP", RiskLevel: "WARN", RiskReason: "ALTER TABLE 删除字段或约束可能影响业务，请确认依赖范围"})

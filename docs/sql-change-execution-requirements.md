@@ -42,30 +42,19 @@
 
 驱动执行和 `psql` 执行在性能上通常不是关键差异。真正耗时主要在数据库端，例如锁等待、表扫描、索引构建、DDL 重写、数据写入。驱动执行的优势是更容易做结构化状态记录、错误码识别、超时控制和失败重试。
 
-## 权限建议
+## 执行账号策略
 
-不建议继续默认使用 PostgreSQL 超级管理员账号执行所有 SQL。
+当前项目采用 **PostgreSQL 配置账号执行 + 平台风险拦截和提示** 的策略。客户现场通常会持续新增业务表和 schema，如果强制使用业务账号或统一执行账号，会长期遇到 owner、DDL、授权遗漏等问题，实施成本较高。
 
-推荐使用业务专用执行账号：
+因此第一阶段允许使用 `postgres` 等高权限账号执行 SQL，但系统必须把风险控制放在平台层：
 
-```text
-sql_executor
-```
+- 明显高危 SQL 强拦截。
+- 大表 DDL / DML 风险提示或拦截。
+- 视图依赖自动备份并导出处理 SQL。
+- 执行保护参数限制锁等待和执行时长。
+- 记录平台用户、SQL 类型、风险等级、执行策略、SQLState、耗时和影响行数。
 
-如果业务 schema 中的表结构变更需要 owner 权限，可以采用 role 模型：
-
-```text
-biz_owner      拥有业务 schema 和业务对象
-sql_executor   允许 SET ROLE biz_owner
-```
-
-平台执行 SQL 时先执行：
-
-```sql
-SET ROLE biz_owner;
-```
-
-这样可以满足业务表结构变更需求，同时避免平台账号拥有 PostgreSQL superuser 权限。
+业务专用执行账号、`SET ROLE`、非 superuser 执行模式可作为客户有明确权限治理要求时的可选增强，不作为当前主线。
 
 ## 默认执行保护参数
 
@@ -390,31 +379,32 @@ created_at
 | Java 版跳过选项 | 已实现 | 支持字段已存在、对象已存在、唯一约束冲突时跳过，分别对应 PostgreSQL SQLState `42701`、`42P07`、`23505`。 |
 | 基础风险识别 | 已实现 | 覆盖 DML、建表、建视图、加列、改字段类型、设置 NOT NULL、CHECK、索引、TRUNCATE、DROP TABLE、COPY、REINDEX、VACUUM 等。 |
 | 明显高危 SQL 强拦截 | 已实现 | `DROP DATABASE`、`DROP SCHEMA`、`DROP OWNED`、`ALTER SYSTEM`、`COPY PROGRAM`、`REINDEX DATABASE`、`VACUUM FULL` 会标记不可执行。 |
-| 字段类型变更视图依赖检测 | 已实现 | 对 `ALTER TABLE ... ALTER COLUMN ... TYPE` 查询依赖视图，并将依赖信息写入风险原因。 |
-| 视图备份表模型 | 已实现模型 | 已有 `SQLViewBackup` 模型，但当前还没有自动写入备份和重建流程。 |
+| 字段类型变更视图依赖检测 | 已实现 | 对 `ALTER TABLE ... ALTER COLUMN ... TYPE` 查询依赖视图；如果发现依赖，会阻止直接执行并提示导出重建 SQL。 |
+| 视图备份和重建 SQL 导出 | 已实现 | 保存依赖视图定义、DROP SQL、CREATE SQL 到 `SQLViewBackup`，不可执行 SQL 导出会包含视图重建计划。 |
+| `DROP TABLE` / `TRUNCATE` 内置策略 | 已实现 | 临时/备份命名规则降为 LOW；普通表 WARN；连接 PostgreSQL 读取到大表元数据时提升为 BLOCKED。 |
+| `CREATE OR REPLACE VIEW` 兼容性提示 | 已实现 | 如果目标视图已存在，会追加“列名/顺序/类型兼容性限制”的保守风险提示。 |
+| Bytebase 风险规则吸收 | 已实现 | 吸收 Bytebase SQL Review 的规则思路，补充 AST 识别 volatile default、DML `EXPLAIN (FORMAT JSON)` 影响行数预估、DROP INDEX CONCURRENTLY 策略、CHECK NOT VALID 判断。 |
+| SQL 执行策略标记 | 已实现 | 每条 SQL 记录 `executionStrategy` 和 `canRunInTransaction`；并发索引、并发删除索引、VACUUM、REINDEX 标记为非事务直接执行，BLOCKED 标记为导出处理。 |
 
 ### 部分实现或实现深度不足
 
 | 功能点 | 当前状态 | 差距 |
 |---|---|---|
-| 风险分类细粒度判断 | 部分实现 | 当前按 AST 节点和少量规则识别风险，但未区分 `varchar` 扩容/缩容、`numeric` 精度变化、`USING` 转换、volatile default 等细粒度场景。 |
-| `CREATE OR REPLACE VIEW` 兼容性风险 | 部分实现 | 当前统一识别为 `CREATE_VIEW` 低风险，没有检查已有视图列名、顺序、类型兼容性，也没有依赖链分析。 |
-| `DROP TABLE` / `TRUNCATE` 策略 | 部分实现 | 当前只标记 WARN，不按 `_tmp`、`temp_`、`bak_` 等命名规则细分允许或拦截。 |
-| SQL 事务策略 | 部分实现 | 当前是逐条执行，不启用文件级事务；文档也未明确是否需要整体事务。对于 `CREATE INDEX CONCURRENTLY` 这类不能放事务里的语句，当前策略可执行，但失败回滚能力有限。 |
+| 风险分类细粒度判断 | 部分实现 | 已区分 `varchar`/`text`/`numeric` 变更、`USING` 转换、存储格式变化、时区语义变化、AST volatile default、DROP/TRUNCATE 大表风险、DML 估算影响行数；尚未覆盖所有 PostgreSQL 类型组合和表达式语义。 |
+| `CREATE OR REPLACE VIEW` 兼容性风险 | 部分实现 | 已对已有视图追加兼容性风险提示；尚未解析新 SELECT 输出列并精确比较列名、顺序、类型，也没有依赖链分析。 |
+| SQL 事务策略 | 部分实现 | 当前是逐条执行，不启用文件级事务；已记录每条 SQL 是否可放入事务，但尚未提供文件级事务执行模式。 |
 | schema 推断 | 部分实现 | 当前只从首个显式 schema 对象推断；如果 SQL 全部不带 schema，仍不会自动落到某个默认 schema。 |
-| 视图依赖处理 | 部分实现 | 当前只做依赖检测和提示，不自动备份、drop、重建。 |
+| 视图依赖处理 | 部分实现 | 已自动备份依赖视图定义并导出 drop/recreate 计划；暂不自动 drop/recreate。 |
 | 实例管理 | 部分实现 | 当前展示系统设置里的 PostgreSQL 连接和运行状态，不维护独立实例资产、集群拓扑、备份策略等管理信息。根据当前方向，实例管理与 SQL 执行无关。 |
 
 ### 未实现但文档已有规划
 
 | 功能点 | 当前状态 | 说明 |
 |---|---|---|
-| 专用执行账号/SET ROLE 模型 | 未实现 | 当前只使用系统设置中的 PostgreSQL 用户连接执行，没有配置 `sql_executor`、`biz_owner` 或执行前 `SET ROLE`。 |
-| 不默认使用 superuser 的强约束 | 未实现 | 文档是权限建议，系统当前没有检测连接用户是否为 superuser，也没有阻止 superuser 执行。 |
-| 自动备份依赖视图定义 | 未实现 | `SQLViewBackup` 仅有模型，未在执行前保存 `pg_get_viewdef`。 |
-| 自动 drop/recreate 依赖视图 | 未实现 | 当前不生成视图重建计划，也不自动按依赖顺序重建。 |
-| 大表识别 | 未实现 | 未查询 `pg_total_relation_size`、`pg_class.reltuples`，也没有基于表大小调整风险级别。 |
-| 非 `CONCURRENTLY` 索引创建拦截 | 未实现 | 当前只标记 WARN，不自动改写、不强拦截。 |
+| 专用执行账号/SET ROLE 模型 | 暂不规划 | 当前策略为 PostgreSQL 配置账号执行，依赖平台风险拦截、提示和审计；`SET ROLE` 仅作为可选增强。 |
+| 不默认使用 superuser 的强约束 | 暂不规划 | 当前允许使用 `postgres` 执行，重点强化 SQL 风险识别和执行保护，不强制切换业务账号。 |
+| 自动 drop/recreate 依赖视图 | 未实现 | 当前只生成视图重建计划，不自动按依赖顺序重建。 |
+| 非 `CONCURRENTLY` 索引创建/删除拦截 | 部分实现 | 当前会标记 WARN，并发创建/删除索引会标记为非事务执行；暂不自动改写、不默认强拦截。 |
 | SQL 执行中取消 | 未实现 | 当前没有 cancel API，也没有前端取消按钮；只能等待超时或手工处理进程。 |
 | `psql` 兼容执行器 | 未实现 | 不支持 `\copy`、`\i`、`\set` 等 psql 元命令，也没有 SSH/psql 执行入口。 |
 | 超大 SQL 文件处理 | 未实现 | 当前会将文件内容整体读入内存并保存到数据库，未做流式解析、分片导入或后台任务化。 |
@@ -423,12 +413,12 @@ created_at
 
 ### 建议后续优先级
 
-1. **执行账号和权限校验**：先补 `SET ROLE`、superuser 检测、只读/高危权限边界。这是 SQL 执行风险控制的基础。
-2. **大表风险识别**：对 `ALTER COLUMN TYPE`、`SET NOT NULL`、`ADD CHECK`、`CREATE INDEX`、`DROP TABLE`、`TRUNCATE` 查询表大小和预估行数，给出更可信的风险提示。
-3. **细化字段类型变更风险**：区分 `varchar` 扩容、缩容、`USING` 转换、存储格式变化、默认值表达式等场景。
-4. **执行取消能力**：增加执行中的 cancel API 和前端按钮，避免长 SQL 只能等超时。
+1. **风险识别继续补齐**：持续补 PostgreSQL 类型组合、表达式语义、索引、约束、分区表、物化视图等风险规则。
+2. **大表风险识别扩展**：当前已覆盖 `DROP TABLE`、`TRUNCATE`、`ALTER COLUMN TYPE`、`SET NOT NULL`、`ADD CHECK`、`CREATE INDEX` 的基础大表风险，后续继续细化不同 SQL 类型阈值。
+3. **执行取消能力**：增加执行中的 cancel API 和前端按钮，避免长 SQL 只能等超时。
+4. **批量文件上传和批量执行增强**：补齐本地多文件、ZIP 上传、批量执行顺序、失败停止策略。
 5. **psql 兼容执行器**：作为特殊入口处理包含 psql 元命令或超大文件的脚本，不替代默认 pgx 执行。
-6. **视图自动备份和重建计划**：先生成可人工确认的重建 SQL，再考虑自动 drop/recreate。
+6. **视图自动重建增强**：当前只导出可人工处理的重建 SQL，后续再考虑自动 drop/recreate。
 
 ## 总体结论
 

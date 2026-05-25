@@ -202,23 +202,50 @@ func (s *PostgreSQLService) ParseSQL(req ParseSQLRequest) (*model.SQLChangeFile,
 	items := make([]model.SQLChangeStatement, 0, len(statements))
 	for _, sqlText := range statements {
 		analysis := AnalyzeSQLRisk(sqlText)
+		var viewDeps []ViewDependency
 		if analysis.SQLType == "ALTER_COLUMN_TYPE" {
 			analysis = s.enrichColumnTypeRiskWithMetadata(schemaName, sqlText, analysis)
-			if deps := s.findViewDependencies(schemaName, sqlText); len(deps) > 0 {
-				analysis.RiskReason = strings.TrimSpace(analysis.RiskReason + "；字段被以下视图依赖，直接修改可能失败: " + strings.Join(deps, ", "))
+			if deps, err := s.findViewDependenciesWithDefinitions(context.Background(), schemaName, sqlText); err == nil && len(deps) > 0 {
+				viewDeps = deps
+				names := make([]string, 0, len(deps))
+				for _, dep := range deps {
+					names = append(names, dep.Schema+"."+dep.View)
+				}
+				analysis.RiskLevel = "BLOCKED"
+				analysis.RiskReason = strings.TrimSpace(analysis.RiskReason + "；字段被以下视图依赖，已阻止直接执行，请导出重建 SQL 处理: " + strings.Join(names, ", "))
 			}
 		}
+		if analysis.SQLType == "DROP_TABLE" || analysis.SQLType == "TRUNCATE" {
+			analysis = s.enrichDestructiveTableRiskWithMetadata(schemaName, sqlText, analysis)
+		}
+		if isDMLRiskWithAffectedRows(analysis.SQLType) {
+			analysis = s.enrichDMLRiskWithExplainEstimate(schemaName, sqlText, analysis)
+		}
+		if isLargeTableSensitiveSQLType(analysis.SQLType) {
+			analysis = s.enrichLargeTableSensitiveRiskWithMetadata(schemaName, sqlText, analysis)
+		}
+		if analysis.SQLType == "CREATE_VIEW" {
+			analysis = s.enrichReplaceViewRiskWithMetadata(schemaName, sqlText, analysis)
+		}
+		strategy := DetermineExecutionStrategy(analysis)
 		item := model.SQLChangeStatement{
-			FileID:        file.ID,
-			LineNumber:    lineNumberForSQL(req.Content, sqlText),
-			SQLContent:    sqlText,
-			SQLType:       analysis.SQLType,
-			RiskLevel:     analysis.RiskLevel,
-			RiskReason:    analysis.RiskReason,
-			ExecuteStatus: defaultStatementStatus(analysis),
+			FileID:              file.ID,
+			LineNumber:          lineNumberForSQL(req.Content, sqlText),
+			SQLContent:          sqlText,
+			SQLType:             analysis.SQLType,
+			RiskLevel:           analysis.RiskLevel,
+			RiskReason:          analysis.RiskReason,
+			CanRunInTransaction: strategy.CanRunInTransaction,
+			ExecutionStrategy:   strategy.Name,
+			ExecuteStatus:       defaultStatementStatus(analysis),
 		}
 		if err := repository.DB.Create(&item).Error; err != nil {
 			return nil, nil, err
+		}
+		if len(viewDeps) > 0 {
+			if err := saveViewDependencyBackups(file.ID, item.ID, viewDeps); err != nil {
+				return nil, nil, err
+			}
 		}
 		items = append(items, item)
 	}
@@ -257,25 +284,154 @@ func (s *PostgreSQLService) enrichColumnTypeRiskWithMetadata(defaultSchema, sqlT
 	return analysis
 }
 
-func (s *PostgreSQLService) findViewDependencies(defaultSchema, sqlText string) []string {
-	ref := parseAlterColumnTypeRef(sqlText, defaultSchema)
-	if ref.schema == "" || ref.table == "" || ref.column == "" {
-		return nil
+func (s *PostgreSQLService) enrichDestructiveTableRiskWithMetadata(defaultSchema, sqlText string, analysis RiskAnalysis) RiskAnalysis {
+	ref := parseDestructiveTableRef(sqlText, defaultSchema)
+	if ref.schema == "" || ref.table == "" {
+		return analysis
 	}
 	cfg, err := s.loadConfig()
 	if err != nil {
-		return nil
+		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
 	}
 	db, err := openPostgreSQL(cfg)
 	if err != nil {
-		return nil
+		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
 	}
 	defer db.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	stats, err := NewSQLMetadataInspector(db).GetTableStats(ctx, ref.schema, ref.table)
+	if err != nil {
+		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
+	}
+	return classifyDestructiveTableOperation(analysis.SQLType, stats)
+}
+
+func (s *PostgreSQLService) enrichLargeTableSensitiveRiskWithMetadata(defaultSchema, sqlText string, analysis RiskAnalysis) RiskAnalysis {
+	ref := parseTableRefForRiskOperation(sqlText, defaultSchema)
+	if ref.schema == "" || ref.table == "" {
+		return analysis
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
+	}
+	db, err := openPostgreSQL(cfg)
+	if err != nil {
+		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stats, err := NewSQLMetadataInspector(db).GetTableStats(ctx, ref.schema, ref.table)
+	if err != nil {
+		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
+	}
+	return classifyLargeTableSensitiveOperation(analysis, stats)
+}
+
+func (s *PostgreSQLService) enrichDMLRiskWithExplainEstimate(defaultSchema, sqlText string, analysis RiskAnalysis) RiskAnalysis {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return analysis
+	}
+	db, err := openPostgreSQL(cfg)
+	if err != nil {
+		return analysis
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return analysis
+	}
+	defer conn.Close()
+	if strings.TrimSpace(defaultSchema) != "" {
+		if _, err := conn.ExecContext(ctx, "SELECT set_config('search_path', $1, false)", searchPathValue(defaultSchema)); err != nil {
+			return analysis
+		}
+	}
+	explainSQL, ok := buildDMLExplainSQL(sqlText)
+	if !ok {
+		return analysis
+	}
+	var explainJSON string
+	if err := conn.QueryRowContext(ctx, explainSQL).Scan(&explainJSON); err != nil {
+		return analysis
+	}
+	estimatedRows, ok := extractPlanRowsFromExplainJSON(explainJSON)
+	if !ok {
+		return analysis
+	}
+	return classifyDMLAffectedRows(analysis, estimatedRows)
+}
+
+func (s *PostgreSQLService) enrichReplaceViewRiskWithMetadata(defaultSchema, sqlText string, analysis RiskAnalysis) RiskAnalysis {
+	ref := parseCreateOrReplaceViewRef(sqlText, defaultSchema)
+	if ref.schema == "" || ref.table == "" {
+		return analysis
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return analysis
+	}
+	db, err := openPostgreSQL(cfg)
+	if err != nil {
+		return analysis
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	columns, err := NewSQLMetadataInspector(db).GetViewColumns(ctx, ref.schema, ref.table)
+	if err != nil || len(columns) == 0 {
+		return analysis
+	}
+	result := compareViewColumns(columns, nil)
+	if result.Exists && !result.Compatible {
+		return appendRiskReason(analysis, result.Reason)
+	}
+	return appendRiskReason(analysis, "重建视图可能受列名/顺序/类型兼容性限制")
+}
+
+func (s *PostgreSQLService) findViewDependencies(defaultSchema, sqlText string) []string {
+	deps, err := s.findViewDependenciesWithDefinitions(context.Background(), defaultSchema, sqlText)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		names = append(names, dep.Schema+"."+dep.View)
+	}
+	return names
+}
+
+func (s *PostgreSQLService) findViewDependenciesWithDefinitions(ctx context.Context, defaultSchema, sqlText string) ([]ViewDependency, error) {
+	ref := parseAlterColumnTypeRef(sqlText, defaultSchema)
+	if ref.schema == "" || ref.table == "" || ref.column == "" {
+		return nil, nil
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	db, err := openPostgreSQL(cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	rows, err := db.QueryContext(ctx, `
-SELECT dependent_ns.nspname || '.' || dependent_view.relname
+SELECT dependent_ns.nspname,
+       dependent_view.relname,
+       dependent_view.relkind,
+       pg_get_viewdef(dependent_view.oid, true)
 FROM pg_depend d
 JOIN pg_rewrite r ON r.oid = d.objid
 JOIN pg_class dependent_view ON dependent_view.oid = r.ev_class
@@ -289,23 +445,176 @@ WHERE source_ns.nspname = $1
   AND dependent_view.relkind IN ('v', 'm')
 ORDER BY dependent_ns.nspname, dependent_view.relname`, ref.schema, ref.table, ref.column)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
-	var deps []string
+	var deps []ViewDependency
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err == nil {
-			deps = append(deps, name)
+		var dep ViewDependency
+		if err := rows.Scan(&dep.Schema, &dep.View, &dep.Kind, &dep.Definition); err != nil {
+			return nil, err
+		}
+		deps = append(deps, dep)
+	}
+	return deps, rows.Err()
+}
+
+func saveViewDependencyBackups(fileID, statementID uint, deps []ViewDependency) error {
+	for _, dep := range deps {
+		plan := BuildViewRebuildPlan(dep)
+		backup := model.SQLViewBackup{
+			FileID:       fileID,
+			StatementID:  statementID,
+			SchemaName:   dep.Schema,
+			ViewName:     dep.View,
+			Definition:   dep.Definition,
+			DropSQL:      plan.DropSQL,
+			CreateSQL:    plan.CreateSQL,
+			BackupReason: "ALTER COLUMN TYPE 依赖视图备份",
+		}
+		if err := repository.DB.Create(&backup).Error; err != nil {
+			return err
 		}
 	}
-	return deps
+	return nil
 }
 
 type alterColumnRef struct {
 	schema string
 	table  string
 	column string
+}
+
+type tableRef struct {
+	schema string
+	table  string
+}
+
+func parseDestructiveTableRef(sqlText, defaultSchema string) tableRef {
+	name := destructiveTableNameWithSchema(sqlText)
+	if name == "" {
+		return tableRef{}
+	}
+	parts := strings.Split(name, ".")
+	schema := strings.TrimSpace(defaultSchema)
+	table := strings.Trim(parts[len(parts)-1], `"`)
+	if len(parts) > 1 {
+		schema = strings.Trim(parts[len(parts)-2], `"`)
+	}
+	if schema == "" {
+		schema = "public"
+	}
+	return tableRef{schema: schema, table: table}
+}
+
+func parseCreateOrReplaceViewRef(sqlText, defaultSchema string) tableRef {
+	if ref := parseCreateOrReplaceViewRefFromAST(sqlText, defaultSchema); ref.schema != "" && ref.table != "" {
+		return ref
+	}
+	if !regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+VIEW\b`).MatchString(sqlText) {
+		return tableRef{}
+	}
+	re := regexp.MustCompile(`(?i)^\s*CREATE\s+OR\s+REPLACE\s+VIEW\s+(?:(?:"?([a-zA-Z_][\w]*)"?)[.])?"?([a-zA-Z_][\w]*)"?\b`)
+	m := re.FindStringSubmatch(sqlText)
+	if len(m) == 0 {
+		return tableRef{}
+	}
+	schema := strings.TrimSpace(m[1])
+	if schema == "" {
+		schema = strings.TrimSpace(defaultSchema)
+	}
+	if schema == "" {
+		schema = "public"
+	}
+	return tableRef{schema: schema, table: m[2]}
+}
+
+func parseTableRefForRiskOperation(sqlText, defaultSchema string) tableRef {
+	if ref := parseTableRefForRiskOperationFromAST(sqlText, defaultSchema); ref.schema != "" && ref.table != "" {
+		return ref
+	}
+	re := regexp.MustCompile(`(?i)^\s*(?:ALTER\s+TABLE|CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+CONCURRENTLY)?\s+\S+\s+ON)\s+(?:(?:"?([a-zA-Z_][\w]*)"?)[.])?"?([a-zA-Z_][\w]*)"?`)
+	matches := re.FindStringSubmatch(sqlText)
+	if len(matches) == 0 {
+		return tableRef{}
+	}
+	schema := strings.TrimSpace(matches[1])
+	if schema == "" {
+		schema = strings.TrimSpace(defaultSchema)
+	}
+	if schema == "" {
+		schema = "public"
+	}
+	return tableRef{schema: schema, table: matches[2]}
+}
+
+func parseTableRefForRiskOperationFromAST(sqlText, defaultSchema string) tableRef {
+	tree, err := pg_query.Parse(sqlText)
+	if err != nil || tree == nil || len(tree.GetStmts()) == 0 {
+		return tableRef{}
+	}
+	stmt := tree.GetStmts()[0].GetStmt()
+	var relation *pg_query.RangeVar
+	switch {
+	case stmt.GetAlterTableStmt() != nil:
+		relation = stmt.GetAlterTableStmt().GetRelation()
+	case stmt.GetIndexStmt() != nil:
+		relation = stmt.GetIndexStmt().GetRelation()
+	}
+	if relation == nil {
+		return tableRef{}
+	}
+	schema := strings.TrimSpace(relation.GetSchemaname())
+	if schema == "" {
+		schema = strings.TrimSpace(defaultSchema)
+	}
+	if schema == "" {
+		schema = "public"
+	}
+	return tableRef{schema: schema, table: relation.GetRelname()}
+}
+
+func parseCreateOrReplaceViewRefFromAST(sqlText, defaultSchema string) tableRef {
+	tree, err := pg_query.Parse(sqlText)
+	if err != nil || tree == nil || len(tree.GetStmts()) == 0 {
+		return tableRef{}
+	}
+	viewStmt := tree.GetStmts()[0].GetStmt().GetViewStmt()
+	if viewStmt == nil || !viewStmt.GetReplace() || viewStmt.GetView() == nil {
+		return tableRef{}
+	}
+	view := viewStmt.GetView()
+	schema := strings.TrimSpace(view.GetSchemaname())
+	if schema == "" {
+		schema = strings.TrimSpace(defaultSchema)
+	}
+	if schema == "" {
+		schema = "public"
+	}
+	return tableRef{schema: schema, table: view.GetRelname()}
+}
+
+func destructiveTableNameWithSchema(sqlText string) string {
+	normalized := normalizeSQL(sqlText)
+	upper := strings.ToUpper(normalized)
+	rest := ""
+	switch {
+	case strings.HasPrefix(upper, "DROP TABLE IF EXISTS "):
+		rest = strings.TrimSpace(normalized[len("DROP TABLE IF EXISTS "):])
+	case strings.HasPrefix(upper, "DROP TABLE "):
+		rest = strings.TrimSpace(normalized[len("DROP TABLE "):])
+	case strings.HasPrefix(upper, "TRUNCATE TABLE ONLY "):
+		rest = strings.TrimSpace(normalized[len("TRUNCATE TABLE ONLY "):])
+	case strings.HasPrefix(upper, "TRUNCATE TABLE "):
+		rest = strings.TrimSpace(normalized[len("TRUNCATE TABLE "):])
+	case strings.HasPrefix(upper, "TRUNCATE ONLY "):
+		rest = strings.TrimSpace(normalized[len("TRUNCATE ONLY "):])
+	case strings.HasPrefix(upper, "TRUNCATE "):
+		rest = strings.TrimSpace(normalized[len("TRUNCATE "):])
+	default:
+		return ""
+	}
+	return firstSQLName(rest)
 }
 
 func parseAlterColumnTypeRef(sqlText, defaultSchema string) alterColumnRef {
@@ -668,17 +977,65 @@ func (s *PostgreSQLService) BuildNotExecutableSQLForFile(id uint) (string, error
 	if err != nil {
 		return "", err
 	}
+	var backups []model.SQLViewBackup
+	if err := repository.DB.Where("file_id = ?", id).Order("statement_id ASC, id ASC").Find(&backups).Error; err != nil {
+		return "", err
+	}
+	backupsByStatement := make(map[uint][]model.SQLViewBackup)
+	for _, backup := range backups {
+		backupsByStatement[backup.StatementID] = append(backupsByStatement[backup.StatementID], backup)
+	}
 	exportItems := make([]SQLExportStatement, 0, len(statements))
+	parts := make([]string, 0, len(statements))
 	for _, stmt := range statements {
-		exportItems = append(exportItems, SQLExportStatement{
+		item := SQLExportStatement{
 			LineNumber:     stmt.LineNumber,
 			SQLContent:     stmt.SQLContent,
 			ExecuteStatus:  stmt.ExecuteStatus,
 			ExecuteMessage: stmt.ExecuteMessage,
 			RiskReason:     stmt.RiskReason,
-		})
+		}
+		exportItems = append(exportItems, item)
+		if !shouldExportSQL(stmt.ExecuteStatus) {
+			continue
+		}
+		if viewBackups := backupsByStatement[stmt.ID]; len(viewBackups) > 0 {
+			parts = append(parts, buildViewBackupExport(viewBackups, stmt.SQLContent))
+			continue
+		}
+		parts = append(parts, BuildNotExecutableSQL([]SQLExportStatement{item}))
+	}
+	if len(parts) > 0 {
+		return strings.TrimSpace(strings.Join(parts, "\n\n")), nil
 	}
 	return BuildNotExecutableSQL(exportItems), nil
+}
+
+func buildViewBackupExport(backups []model.SQLViewBackup, originalSQL string) string {
+	var b strings.Builder
+	for _, backup := range backups {
+		b.WriteString(fmt.Sprintf("-- View dependency rebuild plan for %s.%s\n", backup.SchemaName, backup.ViewName))
+		b.WriteString(strings.TrimSpace(backup.DropSQL))
+		if !strings.HasSuffix(strings.TrimSpace(backup.DropSQL), ";") {
+			b.WriteString(";")
+		}
+		b.WriteString("\n\n")
+	}
+	b.WriteString("-- Original SQL\n")
+	b.WriteString(strings.TrimSpace(originalSQL))
+	if !strings.HasSuffix(strings.TrimSpace(originalSQL), ";") {
+		b.WriteString(";")
+	}
+	b.WriteString("\n\n")
+	for _, backup := range backups {
+		b.WriteString(fmt.Sprintf("-- Recreate view %s.%s\n", backup.SchemaName, backup.ViewName))
+		b.WriteString(strings.TrimSpace(backup.CreateSQL))
+		if !strings.HasSuffix(strings.TrimSpace(backup.CreateSQL), ";") {
+			b.WriteString(";")
+		}
+		b.WriteString("\n\n")
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func (s *PostgreSQLService) loadConfig() (PostgreSQLConfig, error) {
@@ -843,6 +1200,26 @@ func defaultStatementStatus(analysis RiskAnalysis) string {
 		return "NOT_EXECUTABLE"
 	}
 	return "PENDING"
+}
+
+func appendRiskReason(analysis RiskAnalysis, reason string) RiskAnalysis {
+	analysis.RiskReason = appendRiskText(analysis.RiskReason, reason)
+	return analysis
+}
+
+func appendRiskText(current, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return strings.TrimSpace(current)
+	}
+	current = strings.TrimSpace(current)
+	if current == "" {
+		return reason
+	}
+	if strings.Contains(current, reason) {
+		return current
+	}
+	return strings.TrimSpace(current + "；" + reason)
 }
 
 func stripSQLComments(input string) string {

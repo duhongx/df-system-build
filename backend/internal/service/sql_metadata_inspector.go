@@ -3,10 +3,16 @@ package service
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+)
+
+const (
+	dmlAffectedRowsWarnThreshold  = 100_000
+	dmlAffectedRowsBlockThreshold = 1_000_000
 )
 
 type SQLMetadataInspector struct {
@@ -34,6 +40,18 @@ type ColumnInfo struct {
 	HasNumericScale           bool
 	IsNullable                bool
 	ColumnDefault             string
+}
+
+type ViewColumn struct {
+	Name     string
+	DataType string
+	Ordinal  int
+}
+
+type ViewCompatibilityResult struct {
+	Exists     bool
+	Compatible bool
+	Reason     string
 }
 
 func NewSQLMetadataInspector(db *sql.DB) *SQLMetadataInspector {
@@ -121,6 +139,149 @@ WHERE table_schema = $1
 	return info, nil
 }
 
+func (i *SQLMetadataInspector) GetViewColumns(ctx context.Context, schemaName, viewName string) ([]ViewColumn, error) {
+	if i == nil || i.db == nil {
+		return nil, fmt.Errorf("PostgreSQL 连接未初始化")
+	}
+	rows, err := i.db.QueryContext(ctx, `
+SELECT column_name, data_type, ordinal_position
+FROM information_schema.columns
+WHERE table_schema = $1
+  AND table_name = $2
+ORDER BY ordinal_position`, schemaName, viewName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var columns []ViewColumn
+	for rows.Next() {
+		var column ViewColumn
+		if err := rows.Scan(&column.Name, &column.DataType, &column.Ordinal); err != nil {
+			return nil, err
+		}
+		columns = append(columns, column)
+	}
+	return columns, rows.Err()
+}
+
+func (i *SQLMetadataInspector) EstimateDMLAffectedRows(ctx context.Context, sqlText string) (int64, error) {
+	if i == nil || i.db == nil {
+		return 0, fmt.Errorf("PostgreSQL 连接未初始化")
+	}
+	explainSQL, ok := buildDMLExplainSQL(sqlText)
+	if !ok {
+		return 0, fmt.Errorf("仅支持 UPDATE/DELETE 影响行数预估")
+	}
+	var explainJSON string
+	if err := i.db.QueryRowContext(ctx, explainSQL).Scan(&explainJSON); err != nil {
+		return 0, err
+	}
+	rows, ok := extractPlanRowsFromExplainJSON(explainJSON)
+	if !ok {
+		return 0, fmt.Errorf("无法解析 EXPLAIN 结果")
+	}
+	return rows, nil
+}
+
+func buildDMLExplainSQL(sqlText string) (string, bool) {
+	trimmed := strings.TrimSpace(strings.TrimSuffix(sqlText, ";"))
+	upper := strings.ToUpper(trimmed)
+	if !strings.HasPrefix(upper, "UPDATE ") && !strings.HasPrefix(upper, "DELETE ") {
+		return "", false
+	}
+	return "EXPLAIN (FORMAT JSON) " + trimmed, true
+}
+
+func extractPlanRowsFromExplainJSON(explainJSON string) (int64, bool) {
+	var root []map[string]any
+	if err := json.Unmarshal([]byte(explainJSON), &root); err != nil || len(root) == 0 {
+		return 0, false
+	}
+	plan, ok := root[0]["Plan"].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	rows, ok := maxPlanRows(plan)
+	return rows, ok
+}
+
+func maxPlanRows(plan map[string]any) (int64, bool) {
+	var maxRows int64
+	found := false
+	if raw, ok := plan["Plan Rows"]; ok {
+		if rows, ok := jsonNumberToInt64(raw); ok {
+			maxRows = rows
+			found = true
+		}
+	}
+	if children, ok := plan["Plans"].([]any); ok {
+		for _, child := range children {
+			childPlan, ok := child.(map[string]any)
+			if !ok {
+				continue
+			}
+			if childRows, childOK := maxPlanRows(childPlan); childOK {
+				if !found || childRows > maxRows {
+					maxRows = childRows
+				}
+				found = true
+			}
+		}
+	}
+	return maxRows, found
+}
+
+func jsonNumberToInt64(value any) (int64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int64(v), true
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	default:
+		return 0, false
+	}
+}
+
+func classifyDMLAffectedRows(base RiskAnalysis, estimatedRows int64) RiskAnalysis {
+	if base.SQLType != "UPDATE" && base.SQLType != "DELETE" {
+		return base
+	}
+	base.RiskReason = appendRiskText(base.RiskReason, fmt.Sprintf("EXPLAIN 估算影响行数 %d", estimatedRows))
+	switch {
+	case estimatedRows > dmlAffectedRowsBlockThreshold:
+		base.RiskLevel = "BLOCKED"
+		base.RiskReason = appendRiskText(base.RiskReason, "超出内置高危阈值，已阻止直接执行")
+	case estimatedRows > dmlAffectedRowsWarnThreshold && riskRank(base.RiskLevel) < riskRank("WARN"):
+		base.RiskLevel = "WARN"
+		base.RiskReason = appendRiskText(base.RiskReason, "影响行数较大，请确认 WHERE 条件和执行窗口")
+	}
+	return base
+}
+
+func compareViewColumns(oldCols, newCols []ViewColumn) ViewCompatibilityResult {
+	if len(oldCols) == 0 {
+		return ViewCompatibilityResult{Exists: false, Compatible: true}
+	}
+	if len(newCols) == 0 {
+		return ViewCompatibilityResult{Exists: true, Compatible: false, Reason: "无法推断新视图列定义，重建视图可能受列名/顺序/类型兼容性限制"}
+	}
+	if len(oldCols) != len(newCols) {
+		return ViewCompatibilityResult{Exists: true, Compatible: false, Reason: "视图输出列数量变化，CREATE OR REPLACE VIEW 可能不兼容"}
+	}
+	for i := range oldCols {
+		if !strings.EqualFold(oldCols[i].Name, newCols[i].Name) {
+			return ViewCompatibilityResult{Exists: true, Compatible: false, Reason: "视图输出列顺序或列名变化，CREATE OR REPLACE VIEW 可能不兼容"}
+		}
+		if !strings.EqualFold(oldCols[i].DataType, newCols[i].DataType) {
+			return ViewCompatibilityResult{Exists: true, Compatible: false, Reason: "视图输出列类型变化，CREATE OR REPLACE VIEW 可能不兼容"}
+		}
+	}
+	return ViewCompatibilityResult{Exists: true, Compatible: true}
+}
+
 func classifyColumnTypeChangeWithMetadata(column ColumnInfo, targetType string, hasUsing bool) RiskAnalysis {
 	targetType = strings.TrimSpace(targetType)
 	reasons := make([]string, 0, 2)
@@ -136,6 +297,22 @@ func classifyColumnTypeChangeWithMetadata(column ColumnInfo, targetType string, 
 			reasons = append(reasons, fmt.Sprintf("varchar 长度未变化: %d", oldLen))
 		default:
 			reasons = append(reasons, fmt.Sprintf("varchar 长度缩容可能截断数据: %d -> %d", oldLen, newLen))
+		}
+	} else if isColumnVarchar(column) && isTextType(targetType) {
+		level = "LOW"
+		reasons = append(reasons, "varchar 转 text，通常为放宽长度限制")
+	} else if isColumnText(column) && isVarcharType(targetType) {
+		reasons = append(reasons, "text 转 varchar(n) 需要校验已有数据长度，可能失败")
+	} else if oldPrecision, oldScale, newPrecision, newScale, ok := compareNumericPrecision(column, targetType); ok {
+		switch {
+		case newPrecision < oldPrecision || newScale < oldScale:
+			reasons = append(reasons, fmt.Sprintf("numeric 精度缩小可能导致数据越界或舍入: (%d,%d) -> (%d,%d)", oldPrecision, oldScale, newPrecision, newScale))
+		case newPrecision == oldPrecision && newScale == oldScale:
+			level = "LOW"
+			reasons = append(reasons, fmt.Sprintf("numeric 精度未变化: (%d,%d)", oldPrecision, oldScale))
+		default:
+			level = "LOW"
+			reasons = append(reasons, fmt.Sprintf("numeric 精度放宽: (%d,%d) -> (%d,%d)", oldPrecision, oldScale, newPrecision, newScale))
 		}
 	} else {
 		fromType := displayColumnType(column)
@@ -173,6 +350,18 @@ func isColumnVarchar(column ColumnInfo) bool {
 	return dataType == "character varying" || dataType == "varchar" || udtName == "varchar"
 }
 
+func isColumnText(column ColumnInfo) bool {
+	dataType := strings.ToLower(strings.TrimSpace(column.DataType))
+	udtName := strings.ToLower(strings.TrimSpace(column.UDTName))
+	return dataType == "text" || udtName == "text"
+}
+
+func isColumnNumeric(column ColumnInfo) bool {
+	dataType := strings.ToLower(strings.TrimSpace(column.DataType))
+	udtName := strings.ToLower(strings.TrimSpace(column.UDTName))
+	return dataType == "numeric" || dataType == "decimal" || udtName == "numeric"
+}
+
 func parseVarcharLength(typeName string) (int64, bool) {
 	re := regexp.MustCompile(`(?i)\b(?:varchar|character\s+varying)\s*\(\s*(\d+)\s*\)`)
 	matches := re.FindStringSubmatch(typeName)
@@ -183,9 +372,39 @@ func parseVarcharLength(typeName string) (int64, bool) {
 	return n, err == nil
 }
 
+func compareNumericPrecision(column ColumnInfo, targetType string) (int64, int64, int64, int64, bool) {
+	if !isColumnNumeric(column) || !column.HasNumericPrecision || !column.HasNumericScale || !isNumericType(targetType) {
+		return 0, 0, 0, 0, false
+	}
+	precision, scale, ok := parseNumericPrecision(targetType)
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	return column.NumericPrecision, column.NumericScale, precision, scale, true
+}
+
+func parseNumericPrecision(typeName string) (int64, int64, bool) {
+	re := regexp.MustCompile(`(?i)\b(?:numeric|decimal)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)`)
+	matches := re.FindStringSubmatch(typeName)
+	if len(matches) < 3 {
+		return 0, 0, false
+	}
+	precision, precisionErr := strconv.ParseInt(matches[1], 10, 64)
+	scale, scaleErr := strconv.ParseInt(matches[2], 10, 64)
+	return precision, scale, precisionErr == nil && scaleErr == nil
+}
+
+func isTextType(typeName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(typeName))
+	return normalized == "text"
+}
+
 func displayColumnType(column ColumnInfo) string {
 	if isColumnVarchar(column) && column.HasCharacterMaximumLength {
 		return fmt.Sprintf("varchar(%d)", column.CharacterMaximumLength)
+	}
+	if isColumnNumeric(column) && column.HasNumericPrecision && column.HasNumericScale {
+		return fmt.Sprintf("numeric(%d,%d)", column.NumericPrecision, column.NumericScale)
 	}
 	if strings.TrimSpace(column.DataType) != "" {
 		return strings.TrimSpace(column.DataType)
