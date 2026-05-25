@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"net/http"
 	"strconv"
 
 	"df-build-server/internal/middleware"
@@ -24,9 +25,17 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 	{
 		g.GET("/instance", h.Instance)
 		g.GET("/sql-files", h.ListSQLFiles)
+		g.GET("/sql-files/todo", h.ListTodoSQLFiles)
+		g.GET("/sql-files/done", h.ListDoneSQLFiles)
 		g.GET("/sql-files/:id", h.GetSQLFile)
+		g.GET("/sql-files/:id/not-executable.sql", h.ExportNotExecutableSQL)
 		g.POST("/sql-files/parse", h.ParseSQL)
 		g.POST("/sql-files/:id/execute", h.ExecuteSQLFile)
+		g.POST("/sql-files/save", h.ParseSQL)
+		g.POST("/sql-files/import-server", h.ImportServerSQL)
+		g.POST("/sql-files/execute-content", h.ExecuteSQLContent)
+		g.POST("/sql-files/:id/skip", h.SkipSQLFile)
+		g.DELETE("/sql-files/:id", h.DeleteSQLFile)
 		g.POST("/sql-statements/:id/skip", h.SkipSQLStatement)
 	}
 }
@@ -56,9 +65,27 @@ func (h *PostgreSQLHandler) ParseSQL(c *gin.Context) {
 
 func (h *PostgreSQLHandler) ExecuteSQLFile(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	file, statements, err := h.svc.ExecuteSQLFile(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
+	var req struct {
+		Options service.SQLExecuteOptions `json:"options"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	file, statements, err := h.svc.ExecuteSQLFileWithOptions(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
 	if err != nil {
 		response.Fail(c, 14003, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"file": file, "statements": statements})
+}
+
+func (h *PostgreSQLHandler) ExecuteSQLContent(c *gin.Context) {
+	var req service.ExecuteSQLContentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 14007, "参数错误")
+		return
+	}
+	file, statements, err := h.svc.ExecuteSQLContent(c.Request.Context(), req, middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14007, err.Error())
 		return
 	}
 	response.OK(c, gin.H{"file": file, "statements": statements})
@@ -75,6 +102,25 @@ func (h *PostgreSQLHandler) ListSQLFiles(c *gin.Context) {
 	response.OKWithPage(c, files, total, page, pageSize)
 }
 
+func (h *PostgreSQLHandler) ListTodoSQLFiles(c *gin.Context) {
+	h.listSQLFilesByGroup(c, "todo")
+}
+
+func (h *PostgreSQLHandler) ListDoneSQLFiles(c *gin.Context) {
+	h.listSQLFilesByGroup(c, "done")
+}
+
+func (h *PostgreSQLHandler) listSQLFilesByGroup(c *gin.Context, group string) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+	files, total, err := h.svc.ListSQLFilesByStatus(page, pageSize, group)
+	if err != nil {
+		response.Fail(c, 14004, err.Error())
+		return
+	}
+	response.OKWithPage(c, files, total, page, pageSize)
+}
+
 func (h *PostgreSQLHandler) GetSQLFile(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
 	file, statements, err := h.svc.GetSQLFile(uint(id))
@@ -83,6 +129,51 @@ func (h *PostgreSQLHandler) GetSQLFile(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"file": file, "statements": statements})
+}
+
+func (h *PostgreSQLHandler) ImportServerSQL(c *gin.Context) {
+	var req service.ImportServerSQLRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 14008, "参数错误")
+		return
+	}
+	count, err := h.svc.ImportServerSQL(req)
+	if err != nil {
+		response.Fail(c, 14008, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"count": count})
+}
+
+func (h *PostgreSQLHandler) DeleteSQLFile(c *gin.Context) {
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err := h.svc.DeleteSQLFile(uint(id)); err != nil {
+		response.Fail(c, 14009, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"deleted": true})
+}
+
+func (h *PostgreSQLHandler) SkipSQLFile(c *gin.Context) {
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+	file, err := h.svc.SkipSQLFile(uint(id), middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14010, err.Error())
+		return
+	}
+	response.OK(c, file)
+}
+
+func (h *PostgreSQLHandler) ExportNotExecutableSQL(c *gin.Context) {
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+	content, err := h.svc.BuildNotExecutableSQLForFile(uint(id))
+	if err != nil {
+		response.Fail(c, 14011, err.Error())
+		return
+	}
+	c.Header("Content-Type", "application/sql; charset=utf-8")
+	c.Header("Content-Disposition", `attachment; filename="not-executable.sql"`)
+	c.String(http.StatusOK, content)
 }
 
 func (h *PostgreSQLHandler) SkipSQLStatement(c *gin.Context) {

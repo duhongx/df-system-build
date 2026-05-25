@@ -8,12 +8,14 @@ type SQLChangeFile struct {
 	Environment    string     `gorm:"size:64" json:"environment"`
 	SchemaName     string     `gorm:"size:64" json:"schemaName"`
 	Version        string     `gorm:"size:64" json:"version"`
+	GroupSortNo    int        `json:"groupSortNo"`
 	FileName       string     `gorm:"size:255" json:"fileName"`
 	FileContent    string     `gorm:"type:text" json:"fileContent"`
 	ExecuteStatus  string     `gorm:"size:24;index" json:"executeStatus"`
 	ExecuteMessage string     `gorm:"type:text" json:"executeMessage"`
 	ExecuteUser    string     `gorm:"size:64" json:"executeUser"`
 	ExecuteTime    *time.Time `json:"executeTime"`
+	IsDeleted      bool       `gorm:"index" json:"isDeleted"`
 	CreatedAt      time.Time  `json:"createdAt"`
 	UpdatedAt      time.Time  `json:"updatedAt"`
 }

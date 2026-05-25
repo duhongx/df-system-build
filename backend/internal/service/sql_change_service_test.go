@@ -1,9 +1,29 @@
 package service
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"df-build-server/internal/model"
+	"df-build-server/internal/repository"
+	"df-build-server/pkg/config"
+	"df-build-server/pkg/logger"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+func setupSQLChangeServiceTestDB(t *testing.T) {
+	t.Helper()
+	logger.Init("error", "stdout", "")
+	dbPath := filepath.Join(t.TempDir(), "sql-change-service-test.db")
+	if err := repository.InitDB(&config.DatabaseConfig{Driver: "sqlite", SQLitePath: dbPath}); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	if err := repository.AutoMigrate(); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+}
 
 func TestSplitSQLStatementsHandlesSemicolonsInStringsAndComments(t *testing.T) {
 	input := `
@@ -134,5 +154,154 @@ func TestParseAlterColumnTypeRefHandlesQuotedIdentifiers(t *testing.T) {
 
 	if ref.schema != "billing" || ref.table != "Order Detail" || ref.column != "total amount" {
 		t.Fatalf("unexpected alter ref: %+v", ref)
+	}
+}
+
+func TestInferSQLSchemaFromQualifiedStatements(t *testing.T) {
+	schema := inferSQLSchema([]string{
+		`INSERT INTO "billing"."order_detail"(id) VALUES (1)`,
+		`ALTER TABLE public.patient ALTER COLUMN code TYPE varchar(20)`,
+	})
+
+	if schema != "billing" {
+		t.Fatalf("expected billing schema, got %q", schema)
+	}
+}
+
+func TestParseSQLAllowsSameFileNameAcrossVersionAndSchema(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	svc := NewPostgreSQLService()
+	if err := repository.DB.Create(&model.SQLChangeFile{
+		Version:       "15.3_SP13_20260524",
+		SchemaName:    "public",
+		FileName:      "change.sql",
+		FileContent:   "SELECT 1",
+		ExecuteStatus: "PENDING",
+	}).Error; err != nil {
+		t.Fatalf("create existing file: %v", err)
+	}
+
+	_, _, err := svc.ParseSQL(ParseSQLRequest{
+		Version:    "15.3_SP13_20260525",
+		SchemaName: "public",
+		FileName:   "change.sql",
+		Content:    "SELECT 2",
+		Overwrite:  false,
+	})
+	if err != nil {
+		t.Fatalf("same file name in a different version should be allowed: %v", err)
+	}
+}
+
+func TestGetSQLFileOrdersStatementsByLineNumber(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	file := model.SQLChangeFile{FileName: "ordered.sql", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	statements := []model.SQLChangeStatement{
+		{FileID: file.ID, LineNumber: 20, SQLContent: "SELECT 20", ExecuteStatus: "PENDING"},
+		{FileID: file.ID, LineNumber: 10, SQLContent: "SELECT 10", ExecuteStatus: "PENDING"},
+	}
+	if err := repository.DB.Create(&statements).Error; err != nil {
+		t.Fatalf("create statements: %v", err)
+	}
+
+	_, got, err := NewPostgreSQLService().GetSQLFile(file.ID)
+	if err != nil {
+		t.Fatalf("get sql file: %v", err)
+	}
+	if len(got) != 2 || got[0].LineNumber != 10 || got[1].LineNumber != 20 {
+		t.Fatalf("expected line order 10,20, got %#v", got)
+	}
+}
+
+func TestSearchPathValueUsesExactSchemaName(t *testing.T) {
+	if got := searchPathValue("his"); got != `"his"` {
+		t.Fatalf("expected quoted schema, got %q", got)
+	}
+	if got := searchPathValue(`billing"prod`); got != `"billing""prod"` {
+		t.Fatalf("expected escaped quoted schema, got %q", got)
+	}
+}
+
+func TestAnalyzeSQLRiskMarksBlockedSQLAsNotExecutable(t *testing.T) {
+	result := AnalyzeSQLRisk("ALTER SYSTEM SET work_mem = '64MB'")
+
+	if result.RiskLevel != "BLOCKED" {
+		t.Fatalf("expected BLOCKED risk, got %q", result.RiskLevel)
+	}
+	if defaultStatementStatus(result) != "NOT_EXECUTABLE" {
+		t.Fatalf("expected NOT_EXECUTABLE status, got %q", defaultStatementStatus(result))
+	}
+}
+
+func TestSQLExecuteOptionsSkipLegacyPostgreSQLErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		option  SQLExecuteOptions
+		err     error
+		message string
+		want    bool
+	}{
+		{
+			name:    "skip existing column",
+			option:  SQLExecuteOptions{SkipExistsColumn: true},
+			err:     &pgconn.PgError{Code: "42701", Message: "column already exists"},
+			message: "字段已存在",
+			want:    true,
+		},
+		{
+			name:    "skip existing object",
+			option:  SQLExecuteOptions{SkipExistsTable: true},
+			err:     &pgconn.PgError{Code: "42P07", Message: "relation already exists"},
+			message: "对象已存在",
+			want:    true,
+		},
+		{
+			name:    "skip unique conflict",
+			option:  SQLExecuteOptions{SkipUniqueConstraint: true},
+			err:     &pgconn.PgError{Code: "23505", Message: "duplicate key value violates unique constraint"},
+			message: "违反唯一约束，数据已存在",
+			want:    true,
+		},
+		{
+			name:   "does not skip disabled option",
+			option: SQLExecuteOptions{},
+			err:    &pgconn.PgError{Code: "42701", Message: "column already exists"},
+			want:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, msg := skipMessageForSQLError(tc.err, tc.option)
+			if got != tc.want {
+				t.Fatalf("expected skip=%v, got %v", tc.want, got)
+			}
+			if got && msg != tc.message {
+				t.Fatalf("expected message %q, got %q", tc.message, msg)
+			}
+		})
+	}
+}
+
+func TestExportNotExecutableSQLIncludesBlockedAndFailed(t *testing.T) {
+	statements := []SQLExportStatement{
+		{LineNumber: 1, SQLContent: "CREATE TABLE demo(id int)", ExecuteStatus: "SUCCESS"},
+		{LineNumber: 2, SQLContent: "ALTER SYSTEM SET work_mem = '64MB'", ExecuteStatus: "NOT_EXECUTABLE", ExecuteMessage: "禁止修改数据库系统级参数"},
+		{LineNumber: 3, SQLContent: "INSERT INTO demo VALUES (1)", ExecuteStatus: "FAILED", ExecuteMessage: "timeout"},
+	}
+
+	out := BuildNotExecutableSQL(statements)
+
+	if strings.Contains(out, "CREATE TABLE demo") {
+		t.Fatalf("success sql should not be exported: %s", out)
+	}
+	if !strings.Contains(out, "Line 2") || !strings.Contains(out, "ALTER SYSTEM") {
+		t.Fatalf("expected blocked sql in export: %s", out)
+	}
+	if !strings.Contains(out, "Line 3") || !strings.Contains(out, "timeout") {
+		t.Fatalf("expected failed sql in export: %s", out)
 	}
 }

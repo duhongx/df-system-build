@@ -1,11 +1,17 @@
 package service
 
 import (
+	"archive/zip"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,14 +68,40 @@ type ParseSQLRequest struct {
 	Environment string `json:"environment"`
 	SchemaName  string `json:"schemaName"`
 	Version     string `json:"version"`
+	GroupSortNo int    `json:"groupSortNo"`
 	FileName    string `json:"fileName"`
 	Content     string `json:"content" binding:"required"`
+	Overwrite   bool   `json:"overwrite"`
 }
 
 type RiskAnalysis struct {
 	SQLType    string
 	RiskLevel  string
 	RiskReason string
+}
+
+type SQLExecuteOptions struct {
+	SkipExistsColumn     bool `json:"skipExistsColumn"`
+	SkipExistsTable      bool `json:"skipExistsTable"`
+	SkipUniqueConstraint bool `json:"skipUniqueConstraint"`
+}
+
+type ExecuteSQLContentRequest struct {
+	ParseSQLRequest
+	Options SQLExecuteOptions `json:"options"`
+}
+
+type ImportServerSQLRequest struct {
+	FilePath  string `json:"filePath" binding:"required"`
+	Overwrite bool   `json:"overwrite"`
+}
+
+type SQLExportStatement struct {
+	LineNumber     int
+	SQLContent     string
+	ExecuteStatus  string
+	ExecuteMessage string
+	RiskReason     string
 }
 
 func (s *PostgreSQLService) GetInstanceInfo(ctx context.Context) (*PostgreSQLInstanceInfo, error) {
@@ -126,12 +158,40 @@ func (s *PostgreSQLService) ParseSQL(req ParseSQLRequest) (*model.SQLChangeFile,
 		return nil, nil, fmt.Errorf("SQL 内容为空")
 	}
 
+	fileName := defaultSQLFileName(req.FileName)
+	version, groupSortNo, schemaName := parseSQLFileMeta(fileName)
+	if strings.TrimSpace(req.Version) != "" {
+		version = strings.TrimSpace(req.Version)
+	}
+	if req.GroupSortNo > 0 {
+		groupSortNo = req.GroupSortNo
+	}
+	if strings.TrimSpace(req.SchemaName) != "" {
+		schemaName = strings.TrimSpace(req.SchemaName)
+	}
+	if schemaName == "" {
+		schemaName = inferSQLSchema(statements)
+	}
+
+	var exists model.SQLChangeFile
+	if fileName != "" {
+		err := repository.DB.Where("version = ? AND file_name = ? AND schema_name = ? AND is_deleted = ?", version, fileName, schemaName, false).First(&exists).Error
+		if err == nil {
+			if !req.Overwrite {
+				return nil, nil, fmt.Errorf("SQL 文件已存在")
+			}
+			exists.IsDeleted = true
+			_ = repository.DB.Save(&exists).Error
+		}
+	}
+
 	file := &model.SQLChangeFile{
 		SystemCode:    strings.TrimSpace(req.SystemCode),
 		Environment:   strings.TrimSpace(req.Environment),
-		SchemaName:    strings.TrimSpace(req.SchemaName),
-		Version:       strings.TrimSpace(req.Version),
-		FileName:      defaultSQLFileName(req.FileName),
+		SchemaName:    schemaName,
+		Version:       version,
+		GroupSortNo:   groupSortNo,
+		FileName:      fileName,
 		FileContent:   req.Content,
 		ExecuteStatus: "PENDING",
 	}
@@ -143,13 +203,10 @@ func (s *PostgreSQLService) ParseSQL(req ParseSQLRequest) (*model.SQLChangeFile,
 	for _, sqlText := range statements {
 		analysis := AnalyzeSQLRisk(sqlText)
 		if analysis.SQLType == "ALTER_COLUMN_TYPE" {
-			if deps := s.findViewDependencies(req.SchemaName, sqlText); len(deps) > 0 {
+			analysis = s.enrichColumnTypeRiskWithMetadata(schemaName, sqlText, analysis)
+			if deps := s.findViewDependencies(schemaName, sqlText); len(deps) > 0 {
 				analysis.RiskReason = strings.TrimSpace(analysis.RiskReason + "；字段被以下视图依赖，直接修改可能失败: " + strings.Join(deps, ", "))
 			}
-		}
-		status := "PENDING"
-		if analysis.RiskLevel == "BLOCKED" {
-			status = "BLOCKED"
 		}
 		item := model.SQLChangeStatement{
 			FileID:        file.ID,
@@ -158,7 +215,7 @@ func (s *PostgreSQLService) ParseSQL(req ParseSQLRequest) (*model.SQLChangeFile,
 			SQLType:       analysis.SQLType,
 			RiskLevel:     analysis.RiskLevel,
 			RiskReason:    analysis.RiskReason,
-			ExecuteStatus: status,
+			ExecuteStatus: defaultStatementStatus(analysis),
 		}
 		if err := repository.DB.Create(&item).Error; err != nil {
 			return nil, nil, err
@@ -166,6 +223,38 @@ func (s *PostgreSQLService) ParseSQL(req ParseSQLRequest) (*model.SQLChangeFile,
 		items = append(items, item)
 	}
 	return file, items, nil
+}
+
+func (s *PostgreSQLService) enrichColumnTypeRiskWithMetadata(defaultSchema, sqlText string, analysis RiskAnalysis) RiskAnalysis {
+	ref := parseAlterColumnTypeRef(sqlText, defaultSchema)
+	if ref.schema == "" || ref.table == "" || ref.column == "" {
+		return analysis
+	}
+	targetType := extractAlterColumnTargetType(sqlText)
+	if strings.TrimSpace(targetType) == "" {
+		return analysis
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return analysis
+	}
+	db, err := openPostgreSQL(cfg)
+	if err != nil {
+		return analysis
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	column, err := NewSQLMetadataInspector(db).GetColumnInfo(ctx, ref.schema, ref.table, ref.column)
+	if err != nil {
+		return analysis
+	}
+	metadataRisk := classifyColumnTypeChangeWithMetadata(column, targetType, hasAlterColumnUsing(sqlText))
+	if riskRank(metadataRisk.RiskLevel) >= riskRank(analysis.RiskLevel) || analysis.RiskLevel == "WARN" {
+		return metadataRisk
+	}
+	return analysis
 }
 
 func (s *PostgreSQLService) findViewDependencies(defaultSchema, sqlText string) []string {
@@ -266,13 +355,66 @@ func parseAlterColumnTypeRefFromAST(sqlText, defaultSchema string) alterColumnRe
 	return alterColumnRef{}
 }
 
+func inferSQLSchema(statements []string) string {
+	for _, sqlText := range statements {
+		tree, err := pg_query.Parse(sqlText)
+		if err != nil || tree == nil || len(tree.GetStmts()) == 0 {
+			continue
+		}
+		for _, rawStmt := range tree.GetStmts() {
+			if schema := schemaFromStmtNode(rawStmt.GetStmt()); schema != "" {
+				return schema
+			}
+		}
+	}
+	return ""
+}
+
+func schemaFromStmtNode(node *pg_query.Node) string {
+	if node == nil {
+		return ""
+	}
+	switch {
+	case node.GetInsertStmt() != nil:
+		return schemaFromRangeVar(node.GetInsertStmt().GetRelation())
+	case node.GetUpdateStmt() != nil:
+		return schemaFromRangeVar(node.GetUpdateStmt().GetRelation())
+	case node.GetDeleteStmt() != nil:
+		return schemaFromRangeVar(node.GetDeleteStmt().GetRelation())
+	case node.GetCreateStmt() != nil:
+		return schemaFromRangeVar(node.GetCreateStmt().GetRelation())
+	case node.GetAlterTableStmt() != nil:
+		return schemaFromRangeVar(node.GetAlterTableStmt().GetRelation())
+	case node.GetIndexStmt() != nil:
+		return schemaFromRangeVar(node.GetIndexStmt().GetRelation())
+	case node.GetViewStmt() != nil:
+		return schemaFromRangeVar(node.GetViewStmt().GetView())
+	default:
+		return ""
+	}
+}
+
+func schemaFromRangeVar(relation *pg_query.RangeVar) string {
+	if relation == nil {
+		return ""
+	}
+	return strings.TrimSpace(relation.GetSchemaname())
+}
+
 func (s *PostgreSQLService) ExecuteSQLFile(ctx context.Context, fileID uint, username string) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	return s.ExecuteSQLFileWithOptions(ctx, fileID, username, SQLExecuteOptions{})
+}
+
+func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileID uint, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
 	var file model.SQLChangeFile
-	if err := repository.DB.First(&file, fileID).Error; err != nil {
+	if err := repository.DB.Where("is_deleted = ?", false).First(&file, fileID).Error; err != nil {
 		return nil, nil, err
 	}
+	if file.ExecuteStatus == "SUCCESS" || file.ExecuteStatus == "SKIPPED" {
+		return nil, nil, fmt.Errorf("SQL 文件已执行过，不能重复执行")
+	}
 	var statements []model.SQLChangeStatement
-	if err := repository.DB.Where("file_id = ?", fileID).Order("id ASC").Find(&statements).Error; err != nil {
+	if err := repository.DB.Where("file_id = ?", fileID).Order("line_number ASC, id ASC").Find(&statements).Error; err != nil {
 		return nil, nil, err
 	}
 
@@ -304,8 +446,8 @@ func (s *PostgreSQLService) ExecuteSQLFile(ctx context.Context, fileID uint, use
 			skippedCount++
 			continue
 		}
-		if stmt.RiskLevel == "BLOCKED" {
-			stmt.ExecuteStatus = "BLOCKED"
+		if stmt.ExecuteStatus == "NOT_EXECUTABLE" || stmt.RiskLevel == "BLOCKED" {
+			stmt.ExecuteStatus = "NOT_EXECUTABLE"
 			stmt.ExecuteMessage = stmt.RiskReason
 			blockedCount++
 			repository.DB.Save(stmt)
@@ -317,7 +459,7 @@ func (s *PostgreSQLService) ExecuteSQLFile(ctx context.Context, fileID uint, use
 		stmt.ExecuteStatus = "RUNNING"
 		repository.DB.Save(stmt)
 
-		affected, sqlState, execErr := executeOneSQL(execCtx, db, stmt.SQLContent, stmt.SQLType)
+		affected, sqlState, execErr := executeOneSQL(execCtx, db, file.SchemaName, stmt.SQLContent, stmt.SQLType)
 		cancel()
 
 		now := time.Now()
@@ -326,9 +468,17 @@ func (s *PostgreSQLService) ExecuteSQLFile(ctx context.Context, fileID uint, use
 		stmt.AffectedRows = affected
 		stmt.SQLState = sqlState
 		if execErr != nil {
-			stmt.ExecuteStatus = "FAILED"
-			stmt.ExecuteMessage = execErr.Error()
-			failedCount++
+			if shouldSkip, skipMessage := skipMessageForSQLError(execErr, options); shouldSkip {
+				stmt.ExecuteStatus = "SKIPPED"
+				stmt.ExecuteMessage = skipMessage
+				skippedCount++
+			} else {
+				stmt.ExecuteStatus = "FAILED"
+				stmt.ExecuteMessage = execErr.Error()
+				failedCount++
+				repository.DB.Save(stmt)
+				break
+			}
 		} else {
 			stmt.ExecuteStatus = "SUCCESS"
 			stmt.ExecuteMessage = "执行成功"
@@ -343,11 +493,13 @@ func (s *PostgreSQLService) ExecuteSQLFile(ctx context.Context, fileID uint, use
 	case failedCount > 0:
 		file.ExecuteStatus = "PARTIAL_FAILED"
 	case blockedCount > 0 && successCount == 0 && skippedCount == 0:
-		file.ExecuteStatus = "BLOCKED"
+		file.ExecuteStatus = "NOT_EXECUTABLE"
+	case blockedCount > 0:
+		file.ExecuteStatus = "PARTIAL_FAILED"
 	default:
 		file.ExecuteStatus = "SUCCESS"
 	}
-	file.ExecuteMessage = fmt.Sprintf("成功 %d，失败 %d，拦截 %d，跳过 %d", successCount, failedCount, blockedCount, skippedCount)
+	file.ExecuteMessage = fmt.Sprintf("成功 %d，失败 %d，不可执行 %d，跳过 %d", successCount, failedCount, blockedCount, skippedCount)
 	repository.DB.Save(&file)
 	return &file, statements, nil
 }
@@ -370,7 +522,30 @@ func (s *PostgreSQLService) SkipSQLStatement(statementID uint, username string) 
 	return &stmt, nil
 }
 
+func (s *PostgreSQLService) SkipSQLFile(fileID uint, username string) (*model.SQLChangeFile, error) {
+	var file model.SQLChangeFile
+	if err := repository.DB.Where("is_deleted = ?", false).First(&file, fileID).Error; err != nil {
+		return nil, err
+	}
+	if file.ExecuteStatus == "SUCCESS" {
+		return nil, fmt.Errorf("已成功的 SQL 文件不能跳过")
+	}
+	now := time.Now()
+	file.ExecuteStatus = "SKIPPED"
+	file.ExecuteMessage = "手工标记不执行"
+	file.ExecuteUser = username
+	file.ExecuteTime = &now
+	if err := repository.DB.Save(&file).Error; err != nil {
+		return nil, err
+	}
+	return &file, nil
+}
+
 func (s *PostgreSQLService) ListSQLFiles(page, pageSize int) ([]model.SQLChangeFile, int64, error) {
+	return s.ListSQLFilesByStatus(page, pageSize, "")
+}
+
+func (s *PostgreSQLService) ListSQLFilesByStatus(page, pageSize int, statusGroup string) ([]model.SQLChangeFile, int64, error) {
 	if page <= 0 {
 		page = 1
 	}
@@ -379,24 +554,131 @@ func (s *PostgreSQLService) ListSQLFiles(page, pageSize int) ([]model.SQLChangeF
 	}
 	var total int64
 	var files []model.SQLChangeFile
-	query := repository.DB.Model(&model.SQLChangeFile{})
+	query := repository.DB.Model(&model.SQLChangeFile{}).Where("is_deleted = ?", false)
+	switch statusGroup {
+	case "todo":
+		query = query.Where("execute_status IN ?", []string{"PENDING", "FAILED", "PARTIAL_FAILED", "NOT_EXECUTABLE"})
+	case "done":
+		query = query.Where("execute_status IN ?", []string{"SUCCESS", "SKIPPED"})
+	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	err := query.Omit("file_content").Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&files).Error
+	order := "id DESC"
+	if statusGroup == "todo" {
+		order = "version ASC, group_sort_no ASC, file_name ASC, id ASC"
+	}
+	err := query.Omit("file_content").Order(order).Offset((page - 1) * pageSize).Limit(pageSize).Find(&files).Error
 	return files, total, err
 }
 
 func (s *PostgreSQLService) GetSQLFile(id uint) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
 	var file model.SQLChangeFile
-	if err := repository.DB.First(&file, id).Error; err != nil {
+	if err := repository.DB.Where("is_deleted = ?", false).First(&file, id).Error; err != nil {
 		return nil, nil, err
 	}
 	var statements []model.SQLChangeStatement
-	if err := repository.DB.Where("file_id = ?", id).Order("id ASC").Find(&statements).Error; err != nil {
+	if err := repository.DB.Where("file_id = ?", id).Order("line_number ASC, id ASC").Find(&statements).Error; err != nil {
 		return nil, nil, err
 	}
 	return &file, statements, nil
+}
+
+func (s *PostgreSQLService) DeleteSQLFile(id uint) error {
+	var file model.SQLChangeFile
+	if err := repository.DB.Where("is_deleted = ?", false).First(&file, id).Error; err != nil {
+		return err
+	}
+	if file.ExecuteStatus == "SUCCESS" {
+		return fmt.Errorf("已执行成功的文件不能删除")
+	}
+	file.IsDeleted = true
+	return repository.DB.Save(&file).Error
+}
+
+func (s *PostgreSQLService) ExecuteSQLContent(ctx context.Context, req ExecuteSQLContentRequest, username string) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	file, _, err := s.ParseSQL(req.ParseSQLRequest)
+	if err != nil {
+		return nil, nil, err
+	}
+	return s.ExecuteSQLFileWithOptions(ctx, file.ID, username, req.Options)
+}
+
+func (s *PostgreSQLService) ImportServerSQL(req ImportServerSQLRequest) (int, error) {
+	path := strings.TrimSpace(req.FilePath)
+	if path == "" {
+		return 0, fmt.Errorf("文件路径不能为空")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, fmt.Errorf("文件不存在")
+	}
+	if info.IsDir() {
+		return 0, fmt.Errorf("不支持导入目录")
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".sql":
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return 0, err
+		}
+		_, _, err = s.ParseSQL(ParseSQLRequest{FileName: filepath.Base(path), Content: string(content), Overwrite: req.Overwrite})
+		if err != nil {
+			return 0, err
+		}
+		return 1, nil
+	case ".zip":
+		return s.importSQLZip(path, req.Overwrite)
+	default:
+		return 0, fmt.Errorf("仅支持 .sql 或 .zip 文件")
+	}
+}
+
+func (s *PostgreSQLService) importSQLZip(path string, overwrite bool) (int, error) {
+	reader, err := zip.OpenReader(path)
+	if err != nil {
+		return 0, fmt.Errorf("解压提取 SQL 错误: %w", err)
+	}
+	defer reader.Close()
+	count := 0
+	for _, f := range reader.File {
+		if f.FileInfo().IsDir() || !strings.EqualFold(filepath.Ext(f.Name), ".sql") {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return count, err
+		}
+		content, readErr := io.ReadAll(rc)
+		_ = rc.Close()
+		if readErr != nil {
+			return count, readErr
+		}
+		_, _, err = s.ParseSQL(ParseSQLRequest{FileName: filepath.Base(f.Name), Content: string(content), Overwrite: overwrite})
+		if err != nil {
+			return count, err
+		}
+		count++
+	}
+	return count, nil
+}
+
+func (s *PostgreSQLService) BuildNotExecutableSQLForFile(id uint) (string, error) {
+	_, statements, err := s.GetSQLFile(id)
+	if err != nil {
+		return "", err
+	}
+	exportItems := make([]SQLExportStatement, 0, len(statements))
+	for _, stmt := range statements {
+		exportItems = append(exportItems, SQLExportStatement{
+			LineNumber:     stmt.LineNumber,
+			SQLContent:     stmt.SQLContent,
+			ExecuteStatus:  stmt.ExecuteStatus,
+			ExecuteMessage: stmt.ExecuteMessage,
+			RiskReason:     stmt.RiskReason,
+		})
+	}
+	return BuildNotExecutableSQL(exportItems), nil
 }
 
 func (s *PostgreSQLService) loadConfig() (PostgreSQLConfig, error) {
@@ -430,13 +712,18 @@ func openPostgreSQL(cfg PostgreSQLConfig) (*sql.DB, error) {
 	return db, nil
 }
 
-func executeOneSQL(ctx context.Context, db *sql.DB, sqlText, sqlType string) (int64, string, error) {
+func executeOneSQL(ctx context.Context, db *sql.DB, schemaName, sqlText, sqlType string) (int64, string, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return 0, "", err
 	}
 	defer conn.Close()
 
+	if strings.TrimSpace(schemaName) != "" {
+		if _, err := conn.ExecContext(ctx, "SELECT set_config('search_path', $1, false)", searchPathValue(schemaName)); err != nil {
+			return 0, pgState(err), err
+		}
+	}
 	if _, err := conn.ExecContext(ctx, "SET lock_timeout = '5s'"); err != nil {
 		return 0, pgState(err), err
 	}
@@ -454,6 +741,14 @@ func executeOneSQL(ctx context.Context, db *sql.DB, sqlText, sqlType string) (in
 	}
 	rows, _ := result.RowsAffected()
 	return rows, "", nil
+}
+
+func searchPathValue(schemaName string) string {
+	schemaName = strings.TrimSpace(schemaName)
+	if schemaName == "" {
+		return ""
+	}
+	return `"` + strings.ReplaceAll(schemaName, `"`, `""`) + `"`
 }
 
 func statementTimeout(sqlType string) time.Duration {
@@ -541,6 +836,13 @@ func appendStatement(statements *[]string, sqlText string) {
 	if cleaned != "" {
 		*statements = append(*statements, cleaned)
 	}
+}
+
+func defaultStatementStatus(analysis RiskAnalysis) string {
+	if analysis.RiskLevel == "BLOCKED" {
+		return "NOT_EXECUTABLE"
+	}
+	return "PENDING"
 }
 
 func stripSQLComments(input string) string {
@@ -633,212 +935,74 @@ func readDollarQuoteTag(input string) (string, bool) {
 	return "", false
 }
 
-func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
-	tree, err := pg_query.Parse(sqlText)
-	if err != nil {
-		return RiskAnalysis{SQLType: "SQL_PARSE_ERROR", RiskLevel: "BLOCKED", RiskReason: "SQL 语法解析失败: " + err.Error()}
+func skipMessageForSQLError(err error, options SQLExecuteOptions) (bool, string) {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr == nil {
+		return false, ""
 	}
-	if risk, ok := analyzeSQLRiskFromAST(tree); ok {
-		return risk
-	}
-
-	normalized := normalizeSQL(sqlText)
-	upper := strings.ToUpper(normalized)
-
-	blocked := []struct {
-		pattern string
-		typ     string
-		reason  string
-	}{
-		{`^DROP\s+DATABASE\b`, "DROP_DATABASE", "禁止通过普通入口删除数据库"},
-		{`^DROP\s+SCHEMA\b`, "DROP_SCHEMA", "禁止通过普通入口删除 schema"},
-		{`^DROP\s+OWNED\b`, "DROP_OWNED", "禁止执行 DROP OWNED"},
-		{`^ALTER\s+SYSTEM\b`, "ALTER_SYSTEM", "禁止修改数据库系统级参数"},
-		{`^COPY\b.*\bPROGRAM\b`, "COPY_PROGRAM", "禁止执行 COPY PROGRAM"},
-		{`^REINDEX\s+DATABASE\b`, "REINDEX_DATABASE", "禁止执行 REINDEX DATABASE"},
-		{`^VACUUM\s+FULL\b`, "VACUUM_FULL", "禁止执行 VACUUM FULL"},
-	}
-	for _, rule := range blocked {
-		if regexp.MustCompile(rule.pattern).MatchString(upper) {
-			return RiskAnalysis{SQLType: rule.typ, RiskLevel: "BLOCKED", RiskReason: rule.reason}
-		}
-	}
-
 	switch {
-	case strings.HasPrefix(upper, "INSERT"):
-		return RiskAnalysis{SQLType: "INSERT", RiskLevel: "LOW"}
-	case strings.HasPrefix(upper, "UPDATE"):
-		return RiskAnalysis{SQLType: "UPDATE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}
-	case strings.HasPrefix(upper, "DELETE"):
-		return RiskAnalysis{SQLType: "DELETE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}
-	case regexp.MustCompile(`^CREATE\s+TABLE\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "CREATE_TABLE", RiskLevel: "LOW"}
-	case regexp.MustCompile(`^CREATE\s+(OR\s+REPLACE\s+)?VIEW\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "CREATE_VIEW", RiskLevel: "LOW"}
-	case regexp.MustCompile(`^ALTER\s+TABLE\b.*\bADD\s+COLUMN\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "ADD_COLUMN", RiskLevel: "LOW"}
-	case regexp.MustCompile(`^ALTER\s+TABLE\b.*\bALTER\s+COLUMN\b.*\bTYPE\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "ALTER_COLUMN_TYPE", RiskLevel: "WARN", RiskReason: "字段类型变更可能触发表重写或被视图依赖阻塞"}
-	case regexp.MustCompile(`^ALTER\s+TABLE\b.*\bSET\s+NOT\s+NULL\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "ALTER_SET_NOT_NULL", RiskLevel: "WARN", RiskReason: "设置 NOT NULL 可能扫描全表"}
-	case regexp.MustCompile(`^ALTER\s+TABLE\b.*\bADD\s+CHECK\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "ADD_CHECK", RiskLevel: "WARN", RiskReason: "新增 CHECK 默认校验已有数据，可能扫描全表"}
-	case regexp.MustCompile(`^CREATE\s+INDEX\s+CONCURRENTLY\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "CREATE_INDEX_CONCURRENTLY", RiskLevel: "WARN", RiskReason: "并发索引耗时可能较长"}
-	case regexp.MustCompile(`^CREATE\s+INDEX\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "CREATE_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 创建索引可能阻塞写入"}
-	case regexp.MustCompile(`^TRUNCATE\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "TRUNCATE", RiskLevel: "WARN", RiskReason: "TRUNCATE 会快速清空表数据，请确认对象范围"}
-	case regexp.MustCompile(`^DROP\s+TABLE\b`).MatchString(upper):
-		return RiskAnalysis{SQLType: "DROP_TABLE", RiskLevel: "WARN", RiskReason: "DROP TABLE 会删除表结构和数据，请确认对象范围"}
+	case options.SkipExistsColumn && pgErr.Code == "42701":
+		return true, "字段已存在"
+	case options.SkipExistsTable && pgErr.Code == "42P07":
+		return true, "对象已存在"
+	case options.SkipUniqueConstraint && pgErr.Code == "23505" && strings.Contains(strings.ToLower(pgErr.Message), "unique"):
+		return true, "违反唯一约束，数据已存在"
 	default:
-		return RiskAnalysis{SQLType: firstKeyword(upper), RiskLevel: "LOW"}
+		return false, ""
 	}
 }
 
-func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
-	if tree == nil || len(tree.GetStmts()) == 0 {
-		return RiskAnalysis{SQLType: "UNKNOWN", RiskLevel: "LOW"}, true
-	}
-	if len(tree.GetStmts()) > 1 {
-		return RiskAnalysis{SQLType: "MULTI_STATEMENT", RiskLevel: "WARN", RiskReason: "单条记录包含多条 SQL，请确认拆分结果"}, true
-	}
-	node := tree.GetStmts()[0].GetStmt()
-	if node == nil {
-		return RiskAnalysis{SQLType: "UNKNOWN", RiskLevel: "LOW"}, true
-	}
-
-	switch {
-	case node.GetInsertStmt() != nil:
-		return RiskAnalysis{SQLType: "INSERT", RiskLevel: "LOW"}, true
-	case node.GetUpdateStmt() != nil:
-		return RiskAnalysis{SQLType: "UPDATE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}, true
-	case node.GetDeleteStmt() != nil:
-		return RiskAnalysis{SQLType: "DELETE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}, true
-	case node.GetCreateStmt() != nil:
-		return RiskAnalysis{SQLType: "CREATE_TABLE", RiskLevel: "LOW"}, true
-	case node.GetCreateTableAsStmt() != nil:
-		return RiskAnalysis{SQLType: "CREATE_TABLE_AS", RiskLevel: "WARN", RiskReason: "CREATE TABLE AS 可能写入大量数据，请确认数据规模"}, true
-	case node.GetViewStmt() != nil:
-		return RiskAnalysis{SQLType: "CREATE_VIEW", RiskLevel: "LOW"}, true
-	case node.GetAlterSystemStmt() != nil:
-		return RiskAnalysis{SQLType: "ALTER_SYSTEM", RiskLevel: "BLOCKED", RiskReason: "禁止修改数据库系统级参数"}, true
-	case node.GetDropOwnedStmt() != nil:
-		return RiskAnalysis{SQLType: "DROP_OWNED", RiskLevel: "BLOCKED", RiskReason: "禁止执行 DROP OWNED"}, true
-	case node.GetCopyStmt() != nil:
-		copyStmt := node.GetCopyStmt()
-		if copyStmt.GetIsProgram() {
-			return RiskAnalysis{SQLType: "COPY_PROGRAM", RiskLevel: "BLOCKED", RiskReason: "禁止执行 COPY PROGRAM"}, true
-		}
-		return RiskAnalysis{SQLType: "COPY", RiskLevel: "WARN", RiskReason: "COPY 可能批量导入或导出数据，请确认文件和数据范围"}, true
-	case node.GetDropStmt() != nil:
-		return analyzeDropStmt(node.GetDropStmt()), true
-	case node.GetAlterTableStmt() != nil:
-		return analyzeAlterTableStmt(node.GetAlterTableStmt()), true
-	case node.GetIndexStmt() != nil:
-		indexStmt := node.GetIndexStmt()
-		if indexStmt.GetConcurrent() {
-			return RiskAnalysis{SQLType: "CREATE_INDEX_CONCURRENTLY", RiskLevel: "WARN", RiskReason: "并发索引耗时可能较长"}, true
-		}
-		return RiskAnalysis{SQLType: "CREATE_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 创建索引可能阻塞写入"}, true
-	case node.GetTruncateStmt() != nil:
-		return RiskAnalysis{SQLType: "TRUNCATE", RiskLevel: "WARN", RiskReason: "TRUNCATE 会快速清空表数据，请确认对象范围"}, true
-	case node.GetReindexStmt() != nil:
-		reindexStmt := node.GetReindexStmt()
-		if reindexStmt.GetKind() == pg_query.ReindexObjectType_REINDEX_OBJECT_DATABASE {
-			return RiskAnalysis{SQLType: "REINDEX_DATABASE", RiskLevel: "BLOCKED", RiskReason: "禁止执行 REINDEX DATABASE"}, true
-		}
-		return RiskAnalysis{SQLType: "REINDEX", RiskLevel: "WARN", RiskReason: "REINDEX 可能长时间持锁，请确认对象范围和窗口期"}, true
-	case node.GetVacuumStmt() != nil:
-		if vacuumHasOption(node.GetVacuumStmt(), "full") {
-			return RiskAnalysis{SQLType: "VACUUM_FULL", RiskLevel: "BLOCKED", RiskReason: "禁止执行 VACUUM FULL"}, true
-		}
-		return RiskAnalysis{SQLType: "VACUUM", RiskLevel: "LOW"}, true
-	default:
-		return RiskAnalysis{}, false
-	}
-}
-
-func analyzeDropStmt(stmt *pg_query.DropStmt) RiskAnalysis {
-	switch stmt.GetRemoveType() {
-	case pg_query.ObjectType_OBJECT_DATABASE:
-		return RiskAnalysis{SQLType: "DROP_DATABASE", RiskLevel: "BLOCKED", RiskReason: "禁止通过普通入口删除数据库"}
-	case pg_query.ObjectType_OBJECT_SCHEMA:
-		return RiskAnalysis{SQLType: "DROP_SCHEMA", RiskLevel: "BLOCKED", RiskReason: "禁止通过普通入口删除 schema"}
-	case pg_query.ObjectType_OBJECT_TABLE:
-		return RiskAnalysis{SQLType: "DROP_TABLE", RiskLevel: "WARN", RiskReason: "DROP TABLE 会删除表结构和数据，请确认对象范围"}
-	default:
-		return RiskAnalysis{SQLType: "DROP", RiskLevel: "WARN", RiskReason: "DROP 会删除数据库对象，请确认对象范围"}
-	}
-}
-
-func analyzeAlterTableStmt(stmt *pg_query.AlterTableStmt) RiskAnalysis {
-	risk := RiskAnalysis{SQLType: "ALTER_TABLE", RiskLevel: "LOW"}
-	for _, cmdNode := range stmt.GetCmds() {
-		cmd := cmdNode.GetAlterTableCmd()
-		if cmd == nil {
+func BuildNotExecutableSQL(statements []SQLExportStatement) string {
+	sort.SliceStable(statements, func(i, j int) bool {
+		return statements[i].LineNumber < statements[j].LineNumber
+	})
+	var b strings.Builder
+	for _, stmt := range statements {
+		if !shouldExportSQL(stmt.ExecuteStatus) {
 			continue
 		}
-		switch cmd.GetSubtype() {
-		case pg_query.AlterTableType_AT_AddColumn:
-			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_COLUMN", RiskLevel: "LOW"})
-		case pg_query.AlterTableType_AT_AlterColumnType:
-			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ALTER_COLUMN_TYPE", RiskLevel: "WARN", RiskReason: "字段类型变更可能触发表重写或被视图依赖阻塞"})
-		case pg_query.AlterTableType_AT_SetNotNull:
-			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ALTER_SET_NOT_NULL", RiskLevel: "WARN", RiskReason: "设置 NOT NULL 可能扫描全表"})
-		case pg_query.AlterTableType_AT_AddConstraint:
-			if constraint := cmd.GetDef().GetConstraint(); constraint != nil && constraint.GetContype() == pg_query.ConstrType_CONSTR_CHECK {
-				risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_CHECK", RiskLevel: "WARN", RiskReason: "新增 CHECK 默认校验已有数据，可能扫描全表"})
-			}
-		case pg_query.AlterTableType_AT_DropColumn, pg_query.AlterTableType_AT_DropConstraint:
-			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ALTER_TABLE_DROP", RiskLevel: "WARN", RiskReason: "ALTER TABLE 删除字段或约束可能影响业务，请确认依赖范围"})
+		reason := strings.TrimSpace(stmt.ExecuteMessage)
+		if reason == "" {
+			reason = strings.TrimSpace(stmt.RiskReason)
 		}
-	}
-	return risk
-}
-
-func vacuumHasOption(stmt *pg_query.VacuumStmt, option string) bool {
-	for _, node := range stmt.GetOptions() {
-		def := node.GetDefElem()
-		if def != nil && strings.EqualFold(def.GetDefname(), option) {
-			return true
+		b.WriteString(fmt.Sprintf("-- Line %d | %s", stmt.LineNumber, stmt.ExecuteStatus))
+		if reason != "" {
+			b.WriteString(" | ")
+			b.WriteString(strings.ReplaceAll(reason, "\n", " "))
 		}
+		b.WriteString("\n")
+		b.WriteString(strings.TrimSpace(stmt.SQLContent))
+		if !strings.HasSuffix(strings.TrimSpace(stmt.SQLContent), ";") {
+			b.WriteString(";")
+		}
+		b.WriteString("\n\n")
 	}
-	return false
+	return strings.TrimSpace(b.String())
 }
 
-func mergeRisk(current, candidate RiskAnalysis) RiskAnalysis {
-	if riskRank(candidate.RiskLevel) > riskRank(current.RiskLevel) {
-		return candidate
-	}
-	if current.SQLType == "ALTER_TABLE" && candidate.SQLType != "" {
-		return candidate
-	}
-	return current
-}
-
-func riskRank(level string) int {
-	switch level {
-	case "BLOCKED":
-		return 3
-	case "WARN":
-		return 2
-	case "LOW":
-		return 1
+func shouldExportSQL(status string) bool {
+	switch status {
+	case "NOT_EXECUTABLE", "FAILED", "PARTIAL_FAILED", "BLOCKED":
+		return true
 	default:
-		return 0
+		return false
 	}
 }
 
-func normalizeSQL(sqlText string) string {
-	return strings.Join(strings.Fields(sqlText), " ")
-}
-
-func firstKeyword(sqlText string) string {
-	for _, part := range strings.Fields(sqlText) {
-		return strings.ToUpper(part)
+func parseSQLFileMeta(fileName string) (version string, groupSortNo int, schemaName string) {
+	name := filepath.Base(strings.TrimSpace(fileName))
+	parts := strings.Split(name, "__")
+	if len(parts) >= 3 {
+		version = strings.TrimSpace(parts[0])
+		if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+			groupSortNo = n
+		}
+		schemaName = strings.TrimSpace(parts[2])
+		if idx := strings.Index(schemaName, "."); idx >= 0 {
+			schemaName = schemaName[:idx]
+		}
 	}
-	return "UNKNOWN"
+	return version, groupSortNo, schemaName
 }
 
 func defaultSQLFileName(name string) string {
