@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 360" width="480" height="360">
+  <!-- Server rack -->
+  <rect x="180" y="80" width="120" height="160" rx="8" fill="#fff" opacity="0.15" stroke="#fff" stroke-width="1" stroke-opacity="0.3"/>
+  <rect x="195" y="100" width="90" height="12" rx="3" fill="#fff" opacity="0.25">
+    <animate attributeName="opacity" values="0.25;0.5;0.25" dur="2s" repeatCount="indefinite"/>
+  </rect>
+  <rect x="195" y="120" width="90" height="12" rx="3" fill="#fff" opacity="0.2">
+    <animate attributeName="opacity" values="0.2;0.45;0.2" dur="2.5s" repeatCount="indefinite" begin="0.3s"/>
+  </rect>
+  <rect x="195" y="140" width="90" height="12" rx="3" fill="#fff" opacity="0.2">
+    <animate attributeName="opacity" values="0.2;0.4;0.2" dur="3s" repeatCount="indefinite" begin="0.6s"/>
+  </rect>
+  <!-- Server LEDs -->
+  <circle cx="200" cy="170" r="3" fill="#67c23a">
+    <animate attributeName="opacity" values="1;0.4;1" dur="1.5s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="210" cy="170" r="3" fill="#67c23a">
+    <animate attributeName="opacity" values="1;0.4;1" dur="1.8s" repeatCount="indefinite" begin="0.2s"/>
+  </circle>
+  <circle cx="220" cy="170" r="3" fill="#fbbf24">
+    <animate attributeName="opacity" values="1;0.3;1" dur="1.2s" repeatCount="indefinite" begin="0.5s"/>
+  </circle>
+
+  <!-- Code window (left) -->
+  <g transform="translate(30, 120)">
+    <rect width="120" height="90" rx="6" fill="#1e1e2e" opacity="0.8"/>
+    <rect y="0" width="120" height="18" rx="6" fill="#313244" opacity="0.9"/>
+    <circle cx="10" cy="9" r="3" fill="#f38ba8"/>
+    <circle cx="20" cy="9" r="3" fill="#f9e2af"/>
+    <circle cx="30" cy="9" r="3" fill="#a6e3a1"/>
+    <!-- Code lines -->
+    <rect x="10" y="26" width="60" height="4" rx="2" fill="#cba6f7" opacity="0.7"/>
+    <rect x="10" y="36" width="80" height="4" rx="2" fill="#89b4fa" opacity="0.6"/>
+    <rect x="10" y="46" width="50" height="4" rx="2" fill="#a6e3a1" opacity="0.5"/>
+    <rect x="10" y="56" width="70" height="4" rx="2" fill="#f38ba8" opacity="0.6"/>
+    <rect x="10" y="66" width="40" height="4" rx="2" fill="#89b4fa" opacity="0.5"/>
+    <!-- Typing cursor -->
+    <rect x="55" y="66" width="2" height="8" fill="#fff" opacity="0.8">
+      <animate attributeName="opacity" values="0.8;0;0.8" dur="1s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+
+  <!-- Cloud (top right) -->
+  <g transform="translate(330, 60)" opacity="0.6">
+    <animateTransform attributeName="transform" type="translate" values="330,60;335,55;330,60" dur="5s" repeatCount="indefinite"/>
+    <circle cx="20" cy="25" r="18" fill="#fff" opacity="0.3"/>
+    <circle cx="40" cy="20" r="22" fill="#fff" opacity="0.3"/>
+    <circle cx="60" cy="25" r="16" fill="#fff" opacity="0.3"/>
+    <rect x="10" y="25" width="60" height="20" rx="10" fill="#fff" opacity="0.3"/>
+    <!-- Upload arrow -->
+    <path d="M38 18 L38 35 M32 24 L38 18 L44 24" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.7">
+      <animate attributeName="opacity" values="0.7;1;0.7" dur="2s" repeatCount="indefinite"/>
+    </path>
+  </g>
+
+  <!-- Gear (bottom right) -->
+  <g transform="translate(350, 200)">
+    <animateTransform attributeName="transform" type="rotate" from="0 370 220" to="360 370 220" dur="12s" repeatCount="indefinite" additive="sum"/>
+    <path d="M20 8 L22 0 L26 0 L28 8 L35 5 L38 2 L41 5 L35 12 L40 16 L48 14 L48 18 L40 20 L40 28 L48 30 L48 34 L40 32 L35 36 L41 43 L38 46 L35 43 L28 40 L26 48 L22 48 L20 40 L13 43 L10 46 L7 43 L13 36 L8 32 L0 34 L0 30 L8 28 L8 20 L0 18 L0 14 L8 16 L13 12 L7 5 L10 2 L13 5 Z" fill="#fff" opacity="0.15"/>
+    <circle cx="24" cy="24" r="10" fill="none" stroke="#fff" stroke-width="2" opacity="0.2"/>
+  </g>
+
+  <!-- Data flow arrows -->
+  <!-- Arrow from code to server -->
+  <path d="M155 165 C170 165 175 160 180 155" stroke="#fff" stroke-width="1.5" fill="none" opacity="0.4" stroke-dasharray="4 3">
+    <animate attributeName="stroke-dashoffset" values="0;-14" dur="1.5s" repeatCount="indefinite"/>
+  </path>
+  <!-- Arrow from server to cloud -->
+  <path d="M300 130 C320 110 330 95 340 85" stroke="#fff" stroke-width="1.5" fill="none" opacity="0.4" stroke-dasharray="4 3">
+    <animate attributeName="stroke-dashoffset" values="0;-14" dur="1.5s" repeatCount="indefinite" begin="0.5s"/>
+  </path>
+
+  <!-- Floating particles -->
+  <circle cx="100" cy="80" r="2" fill="#fff" opacity="0.4">
+    <animate attributeName="cy" values="80;70;80" dur="4s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.4;0.8;0.4" dur="4s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="400" cy="280" r="2.5" fill="#fff" opacity="0.3">
+    <animate attributeName="cy" values="280;268;280" dur="5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.3;0.7;0.3" dur="5s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="250" cy="290" r="1.5" fill="#fff" opacity="0.3">
+    <animate attributeName="cy" values="290;282;290" dur="3.5s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="60" cy="280" r="2" fill="#fff" opacity="0.25">
+    <animate attributeName="cy" values="280;272;280" dur="4.5s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="440" cy="150" r="1.5" fill="#fff" opacity="0.35">
+    <animate attributeName="cy" values="150;140;150" dur="3s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- Hexagon decoration (bottom left) -->
+  <g transform="translate(50, 260)" opacity="0.15">
+    <polygon points="20,0 38,10 38,30 20,40 2,30 2,10" fill="none" stroke="#fff" stroke-width="1.5"/>
+    <animateTransform attributeName="transform" type="rotate" from="0 70 280" to="360 70 280" dur="30s" repeatCount="indefinite" additive="sum"/>
+  </g>
+</svg>

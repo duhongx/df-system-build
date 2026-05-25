@@ -1,0 +1,70 @@
+# ======================================
+# OS / Editor
+# ======================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+*.iml
+# VS Code: keep shared settings but not per-user state
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+# ======================================
+# Environment & Secrets
+# ======================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+*.p12
+config.local.yaml
+config.local.yml
+config.yaml
+config.yml
+backend/config/*.yaml
+backend/config/*.yml
+!backend/config/*.example.yaml
+!backend/config/*.example.yml
+.kiro/specs/*/.config.kiro
+
+# ======================================
+# Logs
+# ======================================
+*.log
+logs/
+
+# ======================================
+# Backend (Go)
+# ======================================
+# Build output
+backend/bin/
+backend/*.exe
+backend/df-build-server
+# Runtime data
+backend/data/
+backend/workspaces/
+backend/logs/
+# Test coverage
+backend/coverage.out
+backend/*.cover
+
+# ======================================
+# Frontend (Node / Vite)
+# ======================================
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+frontend/*.local
+
+# ======================================
+# Kiro workflow (keep specs, ignore local state)
+# ======================================
+.kiro/hooks/
+.kiro/.cache/

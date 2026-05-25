@@ -1,0 +1,465 @@
+/* Global Styles - Gin-Vue-Admin inspired clean design */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #f0f2f5;
+  color: #303133;
+  font-size: 14px;
+}
+
+/* Override Element Plus defaults for cleaner look */
+:root {
+  --el-color-primary: #409eff;
+  --el-border-radius-base: 4px;
+  --el-font-size-base: 13px;
+}
+
+/* Card styles */
+.el-card {
+  border: 1px solid #ebeef5;
+  border-radius: 4px !important;
+  box-shadow: none !important;
+}
+
+.el-card__header {
+  padding: 14px 20px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.el-card__body {
+  padding: 16px 20px;
+}
+
+/* Table styles */
+.el-table {
+  font-size: 13px;
+}
+
+.el-table th.el-table__cell {
+  background: #fafafa !important;
+  color: #606266;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* Button refinements */
+.el-button--primary {
+  border-radius: 4px;
+}
+
+/* Tag refinements */
+.el-tag {
+  border-radius: 2px;
+}
+
+/* Form refinements */
+.el-form-item__label {
+  font-size: 13px;
+  color: #606266;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #dcdfe6;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #c0c4cc;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Page common styles */
+.page-container {
+  padding: 0;
+}
+
+/* Dark Mode - Refined */
+html.dark {
+  --el-bg-color: #1a1a1a;
+  --el-bg-color-overlay: #242424;
+  --el-bg-color-page: #111111;
+  --el-text-color-primary: #ffffffd9;
+  --el-text-color-regular: #ffffffb3;
+  --el-text-color-secondary: #ffffff80;
+  --el-text-color-placeholder: #ffffff4d;
+  --el-border-color: #333333;
+  --el-border-color-light: #2a2a2a;
+  --el-fill-color-blank: #1a1a1a;
+  --el-fill-color-light: #242424;
+  --el-color-primary: #409eff;
+  --el-color-primary-light-9: #1a2c42;
+  color-scheme: dark;
+}
+
+html.dark body {
+  background: #111111;
+  color: #ffffffd9;
+}
+
+/* Sidebar */
+html.dark .sidebar {
+  background: #1a1a1a;
+  border-right-color: #2a2a2a;
+}
+
+html.dark .sidebar-logo {
+  border-bottom-color: #2a2a2a;
+}
+
+html.dark .logo-text {
+  color: #ffffffd9;
+}
+
+html.dark :deep(.el-menu) {
+  background-color: #1a1a1a !important;
+}
+
+html.dark :deep(.el-menu-item),
+html.dark :deep(.el-sub-menu__title) {
+  color: #ffffffb3 !important;
+}
+
+html.dark :deep(.el-menu-item.is-active) {
+  color: #409eff !important;
+  background: #1a2c42 !important;
+  border-right-color: #409eff !important;
+}
+
+html.dark :deep(.el-menu-item:hover),
+html.dark :deep(.el-sub-menu__title:hover) {
+  background: #242424 !important;
+}
+
+html.dark :deep(.el-sub-menu .el-menu) {
+  background-color: #141414 !important;
+}
+
+/* Header */
+html.dark .main-area {
+  background: #111111;
+}
+
+html.dark .main-header {
+  background: #1a1a1a;
+  border-bottom-color: #2a2a2a;
+}
+
+html.dark .collapse-btn {
+  color: #ffffffb3;
+}
+
+html.dark .collapse-btn:hover {
+  background: #242424;
+  color: #409eff;
+}
+
+html.dark .user-name {
+  color: #ffffffb3;
+}
+
+html.dark .theme-btn {
+  color: #ffffffb3;
+}
+
+html.dark .theme-btn:hover {
+  background: #242424;
+  color: #409eff;
+}
+
+/* Tab Bar */
+html.dark .tab-bar {
+  background: #1a1a1a;
+  border-bottom-color: #2a2a2a;
+}
+
+html.dark .tab-item {
+  color: #ffffff80;
+}
+
+html.dark .tab-item:hover {
+  color: #409eff;
+  background: #1a2c42;
+}
+
+html.dark .tab-item.active {
+  color: #409eff;
+  background: #1a2c42;
+  border-color: #2a4a6a;
+}
+
+/* Content area cards & toolbars */
+html.dark .toolbar-row {
+  background: #1e1e1e;
+  border-color: #333333;
+}
+
+html.dark .table-wrapper {
+  background: #1a1a1a;
+  border-color: #333333;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* Table */
+html.dark .el-table {
+  --el-table-bg-color: #1a1a1a;
+  --el-table-tr-bg-color: #1a1a1a;
+  --el-table-row-hover-bg-color: #242424;
+  --el-table-header-bg-color: #1f1f1f;
+  --el-table-border-color: #2a2a2a;
+  --el-table-text-color: #ffffffb3;
+  --el-table-header-text-color: #ffffffd9;
+}
+
+html.dark .el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background: #1f1f1f;
+}
+
+/* Cards */
+html.dark .el-card {
+  --el-card-bg-color: #1a1a1a;
+  border-color: #2a2a2a;
+  background: #1a1a1a;
+}
+
+html.dark .el-card__header {
+  border-bottom-color: #2a2a2a;
+}
+
+/* Stat cards */
+html.dark .stat-card {
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+}
+
+html.dark .stat-value {
+  color: #ffffffd9;
+}
+
+html.dark .stat-label {
+  color: #ffffff80;
+}
+
+/* Section cards */
+html.dark .section-card {
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+}
+
+html.dark .section-header {
+  border-bottom-color: #2a2a2a;
+}
+
+html.dark .section-title {
+  color: #ffffffd9;
+}
+
+/* Welcome banner */
+html.dark .welcome-banner {
+  background: linear-gradient(135deg, #1a3050 0%, #2a4a70 100%);
+}
+
+/* Settings */
+html.dark .settings-container {
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+}
+
+html.dark :deep(.el-tabs__header.is-left) {
+  border-right-color: #2a2a2a;
+}
+
+/* Task list text */
+html.dark .task-name,
+html.dark .app-name {
+  color: #ffffffd9;
+}
+
+html.dark .time-text {
+  color: #ffffffb3;
+}
+
+html.dark .duration {
+  color: #ffffffb3;
+}
+
+/* Links */
+html.dark .link-text {
+  color: #409eff;
+}
+
+/* Log panel */
+html.dark .log-panel {
+  border-color: #2a2a2a;
+}
+
+html.dark .log-panel-header {
+  border-bottom-color: #2a2a2a;
+}
+
+html.dark .log-panel-title {
+  color: #ffffffd9;
+}
+
+/* Pipeline bar */
+html.dark .pipeline-bar {
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+}
+
+html.dark .pipeline-stage:hover {
+  background: #242424;
+}
+
+html.dark .pipeline-stage.active {
+  background: #1a2c42;
+}
+
+html.dark .stage-label {
+  color: #ffffffb3;
+}
+
+/* Info bar */
+html.dark .info-bar {
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+}
+
+html.dark .info-task-no {
+  color: #ffffffd9;
+}
+
+html.dark .info-branch {
+  color: #ffffffb3;
+}
+
+html.dark .info-meta {
+  color: #ffffff80;
+}
+
+html.dark .info-sep {
+  color: #333333;
+}
+
+/* Dialogs */
+html.dark .el-dialog {
+  --el-dialog-bg-color: #1a1a1a;
+  --el-dialog-title-font-size: 16px;
+}
+
+/* Input overrides */
+html.dark .el-input__wrapper {
+  background-color: #242424 !important;
+  box-shadow: 0 0 0 1px #3a3a3a inset !important;
+}
+
+html.dark .el-input__wrapper:hover {
+  box-shadow: 0 0 0 1px #4a4a4a inset !important;
+}
+
+html.dark .el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px #409eff inset !important;
+}
+
+html.dark .el-input__inner {
+  color: #ffffffd9;
+}
+
+html.dark .el-input__inner::placeholder {
+  color: #ffffff4d;
+}
+
+html.dark .el-select .el-input__wrapper {
+  background-color: #242424 !important;
+}
+
+html.dark .el-select-dropdown {
+  background: #242424;
+  border-color: #3a3a3a;
+}
+
+html.dark .el-select-dropdown__item {
+  color: #ffffffb3;
+}
+
+html.dark .el-select-dropdown__item.hover,
+html.dark .el-select-dropdown__item:hover {
+  background: #2a2a2a;
+}
+
+html.dark .el-popper.is-light {
+  background: #242424;
+  border-color: #3a3a3a;
+}
+
+html.dark .el-popper.is-light .el-popper__arrow::before {
+  background: #242424;
+  border-color: #3a3a3a;
+}
+
+/* Descriptions */
+html.dark .el-descriptions__cell {
+  background: #1a1a1a;
+}
+
+/* Batch preview */
+html.dark .batch-preview,
+html.dark .batch-apps-preview {
+  background: #242424;
+}
+
+/* Dropdown menu */
+html.dark .el-dropdown-menu {
+  background: #242424;
+  border-color: #3a3a3a;
+}
+
+html.dark .el-dropdown-menu__item {
+  color: #ffffffb3;
+}
+
+html.dark .el-dropdown-menu__item:hover {
+  background: #2a2a2a;
+  color: #409eff;
+}
+
+/* Button overrides */
+html.dark .el-button--default {
+  background: #242424;
+  border-color: #3a3a3a;
+  color: #ffffffb3;
+}
+
+html.dark .el-button--default:hover {
+  background: #2a2a2a;
+  border-color: #409eff;
+  color: #409eff;
+}
+
+/* Form hint */
+html.dark .form-hint {
+  color: #ffffff4d;
+}
+
+/* Active theme item indicator */
+.is-active-item {
+  color: #409eff !important;
+  font-weight: 600;
+}

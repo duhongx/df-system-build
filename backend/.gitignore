@@ -1,0 +1,16 @@
+# Build output
+bin/
+*.exe
+df-build-server
+
+# Runtime data (SQLite, workspace, logs)
+data/
+workspaces/
+logs/
+
+# Test coverage
+coverage.out
+*.cover
+
+# Env
+.env
