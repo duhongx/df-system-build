@@ -301,7 +301,7 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 			Status:        "PENDING",
 			TriggerUser:   username,
 			ArtifactName:  webMainItem.FileName,
-			DeployMode:    "deploy",
+			DeployMode:    "artifact_deploy",
 		}
 
 		if err := h.pipelineRepo.Create(p); err != nil {
@@ -335,7 +335,7 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 				Status:        "PENDING",
 				TriggerUser:   username,
 				ArtifactName:  sub.FileName,
-				DeployMode:    "deploy",
+				DeployMode:    "artifact_deploy",
 			}
 			if err := h.pipelineRepo.Create(p); err != nil {
 				errors = append(errors, fmt.Sprintf("%s: 创建 Pipeline 失败", sub.FileName))
@@ -372,7 +372,7 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 			Status:        "PENDING",
 			TriggerUser:   username,
 			ArtifactName:  item.FileName,
-			DeployMode:    "deploy",
+			DeployMode:    "artifact_deploy",
 		}
 
 		if err := h.pipelineRepo.Create(p); err != nil {

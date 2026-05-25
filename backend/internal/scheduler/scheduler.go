@@ -19,17 +19,17 @@ import (
 )
 
 type BuildScheduler struct {
-	mu             sync.Mutex
-	queue          []uint            // pending pipeline IDs (FIFO)
-	running        map[uint]context.CancelFunc
-	maxSlots       int
-	engine         *pipeline.Engine
-	pipelineRepo   *repository.PipelineRepo
-	taskRepo       *repository.TaskRepo
-	appRepo        *repository.ApplicationRepo
-	serverRepo     *repository.ServerRepo
+	mu              sync.Mutex
+	queue           []uint // pending pipeline IDs (FIFO)
+	running         map[uint]context.CancelFunc
+	maxSlots        int
+	engine          *pipeline.Engine
+	pipelineRepo    *repository.PipelineRepo
+	taskRepo        *repository.TaskRepo
+	appRepo         *repository.ApplicationRepo
+	serverRepo      *repository.ServerRepo
 	buildConfigRepo *repository.BuildConfigRepo
-	settingsRepo   *repository.SettingsRepo
+	settingsRepo    *repository.SettingsRepo
 }
 
 var DefaultScheduler *BuildScheduler
@@ -208,13 +208,19 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 			notifyRepo.Create(&model.NotificationMsg{
 				Type: "build_complete", Title: fmt.Sprintf("%s 镜像构建完成", p.AppName),
 				Content: fmt.Sprintf("应用 %s 镜像已推送到仓库，等待确认部署", p.AppName),
-				Level: "success", PipelineID: p.ID,
+				Level:   "success", PipelineID: p.ID,
 			})
 			logger.Log.Infof("Pipeline %d paused at IMAGE_READY", pipelineID)
 			return
 		}
-		p.Status = "FAILED"
-		p.ErrorMessage = execErr.Error()
+		latest, _ := s.pipelineRepo.FindByID(pipelineID)
+		if latest != nil && latest.Status == "CANCELED" {
+			p.Status = "CANCELED"
+			p.ErrorMessage = "构建已取消"
+		} else {
+			p.Status = "FAILED"
+			p.ErrorMessage = execErr.Error()
+		}
 	} else {
 		p.Status = "SUCCESS"
 	}
@@ -226,13 +232,13 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 		notifyRepo.Create(&model.NotificationMsg{
 			Type: "deploy_complete", Title: fmt.Sprintf("%s 更新成功", p.AppName),
 			Content: fmt.Sprintf("应用 %s 已成功部署", p.AppName),
-			Level: "success", PipelineID: p.ID,
+			Level:   "success", PipelineID: p.ID,
 		})
 	} else if p.Status == "FAILED" {
 		notifyRepo.Create(&model.NotificationMsg{
 			Type: "deploy_failed", Title: fmt.Sprintf("%s 更新失败", p.AppName),
 			Content: fmt.Sprintf("应用 %s 部署失败: %s", p.AppName, p.ErrorMessage),
-			Level: "error", PipelineID: p.ID,
+			Level:   "error", PipelineID: p.ID,
 		})
 	}
 
@@ -282,17 +288,19 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 }
 
 func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext {
-	// Load task to get build config and servers
-	task, err := s.taskRepo.FindByID(p.TaskID)
-	if err != nil {
-		logger.Log.Errorf("Task %d not found for pipeline %d", p.TaskID, p.ID)
-		return nil
-	}
-
+	var task *model.Task
 	var buildConfig *model.BuildConfig
-	if task.BuildConfigID > 0 {
-		bc, _ := s.buildConfigRepo.FindByID(task.BuildConfigID)
-		buildConfig = bc
+	if p.TaskID > 0 {
+		var err error
+		task, err = s.taskRepo.FindByID(p.TaskID)
+		if err != nil {
+			logger.Log.Errorf("Task %d not found for pipeline %d", p.TaskID, p.ID)
+			return nil
+		}
+		if task.BuildConfigID > 0 {
+			bc, _ := s.buildConfigRepo.FindByID(task.BuildConfigID)
+			buildConfig = bc
+		}
 	}
 
 	// BuildMode is determined by the BuildConfig itself (no global override)
@@ -339,10 +347,10 @@ func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext 
 	}
 
 	return &types.PipelineContext{
-		PipelineID:       p.ID,
-		Pipeline:         p,
+		PipelineID: p.ID,
+		Pipeline:   p,
 		Workspace: &types.Workspace{
-			BaseDir:    func() string {
+			BaseDir: func() string {
 				abs, err := filepath.Abs("./workspaces")
 				if err != nil {
 					return "./workspaces"
@@ -365,6 +373,7 @@ func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext 
 		IsGateway:        isGateway,
 		DeployMode:       p.DeployMode,
 		K8sNamespace:     p.K8sNamespace,
+		ImageName:        p.ImageName,
 		NodePort:         nodePort,
 		IngressHost:      ingressHost,
 		Ingresses:        ingresses,
@@ -390,15 +399,16 @@ func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string, autoDeploy boo
 		return nil, fmt.Errorf("关联应用不存在")
 	}
 
-	// Determine deploy mode: global default, overridden by autoDeploy flag
+	// Determine deploy mode: task default, then global default, overridden by autoDeploy flag
 	deployMode, _ := settingsRepo.GetByKey("deploy_mode")
+	if task.DeployMode != "" {
+		deployMode = task.DeployMode
+	}
 	if deployMode == "" {
 		deployMode = "deploy"
 	}
 	if !autoDeploy {
 		deployMode = "deploy_with_approval"
-	} else {
-		deployMode = "deploy"
 	}
 
 	p := &model.Pipeline{

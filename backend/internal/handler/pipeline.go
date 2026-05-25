@@ -75,6 +75,7 @@ func (h *PipelineHandler) Get(c *gin.Context) {
 
 func (h *PipelineHandler) Cancel(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+	scheduler.DefaultScheduler.Cancel(uint(id))
 	if err := h.pipelineRepo.UpdateStatus(uint(id), "CANCELED"); err != nil {
 		response.Fail(c, 10303, "取消失败")
 		return
@@ -104,6 +105,7 @@ func (h *PipelineHandler) GetQueue(c *gin.Context) {
 
 func (h *PipelineHandler) CancelQueued(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+	scheduler.DefaultScheduler.Cancel(uint(id))
 	if err := h.pipelineRepo.UpdateStatus(uint(id), "CANCELED"); err != nil {
 		response.Fail(c, 10305, "取消失败")
 		return

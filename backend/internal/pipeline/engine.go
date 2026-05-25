@@ -119,6 +119,9 @@ func (e *Engine) Execute(ctx context.Context, p *model.Pipeline, pCtx *types.Pip
 		exitCode := 0
 		stage.ExitCode = &exitCode
 		stage.Status = "SUCCESS"
+		if pCtx.ImageName != "" {
+			p.ImageName = pCtx.ImageName
+		}
 		e.stageRepo.Update(stage)
 		e.sseHub.Publish(p.ID, sse.Event{Type: "stage_success", Data: fmt.Sprintf(`{"stageId":%d}`, stage.ID)})
 		logger.Log.Infof("Stage %s completed in %ds", def.Code, dur)
