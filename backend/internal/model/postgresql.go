@@ -4,6 +4,8 @@ import "time"
 
 type SQLChangeFile struct {
 	ID             uint       `gorm:"primaryKey" json:"id"`
+	BatchID        uint       `gorm:"index" json:"batchId"`
+	BatchSortNo    int        `json:"batchSortNo"`
 	SystemCode     string     `gorm:"size:64" json:"systemCode"`
 	Environment    string     `gorm:"size:64" json:"environment"`
 	SchemaName     string     `gorm:"size:64" json:"schemaName"`
@@ -15,6 +17,22 @@ type SQLChangeFile struct {
 	ExecuteMessage string     `gorm:"type:text" json:"executeMessage"`
 	ExecuteUser    string     `gorm:"size:64" json:"executeUser"`
 	ExecuteTime    *time.Time `json:"executeTime"`
+	IsDeleted      bool       `gorm:"index" json:"isDeleted"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+}
+
+type SQLChangeBatch struct {
+	ID             uint       `gorm:"primaryKey" json:"id"`
+	BatchName      string     `gorm:"size:255" json:"batchName"`
+	ExecuteStatus  string     `gorm:"size:24;index" json:"executeStatus"`
+	ExecuteMessage string     `gorm:"type:text" json:"executeMessage"`
+	ExecuteUser    string     `gorm:"size:64" json:"executeUser"`
+	ExecuteTime    *time.Time `json:"executeTime"`
+	TotalFiles     int        `json:"totalFiles"`
+	SuccessFiles   int        `json:"successFiles"`
+	FailedFiles    int        `json:"failedFiles"`
+	SkippedFiles   int        `json:"skippedFiles"`
 	IsDeleted      bool       `gorm:"index" json:"isDeleted"`
 	CreatedAt      time.Time  `json:"createdAt"`
 	UpdatedAt      time.Time  `json:"updatedAt"`

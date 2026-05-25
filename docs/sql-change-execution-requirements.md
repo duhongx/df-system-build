@@ -385,12 +385,15 @@ created_at
 | `CREATE OR REPLACE VIEW` 兼容性提示 | 已实现 | 如果目标视图已存在，会追加“列名/顺序/类型兼容性限制”的保守风险提示。 |
 | Bytebase 风险规则吸收 | 已实现 | 吸收 Bytebase SQL Review 的规则思路，补充 AST 识别 volatile default、DML `EXPLAIN (FORMAT JSON)` 影响行数预估、DROP INDEX CONCURRENTLY 策略、CHECK NOT VALID 判断。 |
 | SQL 执行策略标记 | 已实现 | 每条 SQL 记录 `executionStrategy` 和 `canRunInTransaction`；并发索引、并发删除索引、VACUUM、REINDEX 标记为非事务直接执行，BLOCKED 标记为导出处理。 |
+| WARN 风险执行确认 | 已实现 | 前端执行前汇总 WARN SQL 风险并要求确认；后端执行选项也支持强制要求确认，避免绕过页面直接执行。 |
+| SQL 执行中取消 | 已实现 | 执行中的 SQL 文件可提交取消请求，后端通过执行上下文取消当前 SQL，当前语句标记 `CANCELED`，文件标记 `CANCELED` 或 `PARTIAL_FAILED`。 |
+| 本地多 SQL 文件批次 | 已实现 | 前端支持一次选择多个本地 SQL 文件，后端按文件名排序生成 SQL 批次，批次执行按文件顺序执行，失败后停止后续文件。 |
 
 ### 部分实现或实现深度不足
 
 | 功能点 | 当前状态 | 差距 |
 |---|---|---|
-| 风险分类细粒度判断 | 部分实现 | 已区分 `varchar`/`text`/`numeric` 变更、`USING` 转换、存储格式变化、时区语义变化、AST volatile default、DROP/TRUNCATE 大表风险、DML 估算影响行数；尚未覆盖所有 PostgreSQL 类型组合和表达式语义。 |
+| 风险分类细粒度判断 | 部分实现 | 已区分 `varchar`/`text`/`numeric` 变更、`USING` 转换、存储格式变化、时区语义变化、AST volatile default、DROP/TRUNCATE 大表风险、DML 估算影响行数、外键/主键/唯一约束、分区、物化视图、函数、扩展风险；尚未覆盖所有 PostgreSQL 类型组合和表达式语义。 |
 | `CREATE OR REPLACE VIEW` 兼容性风险 | 部分实现 | 已对已有视图追加兼容性风险提示；尚未解析新 SELECT 输出列并精确比较列名、顺序、类型，也没有依赖链分析。 |
 | SQL 事务策略 | 部分实现 | 当前是逐条执行，不启用文件级事务；已记录每条 SQL 是否可放入事务，但尚未提供文件级事务执行模式。 |
 | schema 推断 | 部分实现 | 当前只从首个显式 schema 对象推断；如果 SQL 全部不带 schema，仍不会自动落到某个默认 schema。 |
@@ -405,7 +408,7 @@ created_at
 | 不默认使用 superuser 的强约束 | 暂不规划 | 当前允许使用 `postgres` 执行，重点强化 SQL 风险识别和执行保护，不强制切换业务账号。 |
 | 自动 drop/recreate 依赖视图 | 未实现 | 当前只生成视图重建计划，不自动按依赖顺序重建。 |
 | 非 `CONCURRENTLY` 索引创建/删除拦截 | 部分实现 | 当前会标记 WARN，并发创建/删除索引会标记为非事务执行；暂不自动改写、不默认强拦截。 |
-| SQL 执行中取消 | 未实现 | 当前没有 cancel API，也没有前端取消按钮；只能等待超时或手工处理进程。 |
+| SQL 执行中取消 | 已实现基础版 | 已支持取消当前 SQL 文件执行；批次级取消暂未单独提供，执行当前文件仍可被取消。 |
 | `psql` 兼容执行器 | 未实现 | 不支持 `\copy`、`\i`、`\set` 等 psql 元命令，也没有 SSH/psql 执行入口。 |
 | 超大 SQL 文件处理 | 未实现 | 当前会将文件内容整体读入内存并保存到数据库，未做流式解析、分片导入或后台任务化。 |
 | 按业务系统/环境/schema 配置超时和规则 | 暂不规划 | 当前产品方向已调整为不在 SQL 执行页面关注业务系统、环境、schema；schema 优先从 SQL 或文件名解析。 |
@@ -416,7 +419,7 @@ created_at
 1. **风险识别继续补齐**：持续补 PostgreSQL 类型组合、表达式语义、索引、约束、分区表、物化视图等风险规则。
 2. **大表风险识别扩展**：当前已覆盖 `DROP TABLE`、`TRUNCATE`、`ALTER COLUMN TYPE`、`SET NOT NULL`、`ADD CHECK`、`CREATE INDEX` 的基础大表风险，后续继续细化不同 SQL 类型阈值。
 3. **执行取消能力**：增加执行中的 cancel API 和前端按钮，避免长 SQL 只能等超时。
-4. **批量文件上传和批量执行增强**：补齐本地多文件、ZIP 上传、批量执行顺序、失败停止策略。
+4. **批量文件上传和批量执行增强**：本地多文件和批次顺序执行已实现；后续继续增强本地 ZIP 上传、批次取消、批次详情统计。
 5. **psql 兼容执行器**：作为特殊入口处理包含 psql 元命令或超大文件的脚本，不替代默认 pgx 执行。
 6. **视图自动重建增强**：当前只导出可人工处理的重建 SQL，后续再考虑自动 drop/recreate。
 

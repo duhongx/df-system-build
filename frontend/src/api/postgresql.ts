@@ -30,6 +30,8 @@ export interface PostgreSQLInstanceInfo {
 
 export interface SQLChangeFile {
   id: number
+  batchId: number
+  batchSortNo: number
   systemCode: string
   environment: string
   schemaName: string
@@ -41,6 +43,20 @@ export interface SQLChangeFile {
   executeMessage: string
   executeUser: string
   executeTime?: string
+  createdAt: string
+}
+
+export interface SQLChangeBatch {
+  id: number
+  batchName: string
+  executeStatus: string
+  executeMessage: string
+  executeUser: string
+  executeTime?: string
+  totalFiles: number
+  successFiles: number
+  failedFiles: number
+  skippedFiles: number
   createdAt: string
 }
 
@@ -77,6 +93,13 @@ export interface SQLExecuteOptions {
   skipExistsColumn: boolean
   skipExistsTable: boolean
   skipUniqueConstraint: boolean
+  requireRiskConfirmation: boolean
+  confirmWarnRisk: boolean
+}
+
+export interface ParseSQLBatchFile {
+  fileName: string
+  content: string
 }
 
 export const getPostgreSQLInstance = () =>
@@ -93,6 +116,21 @@ export const executeSQLFileWithOptions = (id: number, options: SQLExecuteOptions
 
 export const executeSQLContent = (data: ParseSQLRequest & { options: SQLExecuteOptions }) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/execute-content', data)
+
+export const cancelSQLFile = (id: number) =>
+  request.post<any, SQLChangeFile>(`/postgresql/sql-files/${id}/cancel`)
+
+export const parseSQLBatch = (data: { batchName?: string; overwrite?: boolean; files: ParseSQLBatchFile[] }) =>
+  request.post<any, { batch: SQLChangeBatch; files: SQLChangeFile[] }>('/postgresql/sql-batches/parse', data)
+
+export const executeSQLBatch = (id: number, options: SQLExecuteOptions) =>
+  request.post<any, { batch: SQLChangeBatch; files: SQLChangeFile[] }>(`/postgresql/sql-batches/${id}/execute`, { options })
+
+export const listSQLBatches = (page = 1, pageSize = 20) =>
+  request.get<any, PageResult<SQLChangeBatch>>('/postgresql/sql-batches', { params: { page, pageSize } })
+
+export const getSQLBatch = (id: number) =>
+  request.get<any, { batch: SQLChangeBatch; files: SQLChangeFile[] }>(`/postgresql/sql-batches/${id}`)
 
 export const listSQLFiles = (page = 1, pageSize = 20) =>
   request.get<any, PageResult<SQLChangeFile>>('/postgresql/sql-files', { params: { page, pageSize } })

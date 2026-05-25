@@ -2,17 +2,23 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  cancelSQLFile,
   deleteSQLFile,
-  executeSQLContent,
+  executeSQLBatch,
   executeSQLFileWithOptions,
   exportNotExecutableSQL,
+  getSQLBatch,
   getSQLFile,
   importServerSQL,
+  listSQLBatches,
   listDoneSQLFiles,
   listTodoSQLFiles,
+  parseSQLBatch,
   parseSQLFile,
   skipSQLFile,
   skipSQLStatement,
+  type ParseSQLBatchFile,
+  type SQLChangeBatch,
   type SQLChangeFile,
   type SQLChangeStatement,
   type SQLExecuteOptions,
@@ -27,18 +33,26 @@ const loadingDone = ref(false)
 
 const form = ref({ fileName: '', content: '', overwrite: true })
 const serverFilePath = ref('')
+const batchFiles = ref<ParseSQLBatchFile[]>([])
 const options = ref<SQLExecuteOptions>({
   skipExistsColumn: true,
   skipExistsTable: true,
   skipUniqueConstraint: true,
+  requireRiskConfirmation: true,
+  confirmWarnRisk: false,
 })
 
+const currentBatch = ref<SQLChangeBatch | null>(null)
+const batchFileList = ref<SQLChangeFile[]>([])
 const currentFile = ref<SQLChangeFile | null>(null)
 const statements = ref<SQLChangeStatement[]>([])
+const batches = ref<SQLChangeBatch[]>([])
 const todoFiles = ref<SQLChangeFile[]>([])
 const doneFiles = ref<SQLChangeFile[]>([])
+const batchTotal = ref(0)
 const todoTotal = ref(0)
 const doneTotal = ref(0)
+const batchPage = ref(1)
 const todoPage = ref(1)
 const donePage = ref(1)
 const pageSize = 10
@@ -50,9 +64,16 @@ const notExecutableCount = computed(() => statements.value.filter(s => s.execute
 const skippedCount = computed(() => statements.value.filter(s => s.executeStatus === 'SKIPPED').length)
 
 onMounted(() => {
+  loadBatches()
   loadTodo()
   loadDone()
 })
+
+async function loadBatches() {
+  const data = await listSQLBatches(batchPage.value, pageSize)
+  batches.value = data.list || []
+  batchTotal.value = data.total || 0
+}
 
 async function loadTodo() {
   loadingTodo.value = true
@@ -76,20 +97,28 @@ async function loadDone() {
   }
 }
 
-function handleFileChange(event: Event) {
+async function handleFileChange(event: Event) {
   const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
-  form.value.fileName = file.name
-  const reader = new FileReader()
-  reader.onload = () => {
-    form.value.content = String(reader.result || '')
+  const files = Array.from(input.files || [])
+  if (files.length === 0) return
+  const parsedFiles = await Promise.all(files.map(async file => ({
+    fileName: file.name,
+    content: await file.text(),
+  })))
+  batchFiles.value = parsedFiles
+  form.value.fileName = parsedFiles[0].fileName
+  form.value.content = parsedFiles[0].content
+  if (parsedFiles.length > 1) {
+    ElMessage.success(`已选择 ${parsedFiles.length} 个 SQL 文件，可解析为批次`)
   }
-  reader.readAsText(file)
   input.value = ''
 }
 
 async function handleParse() {
+  if (batchFiles.value.length > 1) {
+    await handleParseBatch()
+    return
+  }
   if (!form.value.content.trim()) {
     ElMessage.warning('请上传 SQL 文件或粘贴 SQL 内容')
     return
@@ -106,6 +135,27 @@ async function handleParse() {
   }
 }
 
+async function handleParseBatch() {
+  if (batchFiles.value.length === 0) {
+    ElMessage.warning('请选择 SQL 文件')
+    return
+  }
+  parsing.value = true
+  try {
+    const data = await parseSQLBatch({
+      batchName: form.value.fileName.replace(/\.[^.]+$/, '') || undefined,
+      overwrite: form.value.overwrite,
+      files: batchFiles.value,
+    })
+    currentBatch.value = data.batch
+    batchFileList.value = data.files || []
+    ElMessage.success(`已解析批次，包含 ${batchFileList.value.length} 个 SQL 文件`)
+    await Promise.all([loadBatches(), loadTodo()])
+  } finally {
+    parsing.value = false
+  }
+}
+
 async function handleExecuteContent() {
   if (!form.value.content.trim()) {
     ElMessage.warning('请上传 SQL 文件或粘贴 SQL 内容')
@@ -113,11 +163,13 @@ async function handleExecuteContent() {
   }
   executing.value = true
   try {
-    const data = await executeSQLContent({ ...form.value, options: options.value })
+    const parsed = await parseSQLFile(form.value)
+    const confirmedOptions = await buildConfirmedOptions(parsed.statements || [])
+    const data = await executeSQLFileWithOptions(parsed.file.id, confirmedOptions)
     currentFile.value = data.file
     statements.value = data.statements || []
     ElMessage.success(data.file.executeMessage || '执行完成')
-    await Promise.all([loadTodo(), loadDone()])
+    await Promise.all([loadBatches(), loadTodo(), loadDone()])
   } finally {
     executing.value = false
   }
@@ -130,14 +182,43 @@ async function handleExecuteFile(row = currentFile.value) {
   }
   executing.value = true
   try {
-    const data = await executeSQLFileWithOptions(row.id, options.value)
+    const loaded = await getSQLFile(row.id)
+    const confirmedOptions = await buildConfirmedOptions(loaded.statements || [])
+    const data = await executeSQLFileWithOptions(row.id, confirmedOptions)
     currentFile.value = data.file
     statements.value = data.statements || []
     ElMessage.success(data.file.executeMessage || '执行完成')
-    await Promise.all([loadTodo(), loadDone()])
+    await Promise.all([loadBatches(), loadTodo(), loadDone()])
   } finally {
     executing.value = false
   }
+}
+
+async function handleExecuteBatch(row = currentBatch.value) {
+  if (!row) {
+    ElMessage.warning('请选择 SQL 批次')
+    return
+  }
+  await ElMessageBox.confirm(`确定按顺序执行批次 "${row.batchName}" 吗？`, '确认执行批次', { type: 'warning' })
+  executing.value = true
+  try {
+    const data = await executeSQLBatch(row.id, { ...options.value, confirmWarnRisk: true })
+    currentBatch.value = data.batch
+    batchFileList.value = data.files || []
+    ElMessage.success(data.batch.executeMessage || '批次执行完成')
+    await Promise.all([loadBatches(), loadTodo(), loadDone()])
+  } finally {
+    executing.value = false
+  }
+}
+
+async function handleCancelExecution() {
+  if (!currentFile.value) {
+    ElMessage.warning('请选择正在执行的 SQL 文件')
+    return
+  }
+  await cancelSQLFile(currentFile.value.id)
+  ElMessage.warning('已提交取消请求')
 }
 
 async function handleOpen(row: SQLChangeFile) {
@@ -149,6 +230,12 @@ async function handleOpen(row: SQLChangeFile) {
     content: data.file.fileContent || '',
     overwrite: true,
   }
+}
+
+async function handleOpenBatch(row: SQLChangeBatch) {
+  const data = await getSQLBatch(row.id)
+  currentBatch.value = data.batch
+  batchFileList.value = data.files || []
 }
 
 async function handleSkipFile(row: SQLChangeFile) {
@@ -211,7 +298,22 @@ function statusTag(status: string) {
   if (status === 'FAILED' || status === 'PARTIAL_FAILED' || status === 'NOT_EXECUTABLE') return 'danger'
   if (status === 'RUNNING') return 'primary'
   if (status === 'SKIPPED') return 'info'
+  if (status === 'CANCELED') return 'warning'
   return 'info'
+}
+
+async function buildConfirmedOptions(targetStatements: SQLChangeStatement[]) {
+  const warnStatements = targetStatements.filter(s => s.riskLevel === 'WARN' && s.executeStatus !== 'SUCCESS' && s.executeStatus !== 'SKIPPED')
+  if (warnStatements.length === 0) {
+    return { ...options.value, confirmWarnRisk: false }
+  }
+  const riskTypes = Array.from(new Set(warnStatements.map(s => s.sqlType))).slice(0, 8).join('、')
+  await ElMessageBox.confirm(
+    `存在 ${warnStatements.length} 条 WARN 风险 SQL：${riskTypes}。确认后将继续执行可执行语句。`,
+    '确认 SQL 风险',
+    { type: 'warning', confirmButtonText: '确认执行', cancelButtonText: '取消' },
+  )
+  return { ...options.value, confirmWarnRisk: true }
 }
 
 function strategyLabel(row: SQLChangeStatement) {
@@ -245,9 +347,10 @@ function strategyTag(row: SQLChangeStatement) {
       <div class="toolbar-row">
         <el-input v-model="form.fileName" placeholder="SQL 文件名" style="width: 280px;" />
         <label class="upload-btn">
-          <input type="file" accept=".sql,.txt" @change="handleFileChange" />
+          <input type="file" accept=".sql,.txt" multiple @change="handleFileChange" />
           <span>上传 SQL</span>
         </label>
+        <el-tag v-if="batchFiles.length > 1" type="warning" size="small">已选择 {{ batchFiles.length }} 个文件</el-tag>
         <el-checkbox v-model="form.overwrite">同名覆盖</el-checkbox>
         <el-checkbox v-model="options.skipExistsColumn">字段已存在则跳过</el-checkbox>
         <el-checkbox v-model="options.skipExistsTable">对象已存在则跳过</el-checkbox>
@@ -264,6 +367,8 @@ function strategyTag(row: SQLChangeStatement) {
         <el-button :loading="parsing" @click="handleParse">仅解析</el-button>
         <el-button type="primary" :loading="executing" @click="handleExecuteContent">解析并执行</el-button>
         <el-button :disabled="!currentFile" :loading="executing" @click="handleExecuteFile()">执行当前文件</el-button>
+        <el-button v-if="currentFile?.executeStatus === 'RUNNING'" type="warning" @click="handleCancelExecution">取消执行</el-button>
+        <el-button :disabled="!currentBatch" :loading="executing" @click="handleExecuteBatch()">执行当前批次</el-button>
         <el-input v-model="serverFilePath" placeholder="服务器 .sql 或 .zip 文件路径" style="width: 360px;" />
         <el-button :loading="importing" @click="handleImportServerSQL">导入服务器文件</el-button>
       </div>
@@ -294,6 +399,7 @@ function strategyTag(row: SQLChangeStatement) {
         </el-table-column>
         <el-table-column prop="affectedRows" label="影响行数" width="100" />
         <el-table-column prop="durationMs" label="耗时(ms)" width="100" />
+        <el-table-column prop="sqlState" label="SQLState" width="100" />
         <el-table-column prop="sqlContent" label="SQL" min-width="320" show-overflow-tooltip />
         <el-table-column label="原因" min-width="260" show-overflow-tooltip>
           <template #default="{ row }">{{ row.executeMessage || row.riskReason }}</template>
@@ -310,6 +416,41 @@ function strategyTag(row: SQLChangeStatement) {
           </template>
         </el-table-column>
       </el-table>
+    </div>
+
+    <div class="file-grid">
+      <div class="content-card">
+        <div class="section-title">SQL 批次</div>
+        <el-table :data="batches" size="small" border @row-click="handleOpenBatch">
+          <el-table-column prop="batchName" label="批次" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="totalFiles" label="文件数" width="80" />
+          <el-table-column prop="executeStatus" label="状态" width="130">
+            <template #default="{ row }"><el-tag :type="statusTag(row.executeStatus)" size="small">{{ row.executeStatus }}</el-tag></template>
+          </el-table-column>
+          <el-table-column prop="createdAt" label="创建时间" width="160">
+            <template #default="{ row }">{{ formatTimeStr(row.createdAt) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="90" fixed="right">
+            <template #default="{ row }">
+              <el-button type="primary" link size="small" @click.stop="handleExecuteBatch(row)">执行</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="pager-row">
+          <el-pagination v-model:current-page="batchPage" small layout="prev, pager, next" :page-size="pageSize" :total="batchTotal" @current-change="loadBatches" />
+        </div>
+      </div>
+
+      <div class="content-card">
+        <div class="section-title">当前批次文件</div>
+        <el-table :data="batchFileList" size="small" border @row-click="handleOpen">
+          <el-table-column prop="batchSortNo" label="序号" width="70" />
+          <el-table-column prop="fileName" label="文件" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="executeStatus" label="状态" width="130">
+            <template #default="{ row }"><el-tag :type="statusTag(row.executeStatus)" size="small">{{ row.executeStatus }}</el-tag></template>
+          </el-table-column>
+        </el-table>
+      </div>
     </div>
 
     <div class="file-grid">

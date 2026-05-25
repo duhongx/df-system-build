@@ -337,6 +337,76 @@ func TestSQLExecuteOptionsSkipLegacyPostgreSQLErrors(t *testing.T) {
 	}
 }
 
+func TestSQLExecuteOptionsRequireWarnConfirmation(t *testing.T) {
+	statements := []model.SQLChangeStatement{
+		{SQLType: "CREATE_TABLE", RiskLevel: "LOW", ExecuteStatus: "PENDING"},
+		{SQLType: "CREATE_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 创建索引可能阻塞写入", ExecuteStatus: "PENDING"},
+	}
+
+	err := requireWarnConfirmation(statements, SQLExecuteOptions{RequireRiskConfirmation: true})
+	if err == nil {
+		t.Fatalf("expected warn confirmation error")
+	}
+	if !strings.Contains(err.Error(), "存在 1 条 WARN") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	err = requireWarnConfirmation(statements, SQLExecuteOptions{RequireRiskConfirmation: true, ConfirmWarnRisk: true})
+	if err != nil {
+		t.Fatalf("expected confirmed warn risk to pass, got %v", err)
+	}
+}
+
+func TestSQLExecutionCancelRegistry(t *testing.T) {
+	registry := newSQLExecutionCancelRegistry()
+	canceled := false
+	ok := registry.register(42, func() { canceled = true })
+	if !ok {
+		t.Fatalf("expected first register to succeed")
+	}
+	if registry.register(42, func() {}) {
+		t.Fatalf("expected duplicate register to fail")
+	}
+	if !registry.cancel(42) {
+		t.Fatalf("expected cancel to find running file")
+	}
+	if !canceled {
+		t.Fatalf("expected cancel func to be called")
+	}
+	registry.unregister(42)
+	if registry.cancel(42) {
+		t.Fatalf("expected cancel to miss after unregister")
+	}
+}
+
+func TestParseSQLBatchCreatesOrderedFiles(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+
+	batch, files, err := NewPostgreSQLService().ParseSQLBatch(ParseSQLBatchRequest{
+		BatchName: "2026-upgrade",
+		Overwrite: true,
+		Files: []ParseSQLBatchFile{
+			{FileName: "002-second.sql", Content: "CREATE TABLE second(id int);"},
+			{FileName: "001-first.sql", Content: "CREATE TABLE first(id int);"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse batch: %v", err)
+	}
+	if batch.TotalFiles != 2 || batch.ExecuteStatus != "PENDING" {
+		t.Fatalf("unexpected batch: %+v", batch)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files, got %d", len(files))
+	}
+	if files[0].FileName != "001-first.sql" || files[0].BatchSortNo != 1 {
+		t.Fatalf("expected first sorted file, got %+v", files[0])
+	}
+	if files[1].FileName != "002-second.sql" || files[1].BatchSortNo != 2 {
+		t.Fatalf("expected second sorted file, got %+v", files[1])
+	}
+}
+
 func TestExportNotExecutableSQLIncludesBlockedAndFailed(t *testing.T) {
 	statements := []SQLExportStatement{
 		{LineNumber: 1, SQLContent: "CREATE TABLE demo(id int)", ExecuteStatus: "SUCCESS"},

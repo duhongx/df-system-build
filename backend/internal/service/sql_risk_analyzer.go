@@ -445,6 +445,10 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 		return RiskAnalysis{SQLType: "CREATE_TABLE_AS", RiskLevel: "WARN", RiskReason: "CREATE TABLE AS 可能写入大量数据，请确认数据规模"}, true
 	case node.GetViewStmt() != nil:
 		return RiskAnalysis{SQLType: "CREATE_VIEW", RiskLevel: "LOW"}, true
+	case node.GetCreateFunctionStmt() != nil:
+		return RiskAnalysis{SQLType: "CREATE_FUNCTION", RiskLevel: "WARN", RiskReason: "创建或替换函数可能改变业务逻辑，请确认依赖范围"}, true
+	case node.GetCreateExtensionStmt() != nil:
+		return RiskAnalysis{SQLType: "CREATE_EXTENSION", RiskLevel: "WARN", RiskReason: "创建扩展会修改数据库能力和对象，请确认权限和兼容性"}, true
 	case node.GetAlterSystemStmt() != nil:
 		return RiskAnalysis{SQLType: "ALTER_SYSTEM", RiskLevel: "BLOCKED", RiskReason: "禁止修改数据库系统级参数"}, true
 	case node.GetDropOwnedStmt() != nil:
@@ -478,6 +482,8 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 			return RiskAnalysis{SQLType: "VACUUM_FULL", RiskLevel: "BLOCKED", RiskReason: "禁止执行 VACUUM FULL"}, true
 		}
 		return RiskAnalysis{SQLType: "VACUUM", RiskLevel: "LOW"}, true
+	case node.GetRefreshMatViewStmt() != nil:
+		return RiskAnalysis{SQLType: "REFRESH_MATERIALIZED_VIEW", RiskLevel: "WARN", RiskReason: "刷新物化视图可能长时间持锁或写入大量数据"}, true
 	default:
 		return RiskAnalysis{}, false
 	}
@@ -496,6 +502,10 @@ func analyzeDropStmt(stmt *pg_query.DropStmt) RiskAnalysis {
 			return RiskAnalysis{SQLType: "DROP_INDEX_CONCURRENTLY", RiskLevel: "WARN", RiskReason: "并发删除索引耗时可能较长"}
 		}
 		return RiskAnalysis{SQLType: "DROP_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 删除索引可能阻塞访问"}
+	case pg_query.ObjectType_OBJECT_FUNCTION:
+		return RiskAnalysis{SQLType: "DROP_FUNCTION", RiskLevel: "WARN", RiskReason: "删除函数可能影响依赖对象或业务调用"}
+	case pg_query.ObjectType_OBJECT_EXTENSION:
+		return RiskAnalysis{SQLType: "DROP_EXTENSION", RiskLevel: "WARN", RiskReason: "删除扩展会影响扩展对象和依赖功能"}
 	default:
 		return RiskAnalysis{SQLType: "DROP", RiskLevel: "WARN", RiskReason: "DROP 会删除数据库对象，请确认对象范围"}
 	}
@@ -516,13 +526,30 @@ func analyzeAlterTableStmt(stmt *pg_query.AlterTableStmt) RiskAnalysis {
 		case pg_query.AlterTableType_AT_SetNotNull:
 			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ALTER_SET_NOT_NULL", RiskLevel: "WARN", RiskReason: "设置 NOT NULL 可能扫描全表"})
 		case pg_query.AlterTableType_AT_AddConstraint:
-			if constraint := cmd.GetDef().GetConstraint(); constraint != nil && constraint.GetContype() == pg_query.ConstrType_CONSTR_CHECK {
-				if constraint.GetSkipValidation() {
-					risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_CHECK_NOT_VALID", RiskLevel: "LOW", RiskReason: "CHECK 使用 NOT VALID，不立即校验已有数据"})
-				} else {
-					risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_CHECK", RiskLevel: "WARN", RiskReason: "新增 CHECK 默认校验已有数据，可能扫描全表"})
+			if constraint := cmd.GetDef().GetConstraint(); constraint != nil {
+				switch constraint.GetContype() {
+				case pg_query.ConstrType_CONSTR_CHECK:
+					if constraint.GetSkipValidation() {
+						risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_CHECK_NOT_VALID", RiskLevel: "LOW", RiskReason: "CHECK 使用 NOT VALID，不立即校验已有数据"})
+					} else {
+						risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_CHECK", RiskLevel: "WARN", RiskReason: "新增 CHECK 默认校验已有数据，可能扫描全表"})
+					}
+				case pg_query.ConstrType_CONSTR_FOREIGN:
+					risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_FOREIGN_KEY", RiskLevel: "WARN", RiskReason: "新增外键可能扫描已有数据并长时间持锁"})
+				case pg_query.ConstrType_CONSTR_PRIMARY:
+					risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_PRIMARY_KEY", RiskLevel: "WARN", RiskReason: "新增主键会创建索引并校验数据唯一性"})
+				case pg_query.ConstrType_CONSTR_UNIQUE:
+					risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_UNIQUE", RiskLevel: "WARN", RiskReason: "新增唯一约束会创建索引并校验数据唯一性"})
 				}
 			}
+		case pg_query.AlterTableType_AT_ValidateConstraint:
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "VALIDATE_CONSTRAINT", RiskLevel: "WARN", RiskReason: "VALIDATE CONSTRAINT 会扫描已有数据"})
+		case pg_query.AlterTableType_AT_AddIndex, pg_query.AlterTableType_AT_AddIndexConstraint:
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ADD_INDEX_CONSTRAINT", RiskLevel: "WARN", RiskReason: "新增索引约束可能长时间持锁"})
+		case pg_query.AlterTableType_AT_AttachPartition:
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ATTACH_PARTITION", RiskLevel: "WARN", RiskReason: "挂载分区可能校验数据范围并持锁"})
+		case pg_query.AlterTableType_AT_DetachPartition, pg_query.AlterTableType_AT_DetachPartitionFinalize:
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DETACH_PARTITION", RiskLevel: "WARN", RiskReason: "分离分区可能影响查询路由和数据可见性"})
 		case pg_query.AlterTableType_AT_DropColumn, pg_query.AlterTableType_AT_DropConstraint:
 			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ALTER_TABLE_DROP", RiskLevel: "WARN", RiskReason: "ALTER TABLE 删除字段或约束可能影响业务，请确认依赖范围"})
 		}

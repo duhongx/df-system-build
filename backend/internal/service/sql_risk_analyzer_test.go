@@ -185,6 +185,85 @@ func TestAnalyzeSQLRiskClassifiesDropIndexConcurrency(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSQLRiskClassifiesAdditionalBytebaseStyleRisks(t *testing.T) {
+	tests := []struct {
+		name       string
+		sql        string
+		wantType   string
+		wantLevel  string
+		wantReason string
+	}{
+		{
+			name:       "foreign key scans existing data",
+			sql:        "ALTER TABLE orders ADD CONSTRAINT fk_patient FOREIGN KEY (patient_id) REFERENCES patient(id)",
+			wantType:   "ADD_FOREIGN_KEY",
+			wantLevel:  "WARN",
+			wantReason: "外键",
+		},
+		{
+			name:       "primary key creates index",
+			sql:        "ALTER TABLE patient ADD CONSTRAINT patient_pk PRIMARY KEY (id)",
+			wantType:   "ADD_PRIMARY_KEY",
+			wantLevel:  "WARN",
+			wantReason: "索引",
+		},
+		{
+			name:       "validate constraint scans data",
+			sql:        "ALTER TABLE patient VALIDATE CONSTRAINT chk_patient_code",
+			wantType:   "VALIDATE_CONSTRAINT",
+			wantLevel:  "WARN",
+			wantReason: "扫描",
+		},
+		{
+			name:       "attach partition",
+			sql:        "ALTER TABLE patient ATTACH PARTITION patient_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+			wantType:   "ATTACH_PARTITION",
+			wantLevel:  "WARN",
+			wantReason: "分区",
+		},
+		{
+			name:       "refresh materialized view",
+			sql:        "REFRESH MATERIALIZED VIEW patient_summary",
+			wantType:   "REFRESH_MATERIALIZED_VIEW",
+			wantLevel:  "WARN",
+			wantReason: "物化视图",
+		},
+		{
+			name:       "create or replace function",
+			sql:        "CREATE OR REPLACE FUNCTION f_patient() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$",
+			wantType:   "CREATE_FUNCTION",
+			wantLevel:  "WARN",
+			wantReason: "函数",
+		},
+		{
+			name:       "drop function",
+			sql:        "DROP FUNCTION f_patient()",
+			wantType:   "DROP_FUNCTION",
+			wantLevel:  "WARN",
+			wantReason: "函数",
+		},
+		{
+			name:       "create extension",
+			sql:        "CREATE EXTENSION IF NOT EXISTS pgcrypto",
+			wantType:   "CREATE_EXTENSION",
+			wantLevel:  "WARN",
+			wantReason: "扩展",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AnalyzeSQLRisk(tc.sql)
+			if got.SQLType != tc.wantType || got.RiskLevel != tc.wantLevel {
+				t.Fatalf("expected %s %s, got %+v", tc.wantType, tc.wantLevel, got)
+			}
+			if !strings.Contains(got.RiskReason, tc.wantReason) {
+				t.Fatalf("expected reason containing %q, got %q", tc.wantReason, got.RiskReason)
+			}
+		})
+	}
+}
+
 func TestAnalyzeSQLRiskClassifiesNotValidCheckAsLow(t *testing.T) {
 	got := AnalyzeSQLRisk("ALTER TABLE patient ADD CONSTRAINT chk_code CHECK (code <> '') NOT VALID")
 

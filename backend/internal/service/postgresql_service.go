@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"df-build-server/internal/model"
@@ -25,10 +26,11 @@ import (
 
 type PostgreSQLService struct {
 	settingsRepo *repository.SettingsRepo
+	cancelReg    *sqlExecutionCancelRegistry
 }
 
 func NewPostgreSQLService() *PostgreSQLService {
-	return &PostgreSQLService{settingsRepo: repository.NewSettingsRepo()}
+	return &PostgreSQLService{settingsRepo: repository.NewSettingsRepo(), cancelReg: globalSQLExecutionCancelRegistry}
 }
 
 type PostgreSQLConfig struct {
@@ -81,9 +83,11 @@ type RiskAnalysis struct {
 }
 
 type SQLExecuteOptions struct {
-	SkipExistsColumn     bool `json:"skipExistsColumn"`
-	SkipExistsTable      bool `json:"skipExistsTable"`
-	SkipUniqueConstraint bool `json:"skipUniqueConstraint"`
+	SkipExistsColumn        bool `json:"skipExistsColumn"`
+	SkipExistsTable         bool `json:"skipExistsTable"`
+	SkipUniqueConstraint    bool `json:"skipUniqueConstraint"`
+	RequireRiskConfirmation bool `json:"requireRiskConfirmation"`
+	ConfirmWarnRisk         bool `json:"confirmWarnRisk"`
 }
 
 type ExecuteSQLContentRequest struct {
@@ -102,6 +106,55 @@ type SQLExportStatement struct {
 	ExecuteStatus  string
 	ExecuteMessage string
 	RiskReason     string
+}
+
+type ParseSQLBatchFile struct {
+	FileName string `json:"fileName" binding:"required"`
+	Content  string `json:"content" binding:"required"`
+}
+
+type ParseSQLBatchRequest struct {
+	BatchName string              `json:"batchName"`
+	Overwrite bool                `json:"overwrite"`
+	Files     []ParseSQLBatchFile `json:"files" binding:"required"`
+}
+
+type sqlExecutionCancelRegistry struct {
+	mu      sync.Mutex
+	cancels map[uint]context.CancelFunc
+}
+
+var globalSQLExecutionCancelRegistry = newSQLExecutionCancelRegistry()
+
+func newSQLExecutionCancelRegistry() *sqlExecutionCancelRegistry {
+	return &sqlExecutionCancelRegistry{cancels: map[uint]context.CancelFunc{}}
+}
+
+func (r *sqlExecutionCancelRegistry) register(fileID uint, cancel context.CancelFunc) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.cancels[fileID]; exists {
+		return false
+	}
+	r.cancels[fileID] = cancel
+	return true
+}
+
+func (r *sqlExecutionCancelRegistry) unregister(fileID uint) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.cancels, fileID)
+}
+
+func (r *sqlExecutionCancelRegistry) cancel(fileID uint) bool {
+	r.mu.Lock()
+	cancel, exists := r.cancels[fileID]
+	r.mu.Unlock()
+	if !exists {
+		return false
+	}
+	cancel()
+	return true
 }
 
 func (s *PostgreSQLService) GetInstanceInfo(ctx context.Context) (*PostgreSQLInstanceInfo, error) {
@@ -250,6 +303,47 @@ func (s *PostgreSQLService) ParseSQL(req ParseSQLRequest) (*model.SQLChangeFile,
 		items = append(items, item)
 	}
 	return file, items, nil
+}
+
+func (s *PostgreSQLService) ParseSQLBatch(req ParseSQLBatchRequest) (*model.SQLChangeBatch, []model.SQLChangeFile, error) {
+	if len(req.Files) == 0 {
+		return nil, nil, fmt.Errorf("SQL 文件不能为空")
+	}
+	files := append([]ParseSQLBatchFile(nil), req.Files...)
+	sort.SliceStable(files, func(i, j int) bool {
+		return strings.ToLower(files[i].FileName) < strings.ToLower(files[j].FileName)
+	})
+	batchName := strings.TrimSpace(req.BatchName)
+	if batchName == "" {
+		batchName = "SQL 批次 " + time.Now().Format("20060102150405")
+	}
+	batch := &model.SQLChangeBatch{
+		BatchName:     batchName,
+		ExecuteStatus: "PENDING",
+		TotalFiles:    len(files),
+	}
+	if err := repository.DB.Create(batch).Error; err != nil {
+		return nil, nil, err
+	}
+
+	created := make([]model.SQLChangeFile, 0, len(files))
+	for i, input := range files {
+		file, _, err := s.ParseSQL(ParseSQLRequest{
+			FileName:  input.FileName,
+			Content:   input.Content,
+			Overwrite: req.Overwrite,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		file.BatchID = batch.ID
+		file.BatchSortNo = i + 1
+		if err := repository.DB.Save(file).Error; err != nil {
+			return nil, nil, err
+		}
+		created = append(created, *file)
+	}
+	return batch, created, nil
 }
 
 func (s *PostgreSQLService) enrichColumnTypeRiskWithMetadata(defaultSchema, sqlText string, analysis RiskAnalysis) RiskAnalysis {
@@ -726,6 +820,9 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 	if err := repository.DB.Where("file_id = ?", fileID).Order("line_number ASC, id ASC").Find(&statements).Error; err != nil {
 		return nil, nil, err
 	}
+	if err := requireWarnConfirmation(statements, options); err != nil {
+		return nil, nil, err
+	}
 
 	cfg, err := s.loadConfig()
 	if err != nil {
@@ -737,6 +834,16 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 	}
 	defer db.Close()
 
+	executionCtx, cancelExecution := context.WithCancel(ctx)
+	if s.cancelReg != nil {
+		if !s.cancelReg.register(fileID, cancelExecution) {
+			cancelExecution()
+			return nil, nil, fmt.Errorf("SQL 文件正在执行中")
+		}
+		defer s.cancelReg.unregister(fileID)
+	}
+	defer cancelExecution()
+
 	file.ExecuteStatus = "RUNNING"
 	file.ExecuteUser = username
 	repository.DB.Save(&file)
@@ -745,8 +852,13 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 	failedCount := 0
 	blockedCount := 0
 	skippedCount := 0
+	canceledCount := 0
 	for i := range statements {
 		stmt := &statements[i]
+		if executionCtx.Err() != nil {
+			canceledCount++
+			break
+		}
 		if stmt.ExecuteStatus == "SUCCESS" {
 			successCount++
 			continue
@@ -763,7 +875,7 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 			continue
 		}
 
-		execCtx, cancel := context.WithTimeout(ctx, statementTimeout(stmt.SQLType)+10*time.Second)
+		execCtx, cancel := context.WithTimeout(executionCtx, statementTimeout(stmt.SQLType)+10*time.Second)
 		start := time.Now()
 		stmt.ExecuteStatus = "RUNNING"
 		repository.DB.Save(stmt)
@@ -777,6 +889,13 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 		stmt.AffectedRows = affected
 		stmt.SQLState = sqlState
 		if execErr != nil {
+			if errors.Is(execErr, context.Canceled) || execCtx.Err() == context.Canceled || executionCtx.Err() == context.Canceled {
+				stmt.ExecuteStatus = "CANCELED"
+				stmt.ExecuteMessage = "执行已取消"
+				canceledCount++
+				repository.DB.Save(stmt)
+				break
+			}
 			if shouldSkip, skipMessage := skipMessageForSQLError(execErr, options); shouldSkip {
 				stmt.ExecuteStatus = "SKIPPED"
 				stmt.ExecuteMessage = skipMessage
@@ -799,6 +918,10 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 	now := time.Now()
 	file.ExecuteTime = &now
 	switch {
+	case canceledCount > 0 && successCount == 0 && skippedCount == 0 && failedCount == 0:
+		file.ExecuteStatus = "CANCELED"
+	case canceledCount > 0:
+		file.ExecuteStatus = "PARTIAL_FAILED"
 	case failedCount > 0:
 		file.ExecuteStatus = "PARTIAL_FAILED"
 	case blockedCount > 0 && successCount == 0 && skippedCount == 0:
@@ -808,9 +931,46 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 	default:
 		file.ExecuteStatus = "SUCCESS"
 	}
-	file.ExecuteMessage = fmt.Sprintf("成功 %d，失败 %d，不可执行 %d，跳过 %d", successCount, failedCount, blockedCount, skippedCount)
+	file.ExecuteMessage = fmt.Sprintf("成功 %d，失败 %d，不可执行 %d，跳过 %d，取消 %d", successCount, failedCount, blockedCount, skippedCount, canceledCount)
 	repository.DB.Save(&file)
 	return &file, statements, nil
+}
+
+func (s *PostgreSQLService) CancelSQLFile(fileID uint, username string) (*model.SQLChangeFile, error) {
+	var file model.SQLChangeFile
+	if err := repository.DB.Where("is_deleted = ?", false).First(&file, fileID).Error; err != nil {
+		return nil, err
+	}
+	if file.ExecuteStatus != "RUNNING" {
+		return nil, fmt.Errorf("SQL 文件未在执行中")
+	}
+	if s.cancelReg == nil || !s.cancelReg.cancel(fileID) {
+		return nil, fmt.Errorf("未找到正在执行的 SQL 任务")
+	}
+	file.ExecuteMessage = "取消执行请求已提交: " + username
+	if err := repository.DB.Save(&file).Error; err != nil {
+		return nil, err
+	}
+	return &file, nil
+}
+
+func requireWarnConfirmation(statements []model.SQLChangeStatement, options SQLExecuteOptions) error {
+	if !options.RequireRiskConfirmation || options.ConfirmWarnRisk {
+		return nil
+	}
+	warnCount := 0
+	for _, stmt := range statements {
+		if stmt.ExecuteStatus == "SUCCESS" || stmt.ExecuteStatus == "SKIPPED" {
+			continue
+		}
+		if stmt.RiskLevel == "WARN" {
+			warnCount++
+		}
+	}
+	if warnCount == 0 {
+		return nil
+	}
+	return fmt.Errorf("存在 %d 条 WARN 风险 SQL，请确认风险后再执行", warnCount)
 }
 
 func (s *PostgreSQLService) SkipSQLStatement(statementID uint, username string) (*model.SQLChangeStatement, error) {
@@ -850,6 +1010,95 @@ func (s *PostgreSQLService) SkipSQLFile(fileID uint, username string) (*model.SQ
 	return &file, nil
 }
 
+func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, username string, options SQLExecuteOptions) (*model.SQLChangeBatch, []model.SQLChangeFile, error) {
+	var batch model.SQLChangeBatch
+	if err := repository.DB.Where("is_deleted = ?", false).First(&batch, batchID).Error; err != nil {
+		return nil, nil, err
+	}
+	var files []model.SQLChangeFile
+	if err := repository.DB.Where("batch_id = ? AND is_deleted = ?", batchID, false).Order("batch_sort_no ASC, file_name ASC, id ASC").Find(&files).Error; err != nil {
+		return nil, nil, err
+	}
+	if len(files) == 0 {
+		return nil, nil, fmt.Errorf("批次下没有 SQL 文件")
+	}
+	batch.ExecuteStatus = "RUNNING"
+	batch.ExecuteUser = username
+	_ = repository.DB.Save(&batch).Error
+
+	successFiles := 0
+	failedFiles := 0
+	skippedFiles := 0
+	for i := range files {
+		file, _, err := s.ExecuteSQLFileWithOptions(ctx, files[i].ID, username, options)
+		if err != nil {
+			files[i].ExecuteStatus = "FAILED"
+			files[i].ExecuteMessage = err.Error()
+			failedFiles++
+			break
+		}
+		files[i] = *file
+		switch file.ExecuteStatus {
+		case "SUCCESS":
+			successFiles++
+		case "SKIPPED":
+			skippedFiles++
+		default:
+			failedFiles++
+		}
+		if file.ExecuteStatus != "SUCCESS" && file.ExecuteStatus != "SKIPPED" {
+			break
+		}
+	}
+	now := time.Now()
+	batch.ExecuteTime = &now
+	batch.SuccessFiles = successFiles
+	batch.FailedFiles = failedFiles
+	batch.SkippedFiles = skippedFiles
+	switch {
+	case failedFiles > 0 && successFiles == 0 && skippedFiles == 0:
+		batch.ExecuteStatus = "FAILED"
+	case failedFiles > 0:
+		batch.ExecuteStatus = "PARTIAL_FAILED"
+	default:
+		batch.ExecuteStatus = "SUCCESS"
+	}
+	batch.ExecuteMessage = fmt.Sprintf("成功文件 %d，失败文件 %d，跳过文件 %d", successFiles, failedFiles, skippedFiles)
+	if err := repository.DB.Save(&batch).Error; err != nil {
+		return nil, nil, err
+	}
+	return &batch, files, nil
+}
+
+func (s *PostgreSQLService) ListSQLBatches(page, pageSize int) ([]model.SQLChangeBatch, int64, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	var total int64
+	var batches []model.SQLChangeBatch
+	query := repository.DB.Model(&model.SQLChangeBatch{}).Where("is_deleted = ?", false)
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	err := query.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&batches).Error
+	return batches, total, err
+}
+
+func (s *PostgreSQLService) GetSQLBatch(id uint) (*model.SQLChangeBatch, []model.SQLChangeFile, error) {
+	var batch model.SQLChangeBatch
+	if err := repository.DB.Where("is_deleted = ?", false).First(&batch, id).Error; err != nil {
+		return nil, nil, err
+	}
+	var files []model.SQLChangeFile
+	if err := repository.DB.Where("batch_id = ? AND is_deleted = ?", id, false).Order("batch_sort_no ASC, file_name ASC, id ASC").Find(&files).Error; err != nil {
+		return nil, nil, err
+	}
+	return &batch, files, nil
+}
+
 func (s *PostgreSQLService) ListSQLFiles(page, pageSize int) ([]model.SQLChangeFile, int64, error) {
 	return s.ListSQLFilesByStatus(page, pageSize, "")
 }
@@ -866,7 +1115,7 @@ func (s *PostgreSQLService) ListSQLFilesByStatus(page, pageSize int, statusGroup
 	query := repository.DB.Model(&model.SQLChangeFile{}).Where("is_deleted = ?", false)
 	switch statusGroup {
 	case "todo":
-		query = query.Where("execute_status IN ?", []string{"PENDING", "FAILED", "PARTIAL_FAILED", "NOT_EXECUTABLE"})
+		query = query.Where("execute_status IN ?", []string{"PENDING", "FAILED", "PARTIAL_FAILED", "NOT_EXECUTABLE", "CANCELED"})
 	case "done":
 		query = query.Where("execute_status IN ?", []string{"SUCCESS", "SKIPPED"})
 	}

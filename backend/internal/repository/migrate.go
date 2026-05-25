@@ -31,6 +31,7 @@ func AutoMigrate() error {
 		&model.DeployExecution{},
 		&model.DeployLog{},
 		&model.EnvironmentInfo{},
+		&model.SQLChangeBatch{},
 		&model.SQLChangeFile{},
 		&model.SQLChangeStatement{},
 		&model.SQLViewBackup{},
