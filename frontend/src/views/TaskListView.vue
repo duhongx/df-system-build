@@ -5,9 +5,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { listTasks, createTask, updateTask as apiUpdateTask, deleteTask, executeTask, batchExecuteTasks, type Task } from '../api/task'
 import { listAllApps, type Application } from '../api/application'
 import { listBuildConfigs, type BuildConfig } from '../api/build-config'
+import { useSettingsStore } from '../stores/settings'
 import { formatTime as formatTimeStr } from '../utils/time'
 
 const router = useRouter()
+const settingsStore = useSettingsStore()
 const loading = ref(true)
 const searchText = ref('')
 const filterType = ref('')
@@ -50,6 +52,9 @@ const createForm = ref({
 })
 
 onMounted(async () => {
+  if (!settingsStore.loaded) {
+    await settingsStore.fetchSettings()
+  }
   await loadAll()
 })
 
@@ -382,7 +387,7 @@ function handleHistory(task: Task) {
           </el-radio-group>
         </el-form-item>
         <el-form-item label="K8s 命名空间">
-          <el-input v-model="createForm.k8sNamespace" placeholder="留空使用全局默认" />
+          <el-input v-model="createForm.k8sNamespace" :placeholder="`留空使用全局默认：${settingsStore.k8sNamespace}`" />
           <div class="form-hint">留空则使用系统设置中的全局默认命名空间</div>
         </el-form-item>
       </el-form>
@@ -417,7 +422,7 @@ function handleHistory(task: Task) {
           </el-radio-group>
         </el-form-item>
         <el-form-item label="K8s 命名空间">
-          <el-input v-model="editForm.k8sNamespace" placeholder="留空使用全局默认" />
+          <el-input v-model="editForm.k8sNamespace" :placeholder="`留空使用全局默认：${settingsStore.k8sNamespace}`" />
           <div class="form-hint">留空则使用系统设置中的全局默认命名空间</div>
         </el-form-item>
       </el-form>

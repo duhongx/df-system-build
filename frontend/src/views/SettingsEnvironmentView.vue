@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import request from '../api/request'
+import { useSettingsStore } from '../stores/settings'
 
 const loading = ref(false)
 const saving = ref(false)
@@ -10,6 +11,7 @@ const k8sInputMode = ref<'path' | 'content'>('path')
 const k8sNamespaces = ref<string[]>([])
 const k8sLoadingNs = ref(false)
 const k8sReadingConfig = ref(false)
+const settingsStore = useSettingsStore()
 
 const form = ref<Record<string, string>>({
   docker_registry_url: '',
@@ -58,6 +60,7 @@ async function saveSettings() {
   saving.value = true
   try {
     await request.put('/settings', form.value)
+    await settingsStore.fetchSettings()
     ElMessage.success('保存成功')
   } catch (e: any) {
     ElMessage.error('保存失败: ' + (e.message || '未知错误'))
@@ -128,6 +131,9 @@ async function handleReadKubeconfig() {
     const res: any = await request.get('/settings/read-kubeconfig', { params: { path } })
     if (res?.content) {
       form.value.k8s_kubeconfig_content = res.content
+      if (res.namespace) {
+        form.value.k8s_namespace = res.namespace
+      }
       k8sInputMode.value = 'content'
       ElMessage.success('读取成功')
     } else {
@@ -143,9 +149,18 @@ async function handleReadKubeconfig() {
 async function handleLoadNamespaces() {
   k8sLoadingNs.value = true
   try {
-    const res: any = await request.get('/settings/k8s-namespaces')
+    const res: any = await request.post('/settings/k8s-namespaces', {
+      config: {
+        k8s_kubeconfig_path: form.value.k8s_kubeconfig_path,
+        k8s_kubeconfig_content: form.value.k8s_kubeconfig_content,
+        k8s_namespace: form.value.k8s_namespace,
+      },
+    })
     if (Array.isArray(res)) {
       k8sNamespaces.value = res
+      if (!form.value.k8s_namespace && res.length > 0) {
+        form.value.k8s_namespace = res[0]
+      }
       if (res.length > 0) {
         ElMessage.success(`获取到 ${res.length} 个命名空间`)
       } else {

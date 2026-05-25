@@ -1,22 +1,33 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { matchArtifacts, executeBatchDeploy, listLocalDir, type MatchResult } from '../api/batch-deploy'
+import { useSettingsStore } from '../stores/settings'
 
 const router = useRouter()
+const settingsStore = useSettingsStore()
 const step = ref(1)
 const loading = ref(false)
 
 // Step 1: Source selection
 const sourceType = ref<'upload' | 'local'>('upload')
-const localPath = ref('/opt/artifacts/')
+const localPath = ref('')
 const uploadedFiles = ref<string[]>([])
 const sourceDir = ref('')
+const batchId = ref('')
+const namespace = ref('')
 
 // Step 2: Match results
 const matchResults = ref<MatchResult[]>([])
 const matchedCount = ref(0)
+
+onMounted(async () => {
+  if (!settingsStore.loaded) {
+    await settingsStore.fetchSettings()
+  }
+  namespace.value = settingsStore.k8sNamespace
+})
 
 // Upload handler
 async function handleUpload(event: Event) {
@@ -37,8 +48,9 @@ async function handleUpload(event: Event) {
     })
     const data = await resp.json()
     if (data.code === 0) {
-      uploadedFiles.value = data.data.files
+      uploadedFiles.value = data.data.success || data.data.files || []
       sourceDir.value = data.data.uploadDir
+      batchId.value = data.data.batchId || ''
       ElMessage.success(`已上传 ${data.data.count} 个文件`)
       await doMatch(uploadedFiles.value)
     } else {
@@ -56,7 +68,7 @@ async function handleLoadLocalDir() {
   if (!localPath.value.trim()) { ElMessage.warning('请输入目录路径'); return }
   loading.value = true
   try {
-    const result = await listLocalDir(localPath.value)
+    const result = await listLocalDir(localPath.value, batchId.value)
     uploadedFiles.value = result.files
     sourceDir.value = result.path
     ElMessage.success(`找到 ${result.count} 个制品文件`)
@@ -71,7 +83,7 @@ async function handleLoadLocalDir() {
 async function doMatch(files: string[]) {
   if (files.length === 0) return
   try {
-    const result = await matchArtifacts(files, sourceDir.value)
+    const result = await matchArtifacts(files, sourceDir.value, batchId.value)
     matchResults.value = result.results
     matchedCount.value = result.matched
     step.value = 2
@@ -95,7 +107,7 @@ async function handleExecute() {
 
   loading.value = true
   try {
-    const result = await executeBatchDeploy(sourceDir.value, items)
+    const result = await executeBatchDeploy(sourceDir.value, items, namespace.value.trim(), batchId.value)
     ElMessage.success(`已创建 ${result.pipelines.length} 个构建任务`)
     if (result.errors?.length) {
       ElMessage.warning(`${result.errors.length} 个失败: ${result.errors.join(', ')}`)
@@ -111,6 +123,8 @@ function handleReset() {
   matchResults.value = []
   matchedCount.value = 0
   sourceDir.value = ''
+  batchId.value = ''
+  namespace.value = settingsStore.k8sNamespace
 }
 </script>
 
@@ -140,10 +154,10 @@ function handleReset() {
 
       <div v-if="sourceType === 'local'" class="local-dir-area">
         <div style="display: flex; gap: 8px;">
-          <el-input v-model="localPath" placeholder="服务器上的制品目录路径" style="flex: 1;" />
+          <el-input v-model="localPath" placeholder="批量上传工作区内的制品目录路径" style="flex: 1;" />
           <el-button type="primary" :loading="loading" @click="handleLoadLocalDir">读取目录</el-button>
         </div>
-        <div class="dir-hint">读取 df-build-server 所在机器的本地目录</div>
+        <div class="dir-hint">仅允许读取 df-build-server 工作区 workspaces/batch-upload 下的目录</div>
       </div>
     </div>
 
@@ -181,6 +195,7 @@ function handleReset() {
       </el-table>
 
       <div class="action-bar">
+        <el-input v-model="namespace" placeholder="K8s Namespace（留空使用默认）" class="namespace-input" />
         <el-button type="primary" size="large" :loading="loading" :disabled="matchedCount === 0" @click="handleExecute">
           <el-icon style="margin-right: 4px;"><VideoPlay /></el-icon>
           开始构建镜像 ({{ matchedCount }} 个应用)
@@ -212,5 +227,6 @@ function handleReset() {
 .local-dir-area { max-width: 600px; }
 .dir-hint { font-size: 12px; color: #909399; margin-top: 8px; }
 
-.action-bar { margin-top: 20px; text-align: center; }
+.action-bar { margin-top: 20px; display: flex; justify-content: center; gap: 12px; align-items: center; }
+.namespace-input { width: 240px; }
 </style>

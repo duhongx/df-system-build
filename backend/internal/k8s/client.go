@@ -52,9 +52,17 @@ func ResetClient() {
 
 func buildClient() (*kubernetes.Clientset, *rest.Config, error) {
 	settingsRepo := repository.NewSettingsRepo()
-
-	// Try kubeconfig content first (manual input)
 	kubeconfigContent, _ := settingsRepo.GetByKey("k8s_kubeconfig_content")
+	kubeconfigPath, _ := settingsRepo.GetByKey("k8s_kubeconfig_path")
+	return buildClientFromSettings(map[string]string{
+		"k8s_kubeconfig_content": kubeconfigContent,
+		"k8s_kubeconfig_path":    kubeconfigPath,
+	})
+}
+
+func buildClientFromSettings(settings map[string]string) (*kubernetes.Clientset, *rest.Config, error) {
+	// Try kubeconfig content first (manual input)
+	kubeconfigContent := settings["k8s_kubeconfig_content"]
 	if kubeconfigContent != "" {
 		cfg, err := clientcmd.RESTConfigFromKubeConfig([]byte(kubeconfigContent))
 		if err != nil {
@@ -69,7 +77,7 @@ func buildClient() (*kubernetes.Clientset, *rest.Config, error) {
 	}
 
 	// Fall back to kubeconfig file path
-	kubeconfigPath, _ := settingsRepo.GetByKey("k8s_kubeconfig_path")
+	kubeconfigPath := settings["k8s_kubeconfig_path"]
 	if kubeconfigPath == "" {
 		kubeconfigPath = "/root/.kube/config"
 	}
@@ -104,7 +112,24 @@ func ListNamespaces(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return listNamespaces(ctx, cs)
+}
 
+func ListNamespacesWithSettings(ctx context.Context, settings map[string]string) ([]string, error) {
+	if settings == nil {
+		return ListNamespaces(ctx)
+	}
+	cs, _, err := buildClientFromSettings(settings)
+	if err != nil {
+		return nil, err
+	}
+	return listNamespaces(ctx, cs)
+}
+
+func listNamespaces(ctx context.Context, cs *kubernetes.Clientset) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	nsList, err := cs.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err

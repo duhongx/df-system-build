@@ -9,8 +9,10 @@ import {
   updateK8sImage, updateK8sResources, getK8sTopNodes, getK8sTopPods,
   updateK8sServicePorts, deleteK8sService, getK8sImageTags
 } from '../api/kubernetes'
+import { useSettingsStore } from '../stores/settings'
 
 const route = useRoute()
+const settingsStore = useSettingsStore()
 const activeTab = computed(() => (route.meta?.k8sTab as string) || 'overview')
 const namespace = ref('default')
 const namespaces = ref<string[]>([])
@@ -68,10 +70,14 @@ const cmEditKey = ref('')
 const cmLoading = ref(false)
 
 onMounted(async () => {
+  if (!settingsStore.loaded) {
+    await settingsStore.fetchSettings()
+  }
+  namespace.value = settingsStore.k8sNamespace
   try {
     namespaces.value = await getK8sNamespaces()
   } catch (e) {
-    namespaces.value = ['default']
+    namespaces.value = [namespace.value || 'default']
   }
   await loadTab()
 })

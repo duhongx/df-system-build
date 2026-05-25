@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"df-build-server/internal/k8s"
 	"df-build-server/internal/model"
 	"df-build-server/internal/notification"
 	"df-build-server/internal/pipeline"
@@ -410,6 +411,10 @@ func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string, autoDeploy boo
 	if !autoDeploy {
 		deployMode = "deploy_with_approval"
 	}
+	namespace := task.K8sNamespace
+	if namespace == "" {
+		namespace = k8s.GetDefaultNamespace()
+	}
 
 	p := &model.Pipeline{
 		PipelineNo:    pipelineRepo.GenerateNo(app.AppName),
@@ -429,7 +434,7 @@ func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string, autoDeploy boo
 		}(),
 		ArtifactName: app.DeriveArtifactName(),
 		DeployMode:   deployMode,
-		K8sNamespace: task.K8sNamespace,
+		K8sNamespace: namespace,
 	}
 
 	if err := pipelineRepo.Create(p); err != nil {

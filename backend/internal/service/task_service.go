@@ -31,12 +31,12 @@ type CreateTaskRequest struct {
 }
 
 type UpdateTaskRequest struct {
-	TaskName      string `json:"taskName"`
-	ApplicationID uint   `json:"applicationId"`
-	GitBranch     string `json:"gitBranch"`
-	BuildConfigID uint   `json:"buildConfigId"`
-	DeployMode    string `json:"deployMode"`
-	K8sNamespace  string `json:"k8sNamespace"`
+	TaskName      string  `json:"taskName"`
+	ApplicationID uint    `json:"applicationId"`
+	GitBranch     string  `json:"gitBranch"`
+	BuildConfigID uint    `json:"buildConfigId"`
+	DeployMode    string  `json:"deployMode"`
+	K8sNamespace  *string `json:"k8sNamespace"`
 }
 
 func (s *TaskService) List(params repository.TaskListParams) ([]model.Task, int64, error) {
@@ -111,8 +111,8 @@ func (s *TaskService) Update(id uint, req *UpdateTaskRequest) (*model.Task, erro
 	if req.DeployMode != "" {
 		task.DeployMode = req.DeployMode
 	}
-	if req.K8sNamespace != "" {
-		task.K8sNamespace = req.K8sNamespace
+	if req.K8sNamespace != nil {
+		task.K8sNamespace = *req.K8sNamespace
 	}
 
 	if err := s.taskRepo.Update(task); err != nil {

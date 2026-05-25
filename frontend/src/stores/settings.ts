@@ -4,6 +4,7 @@ import { getSettings } from '../api/settings'
 
 export const useSettingsStore = defineStore('settings', () => {
   const deploySource = ref<'source' | 'artifact' | 'both'>('both')
+  const k8sNamespace = ref('default')
   const loaded = ref(false)
 
   async function fetchSettings() {
@@ -12,9 +13,10 @@ export const useSettingsStore = defineStore('settings', () => {
       if (data.deploy_source) {
         deploySource.value = data.deploy_source as 'source' | 'artifact' | 'both'
       }
+      k8sNamespace.value = data.k8s_namespace || 'default'
       loaded.value = true
     } catch (_) {
-      // fallback to default 'both'
+      // fallback to defaults
       loaded.value = true
     }
   }
@@ -24,6 +26,7 @@ export const useSettingsStore = defineStore('settings', () => {
 
   return {
     deploySource,
+    k8sNamespace,
     loaded,
     fetchSettings,
     showTaskList,

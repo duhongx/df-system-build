@@ -18,11 +18,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 type SettingsHandler struct {
 	repo *repository.SettingsRepo
 }
+
+var resetK8sClient = k8s.ResetClient
 
 func NewSettingsHandler() *SettingsHandler {
 	return &SettingsHandler{repo: repository.NewSettingsRepo()}
@@ -37,6 +40,7 @@ func (h *SettingsHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.POST("/test-registry", h.TestRegistry)
 		g.POST("/test-connection", h.TestConnection)
 		g.GET("/k8s-namespaces", h.GetK8sNamespaces)
+		g.POST("/k8s-namespaces", h.GetK8sNamespacesWithConfig)
 		g.GET("/read-kubeconfig", h.ReadKubeconfig)
 	}
 }
@@ -64,6 +68,9 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 	if err := h.repo.BatchUpdate(req); err != nil {
 		response.Fail(c, 10902, "保存失败")
 		return
+	}
+	if containsK8sSetting(req) {
+		resetK8sClient()
 	}
 	response.OKWithMessage(c, "设置已保存", nil)
 }
@@ -115,6 +122,22 @@ func (h *SettingsHandler) GetK8sNamespaces(c *gin.Context) {
 	response.OK(c, names)
 }
 
+func (h *SettingsHandler) GetK8sNamespacesWithConfig(c *gin.Context) {
+	var req struct {
+		Config map[string]string `json:"config" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 10904, "参数错误")
+		return
+	}
+	names, err := k8s.ListNamespacesWithSettings(c.Request.Context(), req.Config)
+	if err != nil {
+		response.Fail(c, 10904, fmt.Sprintf("获取命名空间失败: %v", err))
+		return
+	}
+	response.OK(c, names)
+}
+
 // ReadKubeconfig reads a kubeconfig file from disk and returns its content
 func (h *SettingsHandler) ReadKubeconfig(c *gin.Context) {
 	path := c.Query("path")
@@ -135,7 +158,10 @@ func (h *SettingsHandler) ReadKubeconfig(c *gin.Context) {
 		return
 	}
 
-	response.OK(c, gin.H{"content": string(content)})
+	response.OK(c, gin.H{
+		"content":   string(content),
+		"namespace": extractKubeconfigNamespace(content),
+	})
 }
 
 // TestConnection tests connectivity for various services
@@ -221,12 +247,33 @@ func (h *SettingsHandler) testRegistry(config map[string]string) (bool, string) 
 	}
 }
 
-func (h *SettingsHandler) testK8s(_ map[string]string) (bool, string) {
-	_, err := k8s.ListNamespaces(nil)
+func (h *SettingsHandler) testK8s(config map[string]string) (bool, string) {
+	_, err := k8s.ListNamespacesWithSettings(nil, config)
 	if err != nil {
 		return false, fmt.Sprintf("K8s 连接失败: %v", err)
 	}
 	return true, "K8s 连接成功"
+}
+
+func containsK8sSetting(settings map[string]string) bool {
+	for key := range settings {
+		if strings.HasPrefix(key, "k8s_") {
+			return true
+		}
+	}
+	return false
+}
+
+func extractKubeconfigNamespace(content []byte) string {
+	cfg, err := clientcmd.Load(content)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	ctx, ok := cfg.Contexts[cfg.CurrentContext]
+	if !ok || ctx == nil {
+		return ""
+	}
+	return strings.TrimSpace(ctx.Namespace)
 }
 
 func (h *SettingsHandler) testNacos(config map[string]string) (bool, string) {
