@@ -19,6 +19,9 @@ func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
 	if err != nil {
 		return RiskAnalysis{SQLType: "SQL_PARSE_ERROR", RiskLevel: "BLOCKED", RiskReason: "SQL 语法解析失败: " + err.Error()}
 	}
+	if reason, ok := missingExplicitSchemaReason(tree); ok {
+		return RiskAnalysis{SQLType: "MISSING_SCHEMA", RiskLevel: "BLOCKED", RiskReason: reason}
+	}
 	if risk, ok := analyzeSQLRiskFromAST(tree); ok {
 		return enrichStaticRisk(sqlText, risk)
 	}
@@ -487,6 +490,167 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 	default:
 		return RiskAnalysis{}, false
 	}
+}
+
+func missingExplicitSchemaReason(tree *pg_query.ParseResult) (string, bool) {
+	if tree == nil {
+		return "", false
+	}
+	for _, rawStmt := range tree.GetStmts() {
+		if rawStmt == nil || rawStmt.GetStmt() == nil {
+			continue
+		}
+		for _, target := range schemaRequiredTargets(rawStmt.GetStmt()) {
+			if target.rel == nil {
+				continue
+			}
+			if strings.TrimSpace(target.rel.GetRelname()) == "" {
+				continue
+			}
+			if strings.TrimSpace(target.rel.GetSchemaname()) == "" {
+				return fmt.Sprintf("%s 未显式指定 schema，请使用 schema.object 形式", target.name), true
+			}
+		}
+		if relName, ok := findMissingSchemaRangeVar(rawStmt.GetStmt().ProtoReflect()); ok {
+			return fmt.Sprintf("SQL 引用对象 %s 未显式指定 schema，请使用 schema.object 形式", relName), true
+		}
+	}
+	return "", false
+}
+
+func findMissingSchemaRangeVar(message protoreflect.Message) (string, bool) {
+	if !message.IsValid() {
+		return "", false
+	}
+	if rel, ok := message.Interface().(*pg_query.RangeVar); ok {
+		if strings.TrimSpace(rel.GetRelname()) != "" && strings.TrimSpace(rel.GetSchemaname()) == "" {
+			return rel.GetRelname(), true
+		}
+	}
+	fields := message.Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
+			continue
+		}
+		value := message.Get(field)
+		if field.IsList() {
+			list := value.List()
+			for j := 0; j < list.Len(); j++ {
+				if name, ok := findMissingSchemaRangeVar(list.Get(j).Message()); ok {
+					return name, true
+				}
+			}
+			continue
+		}
+		if value.Message().IsValid() {
+			if name, ok := findMissingSchemaRangeVar(value.Message()); ok {
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
+type schemaRequiredTarget struct {
+	name string
+	rel  *pg_query.RangeVar
+}
+
+func schemaRequiredTargets(node *pg_query.Node) []schemaRequiredTarget {
+	switch {
+	case node.GetInsertStmt() != nil:
+		return []schemaRequiredTarget{{name: "INSERT 目标表", rel: node.GetInsertStmt().GetRelation()}}
+	case node.GetUpdateStmt() != nil:
+		return []schemaRequiredTarget{{name: "UPDATE 目标表", rel: node.GetUpdateStmt().GetRelation()}}
+	case node.GetDeleteStmt() != nil:
+		return []schemaRequiredTarget{{name: "DELETE 目标表", rel: node.GetDeleteStmt().GetRelation()}}
+	case node.GetCreateStmt() != nil:
+		return []schemaRequiredTarget{{name: "CREATE TABLE 目标表", rel: node.GetCreateStmt().GetRelation()}}
+	case node.GetAlterTableStmt() != nil:
+		return []schemaRequiredTarget{{name: "ALTER TABLE 目标对象", rel: node.GetAlterTableStmt().GetRelation()}}
+	case node.GetIndexStmt() != nil:
+		return []schemaRequiredTarget{{name: "CREATE INDEX 目标表", rel: node.GetIndexStmt().GetRelation()}}
+	case node.GetViewStmt() != nil:
+		return []schemaRequiredTarget{{name: "CREATE VIEW 目标视图", rel: node.GetViewStmt().GetView()}}
+	case node.GetCreateTableAsStmt() != nil:
+		if into := node.GetCreateTableAsStmt().GetInto(); into != nil {
+			return []schemaRequiredTarget{{name: "CREATE TABLE AS 目标表", rel: into.GetRel()}}
+		}
+	case node.GetCreateFunctionStmt() != nil:
+		return []schemaRequiredTarget{{name: "CREATE FUNCTION 目标函数", rel: rangeVarFromNameNodes(node.GetCreateFunctionStmt().GetFuncname())}}
+	case node.GetRefreshMatViewStmt() != nil:
+		return []schemaRequiredTarget{{name: "REFRESH MATERIALIZED VIEW 目标对象", rel: node.GetRefreshMatViewStmt().GetRelation()}}
+	case node.GetTruncateStmt() != nil:
+		targets := make([]schemaRequiredTarget, 0, len(node.GetTruncateStmt().GetRelations()))
+		for _, relNode := range node.GetTruncateStmt().GetRelations() {
+			targets = append(targets, schemaRequiredTarget{name: "TRUNCATE 目标表", rel: relNode.GetRangeVar()})
+		}
+		return targets
+	case node.GetDropStmt() != nil:
+		return dropStmtSchemaRequiredTargets(node.GetDropStmt())
+	}
+	return nil
+}
+
+func dropStmtSchemaRequiredTargets(stmt *pg_query.DropStmt) []schemaRequiredTarget {
+	switch stmt.GetRemoveType() {
+	case pg_query.ObjectType_OBJECT_TABLE, pg_query.ObjectType_OBJECT_VIEW, pg_query.ObjectType_OBJECT_MATVIEW, pg_query.ObjectType_OBJECT_INDEX, pg_query.ObjectType_OBJECT_FUNCTION:
+	default:
+		return nil
+	}
+	targets := make([]schemaRequiredTarget, 0, len(stmt.GetObjects()))
+	for _, obj := range stmt.GetObjects() {
+		if objectWithArgs := obj.GetObjectWithArgs(); objectWithArgs != nil {
+			targets = append(targets, schemaRequiredTarget{name: "DROP 目标函数", rel: rangeVarFromNameNodes(objectWithArgs.GetObjname())})
+			continue
+		}
+		parts := stringListFromNode(obj)
+		if len(parts) == 0 {
+			continue
+		}
+		if len(parts) < 2 {
+			targets = append(targets, schemaRequiredTarget{name: "DROP 目标对象", rel: &pg_query.RangeVar{Relname: parts[len(parts)-1]}})
+			continue
+		}
+		targets = append(targets, schemaRequiredTarget{name: "DROP 目标对象", rel: &pg_query.RangeVar{Schemaname: parts[len(parts)-2], Relname: parts[len(parts)-1]}})
+	}
+	return targets
+}
+
+func rangeVarFromNameNodes(nodes []*pg_query.Node) *pg_query.RangeVar {
+	parts := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if str := node.GetString_(); str != nil {
+			parts = append(parts, str.GetSval())
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	if len(parts) == 1 {
+		return &pg_query.RangeVar{Relname: parts[0]}
+	}
+	return &pg_query.RangeVar{Schemaname: parts[len(parts)-2], Relname: parts[len(parts)-1]}
+}
+
+func stringListFromNode(node *pg_query.Node) []string {
+	if node == nil {
+		return nil
+	}
+	if list := node.GetList(); list != nil {
+		parts := make([]string, 0, len(list.GetItems()))
+		for _, item := range list.GetItems() {
+			if str := item.GetString_(); str != nil {
+				parts = append(parts, str.GetSval())
+			}
+		}
+		return parts
+	}
+	if str := node.GetString_(); str != nil {
+		return []string{str.GetSval()}
+	}
+	return nil
 }
 
 func analyzeDropStmt(stmt *pg_query.DropStmt) RiskAnalysis {

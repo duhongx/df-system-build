@@ -361,6 +361,7 @@ created_at
 | 同名文件覆盖 | 已实现 | 支持 `overwrite`，同名未删除文件会软删除旧记录后保存新记录。 |
 | Java 风格文件名解析 | 已实现 | 支持从 `version__groupSortNo__schema.sql` 解析版本、排序号、schema。 |
 | 从 SQL 推断 schema | 已实现 | 如果页面不传 schema，会尝试从 SQL AST 中首个显式 schema 对象推断。 |
+| 强制显式 schema | 已实现 | 表、视图、索引等业务对象 SQL 必须使用 `schema.object`；未显式指定 schema 的业务 SQL 解析阶段标记 `BLOCKED`，禁止执行。 |
 | SQL 语句解析 | 已实现 | 已引入 `pg_query_go`，使用 PostgreSQL parser/scanner 解析和拆分 SQL。 |
 | SQL 语法错误识别 | 已实现 | `pg_query.Parse` 失败会标记为 `SQL_PARSE_ERROR` 和 `BLOCKED`，落库状态为 `NOT_EXECUTABLE`。 |
 | 使用 PostgreSQL 驱动执行 | 已实现 | 使用 `pgx` stdlib 连接 PostgreSQL 并执行 SQL。 |
@@ -396,7 +397,7 @@ created_at
 | 风险分类细粒度判断 | 部分实现 | 已区分 `varchar`/`text`/`numeric` 变更、`USING` 转换、存储格式变化、时区语义变化、AST volatile default、DROP/TRUNCATE 大表风险、DML 估算影响行数、外键/主键/唯一约束、分区、物化视图、函数、扩展风险；尚未覆盖所有 PostgreSQL 类型组合和表达式语义。 |
 | `CREATE OR REPLACE VIEW` 兼容性风险 | 部分实现 | 已对已有视图追加兼容性风险提示；尚未解析新 SELECT 输出列并精确比较列名、顺序、类型，也没有依赖链分析。 |
 | SQL 事务策略 | 部分实现 | 当前是逐条执行，不启用文件级事务；已记录每条 SQL 是否可放入事务，但尚未提供文件级事务执行模式。 |
-| schema 推断 | 部分实现 | 当前只从首个显式 schema 对象推断；如果 SQL 全部不带 schema，仍不会自动落到某个默认 schema。 |
+| schema 推断 | 已调整策略 | 不再规划全局默认 schema；业务对象 SQL 必须显式指定 schema，文件级 schema 只作为展示和归类辅助。 |
 | 视图依赖处理 | 部分实现 | 已自动备份依赖视图定义并导出 drop/recreate 计划；暂不自动 drop/recreate。 |
 | 实例管理 | 部分实现 | 当前展示系统设置里的 PostgreSQL 连接和运行状态，不维护独立实例资产、集群拓扑、备份策略等管理信息。根据当前方向，实例管理与 SQL 执行无关。 |
 
@@ -411,7 +412,7 @@ created_at
 | SQL 执行中取消 | 已实现基础版 | 已支持取消当前 SQL 文件执行；批次级取消暂未单独提供，执行当前文件仍可被取消。 |
 | `psql` 兼容执行器 | 未实现 | 不支持 `\copy`、`\i`、`\set` 等 psql 元命令，也没有 SSH/psql 执行入口。 |
 | 超大 SQL 文件处理 | 未实现 | 当前会将文件内容整体读入内存并保存到数据库，未做流式解析、分片导入或后台任务化。 |
-| 按业务系统/环境/schema 配置超时和规则 | 暂不规划 | 当前产品方向已调整为不在 SQL 执行页面关注业务系统、环境、schema；schema 优先从 SQL 或文件名解析。 |
+| 按业务系统/环境/schema 配置超时和规则 | 暂不规划 | 当前产品方向已调整为不在 SQL 执行页面关注业务系统、环境、schema；业务对象 schema 必须在 SQL 中显式指定。 |
 | 审批流/二次确认 | 不规划 | 文档明确第一阶段不做审批，当前也未实现。 |
 
 ### 建议后续优先级

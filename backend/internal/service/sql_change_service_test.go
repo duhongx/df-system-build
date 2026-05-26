@@ -120,9 +120,9 @@ func TestAnalyzeSQLRiskMarksDDLWarningsWithoutBlocking(t *testing.T) {
 		sql  string
 		typ  string
 	}{
-		{name: "alter type", sql: "ALTER TABLE patient ALTER COLUMN code TYPE varchar(20)", typ: "ALTER_COLUMN_TYPE"},
-		{name: "create index", sql: "CREATE INDEX idx_patient_name ON patient(name)", typ: "CREATE_INDEX"},
-		{name: "set not null", sql: "ALTER TABLE patient ALTER COLUMN code SET NOT NULL", typ: "ALTER_SET_NOT_NULL"},
+		{name: "alter type", sql: "ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(20)", typ: "ALTER_COLUMN_TYPE"},
+		{name: "create index", sql: "CREATE INDEX idx_patient_name ON his.patient(name)", typ: "CREATE_INDEX"},
+		{name: "set not null", sql: "ALTER TABLE his.patient ALTER COLUMN code SET NOT NULL", typ: "ALTER_SET_NOT_NULL"},
 	}
 
 	for _, tc := range tests {
@@ -227,7 +227,7 @@ func TestParseSQLPersistsExecutionStrategy(t *testing.T) {
 
 	_, statements, err := NewPostgreSQLService().ParseSQL(ParseSQLRequest{
 		FileName:  "strategy.sql",
-		Content:   "CREATE INDEX CONCURRENTLY idx_patient_name ON patient(name);",
+		Content:   "CREATE INDEX CONCURRENTLY idx_patient_name ON his.patient(name);",
 		Overwrite: true,
 	})
 	if err != nil {
