@@ -1329,6 +1329,11 @@ func (s *PostgreSQLService) ImportServerSQL(req ImportServerSQLRequest) (int, er
 	if err != nil {
 		return 0, fmt.Errorf("路径无效")
 	}
+	// Resolve symlinks to prevent bypass
+	absPath, err = filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return 0, fmt.Errorf("路径无效或不存在")
+	}
 	allowedPrefixes := []string{"/opt/df-build-server", "/root/", "/tmp/"}
 	allowed := false
 	for _, prefix := range allowedPrefixes {
@@ -1339,9 +1344,6 @@ func (s *PostgreSQLService) ImportServerSQL(req ImportServerSQLRequest) (int, er
 	}
 	if !allowed {
 		return 0, fmt.Errorf("不允许访问该路径，仅支持 /opt/df-build-server、/root/、/tmp/ 下的文件")
-	}
-	if strings.Contains(absPath, "..") {
-		return 0, fmt.Errorf("路径不能包含 ..")
 	}
 
 	info, err := os.Stat(absPath)
