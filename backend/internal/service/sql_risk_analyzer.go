@@ -23,7 +23,7 @@ func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
 		return RiskAnalysis{SQLType: "MISSING_SCHEMA", RiskLevel: "BLOCKED", RiskReason: reason}
 	}
 	if risk, ok := analyzeSQLRiskFromAST(tree); ok {
-		return enrichStaticRisk(sqlText, classifyTrivialDMLWhere(sqlText, risk))
+		return enrichStaticRisk(sqlText, classifyDMLExpressionRisk(sqlText, risk))
 	}
 
 	normalized := normalizeSQL(sqlText)
@@ -151,13 +151,36 @@ func classifyTrivialDMLWhere(sqlText string, risk RiskAnalysis) RiskAnalysis {
 		return risk
 	}
 	whereExpr := extractDMLWhereExpression(sqlText)
-	if !isTrivialWhereExpression(whereExpr) {
+	operation := risk.SQLType
+	if isTrivialWhereExpression(whereExpr) {
+		if operation == "UPDATE" {
+			return RiskAnalysis{SQLType: "UPDATE_TRIVIAL_WHERE", RiskLevel: "BLOCKED", RiskReason: "UPDATE 条件无有效过滤条件，禁止直接执行"}
+		}
+		return RiskAnalysis{SQLType: "DELETE_TRIVIAL_WHERE", RiskLevel: "BLOCKED", RiskReason: "DELETE 条件无有效过滤条件，禁止直接执行"}
+	}
+	if reason, blocked := weakDMLWhereReason(whereExpr); reason != "" {
+		sqlType := operation + "_WEAK_WHERE"
+		if blocked {
+			return RiskAnalysis{SQLType: sqlType, RiskLevel: "BLOCKED", RiskReason: operation + " 条件过弱: " + reason}
+		}
+		return RiskAnalysis{SQLType: sqlType, RiskLevel: "WARN", RiskReason: operation + " 条件可能命中大量数据: " + reason}
+	}
+	return risk
+}
+
+func classifyDMLExpressionRisk(sqlText string, risk RiskAnalysis) RiskAnalysis {
+	risk = classifyTrivialDMLWhere(sqlText, risk)
+	if risk.RiskLevel == "BLOCKED" || !strings.HasPrefix(risk.SQLType, "UPDATE") {
 		return risk
 	}
-	if risk.SQLType == "UPDATE" {
-		return RiskAnalysis{SQLType: "UPDATE_TRIVIAL_WHERE", RiskLevel: "BLOCKED", RiskReason: "UPDATE 条件无有效过滤条件，禁止直接执行"}
+	if reason := riskyUpdateSetReason(sqlText); reason != "" {
+		if risk.RiskLevel == "WARN" {
+			risk.RiskReason = appendRiskText(risk.RiskReason, reason)
+			return risk
+		}
+		return RiskAnalysis{SQLType: "UPDATE_RISKY_SET", RiskLevel: "WARN", RiskReason: reason}
 	}
-	return RiskAnalysis{SQLType: "DELETE_TRIVIAL_WHERE", RiskLevel: "BLOCKED", RiskReason: "DELETE 条件无有效过滤条件，禁止直接执行"}
+	return risk
 }
 
 func extractDMLWhereExpression(sqlText string) string {
@@ -178,6 +201,54 @@ func isTrivialWhereExpression(whereExpr string) bool {
 	}
 	compact := regexp.MustCompile(`\s+`).ReplaceAllString(normalized, "")
 	return compact == "true" || compact == "1=1"
+}
+
+func weakDMLWhereReason(whereExpr string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(whereExpr))
+	if regexp.MustCompile(`(?i)\bis\s+not\s+null\b`).MatchString(normalized) {
+		return "IS NOT NULL 通常不能有效限制数据范围", true
+	}
+	if regexp.MustCompile(`(?i)\b[a-zA-Z_][\w.]*\s*=\s*(true|false)\b`).MatchString(normalized) {
+		return "布尔条件可能命中大量数据，请结合 EXPLAIN 估算影响行数", false
+	}
+	if regexp.MustCompile(`(?i)\b(?:like|ilike)\s+'%`).MatchString(normalized) {
+		return "LIKE 前缀通配符可能导致全表扫描", false
+	}
+	if regexp.MustCompile(`(?i)(<|<=|>|>=)\s*(now\s*\(\s*\)|current_timestamp\b)`).MatchString(normalized) {
+		return "时间条件使用当前时间且缺少固定边界，请确认影响范围", false
+	}
+	return "", false
+}
+
+func riskyUpdateSetReason(sqlText string) string {
+	setExpr := extractUpdateSetExpression(sqlText)
+	if setExpr == "" {
+		return ""
+	}
+	checks := []struct {
+		pattern string
+		reason  string
+	}{
+		{`(?i)=\s*null\b`, "UPDATE 将字段置空，请确认业务含义和影响范围"},
+		{`(?i)=\s*[a-zA-Z_][\w.]*\s*[-+*/]\s*`, "UPDATE 使用算术表达式批量改值，请确认计算逻辑"},
+		{`(?i)=\s*'(\{\}|\[\])'\s*(::\s*jsonb?)?`, "UPDATE 清空 JSON 字段，请确认是否会覆盖已有扩展数据"},
+		{`(?i)\b(status|state)\b\s*=\s*'(deleted|delete|removed|invalid)'`, "UPDATE 将状态设置为删除状态，请确认是否应使用软删除流程"},
+	}
+	for _, check := range checks {
+		if regexp.MustCompile(check.pattern).MatchString(setExpr) {
+			return check.reason
+		}
+	}
+	return ""
+}
+
+func extractUpdateSetExpression(sqlText string) string {
+	normalized := strings.TrimSuffix(normalizeSQL(sqlText), ";")
+	matches := regexp.MustCompile(`(?is)\bSET\s+(.+?)(?:\bWHERE\b|\bRETURNING\b|$)`).FindStringSubmatch(normalized)
+	if len(matches) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(matches[1])
 }
 
 func extractAlterColumnTargetType(sqlText string) string {
@@ -393,7 +464,7 @@ func classifyLargeTableSensitiveOperation(base RiskAnalysis, stats TableStats) R
 
 func isLargeTableSensitiveSQLType(sqlType string) bool {
 	switch sqlType {
-	case "ALTER_COLUMN_TYPE", "ALTER_SET_NOT_NULL", "ADD_CHECK", "CREATE_INDEX", "ADD_COLUMN_DEFAULT_VOLATILE":
+	case "ALTER_COLUMN_TYPE", "ALTER_SET_NOT_NULL", "ADD_CHECK", "CREATE_INDEX", "CREATE_UNIQUE_INDEX", "CREATE_INDEX_EXPRESSION", "CREATE_INDEX_PARTIAL", "ADD_COLUMN_DEFAULT_VOLATILE":
 		return true
 	default:
 		return false
@@ -498,6 +569,8 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 		return RiskAnalysis{SQLType: "CREATE_VIEW", RiskLevel: "LOW"}, true
 	case node.GetCreateFunctionStmt() != nil:
 		return RiskAnalysis{SQLType: "CREATE_FUNCTION", RiskLevel: "WARN", RiskReason: "创建或替换函数可能改变业务逻辑，请确认依赖范围"}, true
+	case node.GetCreateTrigStmt() != nil:
+		return RiskAnalysis{SQLType: "CREATE_TRIGGER", RiskLevel: "WARN", RiskReason: "创建触发器会改变表写入行为，请确认触发时机和函数逻辑"}, true
 	case node.GetCreateExtensionStmt() != nil:
 		return RiskAnalysis{SQLType: "CREATE_EXTENSION", RiskLevel: "WARN", RiskReason: "创建扩展会修改数据库能力和对象，请确认权限和兼容性"}, true
 	case node.GetAlterSystemStmt() != nil:
@@ -512,14 +585,14 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 		return RiskAnalysis{SQLType: "COPY", RiskLevel: "WARN", RiskReason: "COPY 可能批量导入或导出数据，请确认文件和数据范围"}, true
 	case node.GetDropStmt() != nil:
 		return analyzeDropStmt(node.GetDropStmt()), true
+	case node.GetRenameStmt() != nil:
+		return RiskAnalysis{SQLType: "RENAME_OBJECT", RiskLevel: "WARN", RiskReason: "重命名数据库对象可能影响业务 SQL、视图或程序引用"}, true
+	case node.GetAlterObjectSchemaStmt() != nil:
+		return RiskAnalysis{SQLType: "ALTER_SET_SCHEMA", RiskLevel: "BLOCKED", RiskReason: "禁止通过普通入口迁移 schema，请导出并人工确认依赖范围"}, true
 	case node.GetAlterTableStmt() != nil:
 		return analyzeAlterTableStmt(node.GetAlterTableStmt()), true
 	case node.GetIndexStmt() != nil:
-		indexStmt := node.GetIndexStmt()
-		if indexStmt.GetConcurrent() {
-			return RiskAnalysis{SQLType: "CREATE_INDEX_CONCURRENTLY", RiskLevel: "WARN", RiskReason: "并发索引耗时可能较长"}, true
-		}
-		return RiskAnalysis{SQLType: "CREATE_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 创建索引可能阻塞写入"}, true
+		return analyzeIndexStmt(node.GetIndexStmt()), true
 	case node.GetTruncateStmt() != nil:
 		return analyzeTruncateStmt(node.GetTruncateStmt()), true
 	case node.GetReindexStmt() != nil:
@@ -665,6 +738,8 @@ func schemaRequiredTargets(node *pg_query.Node) []schemaRequiredTarget {
 		}
 	case node.GetCreateFunctionStmt() != nil:
 		return []schemaRequiredTarget{{name: "CREATE FUNCTION 目标函数", rel: rangeVarFromNameNodes(node.GetCreateFunctionStmt().GetFuncname())}}
+	case node.GetCreateTrigStmt() != nil:
+		return []schemaRequiredTarget{{name: "CREATE TRIGGER 目标表", rel: node.GetCreateTrigStmt().GetRelation()}}
 	case node.GetRefreshMatViewStmt() != nil:
 		return []schemaRequiredTarget{{name: "REFRESH MATERIALIZED VIEW 目标对象", rel: node.GetRefreshMatViewStmt().GetRelation()}}
 	case node.GetTruncateStmt() != nil:
@@ -681,7 +756,7 @@ func schemaRequiredTargets(node *pg_query.Node) []schemaRequiredTarget {
 
 func dropStmtSchemaRequiredTargets(stmt *pg_query.DropStmt) []schemaRequiredTarget {
 	switch stmt.GetRemoveType() {
-	case pg_query.ObjectType_OBJECT_TABLE, pg_query.ObjectType_OBJECT_VIEW, pg_query.ObjectType_OBJECT_MATVIEW, pg_query.ObjectType_OBJECT_INDEX, pg_query.ObjectType_OBJECT_FUNCTION:
+	case pg_query.ObjectType_OBJECT_TABLE, pg_query.ObjectType_OBJECT_VIEW, pg_query.ObjectType_OBJECT_MATVIEW, pg_query.ObjectType_OBJECT_INDEX, pg_query.ObjectType_OBJECT_FUNCTION, pg_query.ObjectType_OBJECT_TRIGGER:
 	default:
 		return nil
 	}
@@ -756,6 +831,8 @@ func analyzeDropStmt(stmt *pg_query.DropStmt) RiskAnalysis {
 		return RiskAnalysis{SQLType: "DROP_FUNCTION", RiskLevel: "WARN", RiskReason: "删除函数可能影响依赖对象或业务调用"}
 	case pg_query.ObjectType_OBJECT_EXTENSION:
 		return RiskAnalysis{SQLType: "DROP_EXTENSION", RiskLevel: "WARN", RiskReason: "删除扩展会影响扩展对象和依赖功能"}
+	case pg_query.ObjectType_OBJECT_TRIGGER:
+		return RiskAnalysis{SQLType: "DROP_TRIGGER", RiskLevel: "WARN", RiskReason: "删除触发器会改变表写入行为，请确认业务影响"}
 	default:
 		return RiskAnalysis{SQLType: "DROP", RiskLevel: "WARN", RiskReason: "DROP 会删除数据库对象，请确认对象范围"}
 	}
@@ -773,6 +850,43 @@ func analyzeTruncateStmt(stmt *pg_query.TruncateStmt) RiskAnalysis {
 		}
 	}
 	return RiskAnalysis{SQLType: "TRUNCATE", RiskLevel: "LOW", RiskReason: "临时/备份表命名规则命中"}
+}
+
+func analyzeIndexStmt(stmt *pg_query.IndexStmt) RiskAnalysis {
+	reasons := make([]string, 0, 4)
+	if stmt.GetUnique() {
+		reasons = append(reasons, "唯一索引会校验全表唯一性，可能因重复数据失败")
+	}
+	if indexHasExpression(stmt) {
+		reasons = append(reasons, "表达式索引会计算表达式并可能长时间持锁")
+	}
+	if stmt.GetWhereClause() != nil {
+		reasons = append(reasons, "部分索引需要确认 WHERE 条件能覆盖业务查询")
+	}
+	if stmt.GetConcurrent() {
+		reasons = append([]string{"并发索引耗时可能较长"}, reasons...)
+		return RiskAnalysis{SQLType: "CREATE_INDEX_CONCURRENTLY", RiskLevel: "WARN", RiskReason: strings.Join(reasons, "；")}
+	}
+	if len(reasons) == 0 {
+		return RiskAnalysis{SQLType: "CREATE_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 创建索引可能阻塞写入"}
+	}
+	if stmt.GetUnique() {
+		return RiskAnalysis{SQLType: "CREATE_UNIQUE_INDEX", RiskLevel: "WARN", RiskReason: "创建" + strings.Join(reasons, "；")}
+	}
+	if indexHasExpression(stmt) {
+		return RiskAnalysis{SQLType: "CREATE_INDEX_EXPRESSION", RiskLevel: "WARN", RiskReason: "创建" + strings.Join(reasons, "；")}
+	}
+	return RiskAnalysis{SQLType: "CREATE_INDEX_PARTIAL", RiskLevel: "WARN", RiskReason: "创建" + strings.Join(reasons, "；")}
+}
+
+func indexHasExpression(stmt *pg_query.IndexStmt) bool {
+	for _, paramNode := range stmt.GetIndexParams() {
+		indexElem := paramNode.GetIndexElem()
+		if indexElem != nil && indexElem.GetExpr() != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func firstDropObjectName(stmt *pg_query.DropStmt) string {
@@ -824,8 +938,16 @@ func analyzeAlterTableStmt(stmt *pg_query.AlterTableStmt) RiskAnalysis {
 			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ATTACH_PARTITION", RiskLevel: "WARN", RiskReason: "挂载分区可能校验数据范围并持锁"})
 		case pg_query.AlterTableType_AT_DetachPartition, pg_query.AlterTableType_AT_DetachPartitionFinalize:
 			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DETACH_PARTITION", RiskLevel: "WARN", RiskReason: "分离分区可能影响查询路由和数据可见性"})
-		case pg_query.AlterTableType_AT_DropColumn, pg_query.AlterTableType_AT_DropConstraint:
-			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ALTER_TABLE_DROP", RiskLevel: "WARN", RiskReason: "ALTER TABLE 删除字段或约束可能影响业务，请确认依赖范围"})
+		case pg_query.AlterTableType_AT_DropColumn:
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DROP_COLUMN", RiskLevel: "BLOCKED", RiskReason: "删除字段可能导致数据丢失或依赖对象失效，禁止直接执行"})
+		case pg_query.AlterTableType_AT_DropConstraint:
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DROP_CONSTRAINT", RiskLevel: "WARN", RiskReason: "删除约束可能破坏数据一致性，请确认约束类型和依赖范围"})
+		case pg_query.AlterTableType_AT_ChangeOwner:
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ALTER_OWNER", RiskLevel: "WARN", RiskReason: "修改 OWNER 可能影响权限、DDL 和后续维护"})
+		case pg_query.AlterTableType_AT_DisableTrig, pg_query.AlterTableType_AT_DisableTrigAll, pg_query.AlterTableType_AT_DisableTrigUser:
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DISABLE_TRIGGER", RiskLevel: "BLOCKED", RiskReason: "禁用触发器可能破坏审计、同步或数据一致性，禁止直接执行"})
+		case pg_query.AlterTableType_AT_EnableTrig, pg_query.AlterTableType_AT_EnableTrigAll, pg_query.AlterTableType_AT_EnableTrigUser:
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ENABLE_TRIGGER", RiskLevel: "WARN", RiskReason: "启用触发器会改变表写入行为，请确认业务影响"})
 		}
 	}
 	return risk

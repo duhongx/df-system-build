@@ -383,7 +383,10 @@ created_at
 | 字段类型变更视图依赖检测 | 已实现 | 对 `ALTER TABLE ... ALTER COLUMN ... TYPE` 查询依赖视图；如果发现依赖，会阻止直接执行并提示导出重建 SQL。 |
 | 视图备份和重建 SQL 导出 | 已实现 | 保存依赖视图定义、DROP SQL、CREATE SQL 到 `SQLViewBackup`，不可执行 SQL 导出会包含视图重建计划。 |
 | `DROP TABLE` / `TRUNCATE` 内置策略 | 已实现 | 临时/备份命名规则降为 LOW；无法确认元数据的普通表默认 BLOCKED；连接 PostgreSQL 读取到小表元数据时可降为 WARN，大表保持 BLOCKED。 |
-| DML 高危条件拦截 | 已实现 | `UPDATE` / `DELETE` 缺少 `WHERE` 或使用 `WHERE true`、`WHERE 1=1` 等无效过滤条件时标记 BLOCKED；普通 DML 继续结合 `EXPLAIN (FORMAT JSON)` 估算影响行数。 |
+| DML 高危条件拦截 | 已实现 | `UPDATE` / `DELETE` 缺少 `WHERE`、使用 `WHERE true`、`WHERE 1=1`、`IS NOT NULL` 等无效或弱过滤条件时标记 BLOCKED；布尔条件、前缀通配 `LIKE`、无固定边界时间条件标记 WARN；普通 DML 继续结合 `EXPLAIN (FORMAT JSON)` 估算影响行数。 |
+| UPDATE 表达式风险 | 已实现 | 识别 `SET col = NULL`、算术批量改值、清空 JSON、设置删除状态等高风险表达式并标记 WARN。 |
+| 类型变更矩阵 | 已实现基础版 | 基于元数据识别 `varchar` 扩容/缩容、`numeric` 精度变化、整数范围缩小、`numeric -> integer`、`text -> uuid/date/timestamp`、时区语义变化、`json -> jsonb` 等风险。 |
+| 对象/索引/触发器风险 | 已实现基础版 | `DROP COLUMN`、`ALTER ... SET SCHEMA`、禁用触发器标记 BLOCKED；重命名、OWNER 变更、删除约束、唯一索引、表达式索引、部分索引、创建/删除触发器标记 WARN。 |
 | `CREATE OR REPLACE VIEW` 兼容性检查 | 已实现 | 如果目标视图已存在，会读取旧视图列，并对新 SELECT 做零行探测；列数量、列名/顺序、类型不兼容时标记 BLOCKED。 |
 | Bytebase 风险规则吸收 | 已实现 | 吸收 Bytebase SQL Review 的规则思路，补充 AST 识别 volatile default、DML `EXPLAIN (FORMAT JSON)` 影响行数预估、DROP INDEX CONCURRENTLY 策略、CHECK NOT VALID 判断。 |
 | SQL 执行策略标记 | 已实现 | 每条 SQL 记录 `executionStrategy` 和 `canRunInTransaction`；并发索引、并发删除索引、VACUUM、REINDEX 标记为非事务直接执行，BLOCKED 标记为导出处理。 |
@@ -397,7 +400,7 @@ created_at
 
 | 功能点 | 当前状态 | 差距 |
 |---|---|---|
-| 风险分类细粒度判断 | 部分实现 | 已区分 `varchar`/`text`/`numeric` 变更、`USING` 转换、存储格式变化、时区语义变化、AST volatile default、DROP/TRUNCATE 默认阻断与大表风险、DML 无 WHERE/无效 WHERE/估算影响行数、外键/主键/唯一约束、分区、物化视图、函数、扩展风险；尚未覆盖所有 PostgreSQL 类型组合和表达式语义。 |
+| 风险分类细粒度判断 | 部分实现 | 已区分 `varchar`/`text`/`numeric` 变更、整数范围缩小、跨类型转换、`USING` 转换、存储格式变化、时区语义变化、AST volatile default、DROP/TRUNCATE 默认阻断与大表风险、DML 无 WHERE/弱 WHERE/风险 SET 表达式/估算影响行数、外键/主键/唯一约束、分区、物化视图、函数、触发器、扩展风险；尚未覆盖所有 PostgreSQL 类型组合、复杂表达式语义和执行计划细节。 |
 | `CREATE OR REPLACE VIEW` 兼容性风险 | 部分实现 | 已精确比较已有视图与新 SELECT 的输出列数量、列名/顺序、类型；尚未做多层依赖链分析。 |
 | SQL 事务策略 | 部分实现 | 当前是逐条执行，不启用文件级事务；已记录每条 SQL 是否可放入事务，并在执行前复核风险状态，但尚未提供文件级事务执行模式。 |
 | schema 推断 | 已调整策略 | 不再规划全局默认 schema；业务对象 SQL 必须显式指定 schema，文件级 schema 只作为展示和归类辅助。 |
@@ -420,10 +423,10 @@ created_at
 
 ### 建议后续优先级
 
-1. **风险识别继续补齐**：持续补 PostgreSQL 类型组合、表达式语义、索引、约束、分区表、物化视图等风险规则。
-2. **大表风险识别扩展**：当前已覆盖 `DROP TABLE`、`TRUNCATE`、`ALTER COLUMN TYPE`、`SET NOT NULL`、`ADD CHECK`、`CREATE INDEX` 的基础大表风险，后续继续细化不同 SQL 类型阈值。
-3. **执行取消能力**：增加执行中的 cancel API 和前端按钮，避免长 SQL 只能等超时。
-4. **批量文件上传和批量执行增强**：本地多文件和批次顺序执行已实现；后续继续增强本地 ZIP 上传、批次取消、批次详情统计。
+1. **风险识别继续补齐**：继续补复杂表达式、JOIN UPDATE/DELETE、MERGE、CTE DML、分区表、物化视图刷新策略等规则。
+2. **大表风险识别扩展**：当前已覆盖 `DROP TABLE`、`TRUNCATE`、`ALTER COLUMN TYPE`、`SET NOT NULL`、`ADD CHECK`、多类 `CREATE INDEX` 的基础大表风险，后续继续细化不同 SQL 类型阈值。
+3. **文件级事务模式**：当前仍是逐条执行；后续提供高级选项，并在存在非事务 SQL 时禁止启用。
+4. **批量文件上传和批量执行增强**：本地多文件和批次顺序执行已实现；后续继续增强本地 ZIP 上传、批次详情统计。
 5. **psql 兼容执行器**：作为特殊入口处理包含 psql 元命令或超大文件的脚本，不替代默认 pgx 执行。
 6. **视图自动重建增强**：当前只导出可人工处理的重建 SQL，后续再考虑自动 drop/recreate。
 

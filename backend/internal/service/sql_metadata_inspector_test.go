@@ -82,6 +82,41 @@ func TestClassifyColumnTypeChangeWithMetadata(t *testing.T) {
 			wantLevel:  "WARN",
 			wantReason: "numeric 精度缩小",
 		},
+		{
+			name:       "bigint to integer blocks",
+			column:     ColumnInfo{DataType: "bigint", UDTName: "int8"},
+			targetType: "integer",
+			wantLevel:  "BLOCKED",
+			wantReason: "整数范围缩小",
+		},
+		{
+			name:       "numeric to integer blocks",
+			column:     ColumnInfo{DataType: "numeric", UDTName: "numeric"},
+			targetType: "int",
+			wantLevel:  "BLOCKED",
+			wantReason: "numeric 转整数",
+		},
+		{
+			name:       "text to uuid blocks",
+			column:     ColumnInfo{DataType: "text", UDTName: "text"},
+			targetType: "uuid",
+			wantLevel:  "BLOCKED",
+			wantReason: "需要数据校验",
+		},
+		{
+			name:       "timestamp to timestamptz warns",
+			column:     ColumnInfo{DataType: "timestamp without time zone", UDTName: "timestamp"},
+			targetType: "timestamptz",
+			wantLevel:  "WARN",
+			wantReason: "时区语义",
+		},
+		{
+			name:       "json to jsonb warns",
+			column:     ColumnInfo{DataType: "json", UDTName: "json"},
+			targetType: "jsonb",
+			wantLevel:  "WARN",
+			wantReason: "JSON 存储格式",
+		},
 	}
 
 	for _, tc := range tests {

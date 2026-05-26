@@ -367,6 +367,11 @@ func classifyColumnTypeChangeWithMetadata(column ColumnInfo, targetType string, 
 			level = "LOW"
 			reasons = append(reasons, fmt.Sprintf("numeric 精度放宽: (%d,%d) -> (%d,%d)", oldPrecision, oldScale, newPrecision, newScale))
 		}
+	} else if reason := blockedColumnTypeChangeReason(column, targetType); reason != "" {
+		level = "BLOCKED"
+		reasons = append(reasons, reason)
+	} else if reason := warnedColumnTypeChangeReason(column, targetType); reason != "" {
+		reasons = append(reasons, reason)
 	} else {
 		fromType := displayColumnType(column)
 		if fromType == "" {
@@ -384,6 +389,79 @@ func classifyColumnTypeChangeWithMetadata(column ColumnInfo, targetType string, 
 	}
 
 	return RiskAnalysis{SQLType: "ALTER_COLUMN_TYPE", RiskLevel: level, RiskReason: strings.Join(reasons, "；")}
+}
+
+func blockedColumnTypeChangeReason(column ColumnInfo, targetType string) string {
+	fromType := normalizeColumnTypeName(displayColumnType(column))
+	toType := normalizeColumnTypeName(targetType)
+	switch {
+	case isIntegerTypeName(fromType) && isIntegerTypeName(toType) && integerTypeRank(toType) < integerTypeRank(fromType):
+		return fmt.Sprintf("整数范围缩小: %s -> %s，可能导致数据越界", fromType, toType)
+	case fromType == "numeric" && isIntegerTypeName(toType):
+		return "numeric 转整数可能导致小数截断或数据越界"
+	case (fromType == "text" || fromType == "character varying") && (toType == "uuid" || toType == "date" || strings.HasPrefix(toType, "timestamp")):
+		return fmt.Sprintf("%s 转 %s 需要数据校验，可能存在无法转换的历史数据", fromType, toType)
+	default:
+		return ""
+	}
+}
+
+func warnedColumnTypeChangeReason(column ColumnInfo, targetType string) string {
+	fromType := normalizeColumnTypeName(displayColumnType(column))
+	toType := normalizeColumnTypeName(targetType)
+	switch {
+	case strings.HasPrefix(fromType, "timestamp") && strings.HasPrefix(toType, "timestamp") && fromType != toType:
+		return fmt.Sprintf("时间类型变更涉及时区语义: %s -> %s，请确认业务含义", fromType, toType)
+	case fromType == "date" && strings.HasPrefix(toType, "timestamp"):
+		return fmt.Sprintf("date 转 %s 涉及时间默认值语义，请确认业务含义", toType)
+	case fromType == "json" && toType == "jsonb":
+		return "JSON 存储格式变更为 jsonb，可能触发表重写并改变键顺序/重复键表现"
+	default:
+		return ""
+	}
+}
+
+func normalizeColumnTypeName(typeName string) string {
+	normalized := strings.ToLower(strings.TrimSpace(typeName))
+	if idx := strings.Index(normalized, "("); idx >= 0 {
+		normalized = strings.TrimSpace(normalized[:idx])
+	}
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	switch normalized {
+	case "int", "int4", "integer":
+		return "integer"
+	case "int2", "smallint":
+		return "smallint"
+	case "int8", "bigint":
+		return "bigint"
+	case "decimal", "numeric":
+		return "numeric"
+	case "varchar", "character varying":
+		return "character varying"
+	case "timestamptz", "timestamp with time zone":
+		return "timestamp with time zone"
+	case "timestamp", "timestamp without time zone":
+		return "timestamp without time zone"
+	default:
+		return normalized
+	}
+}
+
+func isIntegerTypeName(typeName string) bool {
+	return typeName == "smallint" || typeName == "integer" || typeName == "bigint"
+}
+
+func integerTypeRank(typeName string) int {
+	switch typeName {
+	case "smallint":
+		return 1
+	case "integer":
+		return 2
+	case "bigint":
+		return 3
+	default:
+		return 0
+	}
 }
 
 func compareVarcharLengths(column ColumnInfo, targetType string) (int64, int64, bool) {
