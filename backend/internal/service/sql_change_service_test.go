@@ -371,6 +371,39 @@ func TestSQLExecuteOptionsRequireWarnConfirmation(t *testing.T) {
 	}
 }
 
+func TestRefreshStatementsStaticRiskBeforeExecutionUpgradesBlockedRisk(t *testing.T) {
+	statements := []model.SQLChangeStatement{
+		{
+			SQLContent:        "UPDATE his.patient SET status = 1",
+			SQLType:           "UPDATE",
+			RiskLevel:         "LOW",
+			ExecuteStatus:     "PENDING",
+			ExecutionStrategy: "DIRECT",
+		},
+		{
+			SQLContent:    "UPDATE his.patient SET status = 1 WHERE id = 1",
+			SQLType:       "UPDATE",
+			RiskLevel:     "LOW",
+			ExecuteStatus: "PENDING",
+		},
+	}
+
+	changed := refreshStatementsStaticRiskBeforeExecution(statements)
+
+	if !changed {
+		t.Fatalf("expected risk refresh to report changed statements")
+	}
+	if statements[0].SQLType != "UPDATE_WITHOUT_WHERE" || statements[0].RiskLevel != "BLOCKED" {
+		t.Fatalf("expected first statement to be upgraded to blocked risk, got %+v", statements[0])
+	}
+	if statements[0].ExecuteStatus != "NOT_EXECUTABLE" || statements[0].ExecutionStrategy != "MANUAL_EXPORT" {
+		t.Fatalf("expected blocked execution strategy/status, got %+v", statements[0])
+	}
+	if statements[1].RiskLevel != "LOW" || statements[1].ExecuteStatus != "PENDING" {
+		t.Fatalf("expected safe statement to remain pending, got %+v", statements[1])
+	}
+}
+
 func TestSQLExecutionCancelRegistry(t *testing.T) {
 	registry := newSQLExecutionCancelRegistry()
 	canceled := false

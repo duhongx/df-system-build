@@ -388,6 +388,7 @@ created_at
 | Bytebase 风险规则吸收 | 已实现 | 吸收 Bytebase SQL Review 的规则思路，补充 AST 识别 volatile default、DML `EXPLAIN (FORMAT JSON)` 影响行数预估、DROP INDEX CONCURRENTLY 策略、CHECK NOT VALID 判断。 |
 | SQL 执行策略标记 | 已实现 | 每条 SQL 记录 `executionStrategy` 和 `canRunInTransaction`；并发索引、并发删除索引、VACUUM、REINDEX 标记为非事务直接执行，BLOCKED 标记为导出处理。 |
 | WARN 风险执行确认 | 已实现 | 前端执行前汇总 WARN SQL 风险并要求确认；后端执行选项也支持强制要求确认，避免绕过页面直接执行。 |
+| 执行前最终静态校验 | 已实现 | SQL 文件执行前会重新运行静态风险识别；如果旧记录因规则升级变为 BLOCKED，会更新为 `NOT_EXECUTABLE` 并禁止执行。 |
 | SQL 执行中取消 | 已实现 | 执行中的 SQL 文件可提交取消请求，后端通过执行上下文取消当前 SQL，当前语句标记 `CANCELED`，文件标记 `CANCELED` 或 `PARTIAL_FAILED`。 |
 | 本地多 SQL 文件批次 | 已实现 | 前端支持一次选择多个本地 SQL 文件，后端按文件名排序生成 SQL 批次，批次执行按文件顺序执行，失败后停止后续文件。 |
 
@@ -397,7 +398,7 @@ created_at
 |---|---|---|
 | 风险分类细粒度判断 | 部分实现 | 已区分 `varchar`/`text`/`numeric` 变更、`USING` 转换、存储格式变化、时区语义变化、AST volatile default、DROP/TRUNCATE 默认阻断与大表风险、DML 无 WHERE/无效 WHERE/估算影响行数、外键/主键/唯一约束、分区、物化视图、函数、扩展风险；尚未覆盖所有 PostgreSQL 类型组合和表达式语义。 |
 | `CREATE OR REPLACE VIEW` 兼容性风险 | 部分实现 | 已精确比较已有视图与新 SELECT 的输出列数量、列名/顺序、类型；尚未做多层依赖链分析。 |
-| SQL 事务策略 | 部分实现 | 当前是逐条执行，不启用文件级事务；已记录每条 SQL 是否可放入事务，但尚未提供文件级事务执行模式。 |
+| SQL 事务策略 | 部分实现 | 当前是逐条执行，不启用文件级事务；已记录每条 SQL 是否可放入事务，并在执行前复核风险状态，但尚未提供文件级事务执行模式。 |
 | schema 推断 | 已调整策略 | 不再规划全局默认 schema；业务对象 SQL 必须显式指定 schema，文件级 schema 只作为展示和归类辅助。 |
 | 视图依赖处理 | 部分实现 | 已自动备份依赖视图定义并导出 drop/recreate 计划；暂不自动 drop/recreate。 |
 | 实例管理 | 部分实现 | 当前展示系统设置里的 PostgreSQL 连接和运行状态，不维护独立实例资产、集群拓扑、备份策略等管理信息。根据当前方向，实例管理与 SQL 执行无关。 |

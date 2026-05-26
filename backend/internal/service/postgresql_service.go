@@ -847,6 +847,13 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 	if err := repository.DB.Where("file_id = ?", fileID).Order("line_number ASC, id ASC").Find(&statements).Error; err != nil {
 		return nil, nil, err
 	}
+	if refreshStatementsStaticRiskBeforeExecution(statements) {
+		for i := range statements {
+			if err := repository.DB.Save(&statements[i]).Error; err != nil {
+				return nil, nil, err
+			}
+		}
+	}
 	if err := requireWarnConfirmation(statements, options); err != nil {
 		return nil, nil, err
 	}
@@ -998,6 +1005,38 @@ func requireWarnConfirmation(statements []model.SQLChangeStatement, options SQLE
 		return nil
 	}
 	return fmt.Errorf("存在 %d 条 WARN 风险 SQL，请确认风险后再执行", warnCount)
+}
+
+func refreshStatementsStaticRiskBeforeExecution(statements []model.SQLChangeStatement) bool {
+	changed := false
+	for i := range statements {
+		stmt := &statements[i]
+		if stmt.ExecuteStatus == "SUCCESS" || stmt.ExecuteStatus == "SKIPPED" {
+			continue
+		}
+		analysis := AnalyzeSQLRisk(stmt.SQLContent)
+		if riskRank(analysis.RiskLevel) < riskRank(stmt.RiskLevel) {
+			continue
+		}
+		if riskRank(analysis.RiskLevel) == riskRank(stmt.RiskLevel) && stmt.SQLType != "" && stmt.RiskReason != "" {
+			continue
+		}
+		strategy := DetermineExecutionStrategy(analysis)
+		stmt.SQLType = analysis.SQLType
+		stmt.RiskLevel = analysis.RiskLevel
+		stmt.RiskReason = analysis.RiskReason
+		stmt.ExecutionStrategy = strategy.Name
+		stmt.CanRunInTransaction = strategy.CanRunInTransaction
+		if analysis.RiskLevel == "BLOCKED" {
+			stmt.ExecuteStatus = "NOT_EXECUTABLE"
+			stmt.ExecuteMessage = analysis.RiskReason
+		} else if stmt.ExecuteStatus == "NOT_EXECUTABLE" {
+			stmt.ExecuteStatus = defaultStatementStatus(analysis)
+			stmt.ExecuteMessage = ""
+		}
+		changed = true
+	}
+	return changed
 }
 
 func (s *PostgreSQLService) SkipSQLStatement(statementID uint, username string) (*model.SQLChangeStatement, error) {
