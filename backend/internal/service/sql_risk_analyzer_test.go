@@ -73,7 +73,7 @@ func TestAnalyzeSQLRiskAllowsExplicitSchemaBusinessSQL(t *testing.T) {
 	for _, sqlText := range tests {
 		t.Run(sqlText, func(t *testing.T) {
 			got := AnalyzeSQLRisk(sqlText)
-			if got.SQLType == "MISSING_SCHEMA" || got.RiskLevel == "BLOCKED" {
+			if got.SQLType == "MISSING_SCHEMA" {
 				t.Fatalf("expected explicit schema SQL to pass schema guard, got %+v", got)
 			}
 		})
@@ -269,6 +269,61 @@ func TestAnalyzeSQLRiskClassifiesDropIndexConcurrency(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSQLRiskBlocksDMLWithoutWhere(t *testing.T) {
+	tests := []struct {
+		sql        string
+		wantType   string
+		wantReason string
+	}{
+		{
+			sql:        "UPDATE his.patient SET status = 1",
+			wantType:   "UPDATE_WITHOUT_WHERE",
+			wantReason: "缺少 WHERE",
+		},
+		{
+			sql:        "DELETE FROM his.patient",
+			wantType:   "DELETE_WITHOUT_WHERE",
+			wantReason: "缺少 WHERE",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.sql, func(t *testing.T) {
+			got := AnalyzeSQLRisk(tc.sql)
+			if got.SQLType != tc.wantType || got.RiskLevel != "BLOCKED" {
+				t.Fatalf("expected %s BLOCKED, got %+v", tc.wantType, got)
+			}
+			if !strings.Contains(got.RiskReason, tc.wantReason) {
+				t.Fatalf("expected reason containing %q, got %q", tc.wantReason, got.RiskReason)
+			}
+		})
+	}
+}
+
+func TestAnalyzeSQLRiskBlocksDMLWithTrivialWhere(t *testing.T) {
+	tests := []struct {
+		sql      string
+		wantType string
+	}{
+		{sql: "UPDATE his.patient SET status = 1 WHERE true", wantType: "UPDATE_TRIVIAL_WHERE"},
+		{sql: "UPDATE his.patient SET status = 1 WHERE 1 = 1", wantType: "UPDATE_TRIVIAL_WHERE"},
+		{sql: "DELETE FROM his.patient WHERE TRUE", wantType: "DELETE_TRIVIAL_WHERE"},
+		{sql: "DELETE FROM his.patient WHERE 1=1", wantType: "DELETE_TRIVIAL_WHERE"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.sql, func(t *testing.T) {
+			got := AnalyzeSQLRisk(tc.sql)
+			if got.SQLType != tc.wantType || got.RiskLevel != "BLOCKED" {
+				t.Fatalf("expected %s BLOCKED, got %+v", tc.wantType, got)
+			}
+			if !strings.Contains(got.RiskReason, "无有效过滤条件") {
+				t.Fatalf("expected trivial where reason, got %q", got.RiskReason)
+			}
+		})
+	}
+}
+
 func TestAnalyzeSQLRiskClassifiesAdditionalBytebaseStyleRisks(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -372,6 +427,45 @@ func TestDropAndTruncatePolicyRecognizesTemporaryNames(t *testing.T) {
 		if !strings.Contains(got.RiskReason, "临时/备份表命名规则命中") {
 			t.Fatalf("expected temp/backup reason for %s, got %q", sqlText, got.RiskReason)
 		}
+	}
+}
+
+func TestDropAndTruncateDefaultBlockedWithoutMetadata(t *testing.T) {
+	tests := []struct {
+		sql        string
+		wantType   string
+		wantReason string
+	}{
+		{sql: "DROP TABLE his.patient", wantType: "DROP_TABLE", wantReason: "默认禁止"},
+		{sql: "TRUNCATE TABLE his.patient", wantType: "TRUNCATE", wantReason: "默认禁止"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.sql, func(t *testing.T) {
+			got := AnalyzeSQLRisk(tc.sql)
+			if got.SQLType != tc.wantType || got.RiskLevel != "BLOCKED" {
+				t.Fatalf("expected %s BLOCKED, got %+v", tc.wantType, got)
+			}
+			if !strings.Contains(got.RiskReason, tc.wantReason) {
+				t.Fatalf("expected reason containing %q, got %q", tc.wantReason, got.RiskReason)
+			}
+		})
+	}
+}
+
+func TestSmallDropOrTruncateWithMetadataWarns(t *testing.T) {
+	stats := TableStats{SchemaName: "his", TableName: "patient", TotalBytes: 1024, EstimatedRows: 3}
+
+	for _, sqlType := range []string{"DROP_TABLE", "TRUNCATE"} {
+		t.Run(sqlType, func(t *testing.T) {
+			got := classifyDestructiveTableOperation(sqlType, stats)
+			if got.RiskLevel != "WARN" {
+				t.Fatalf("expected WARN for metadata-checked small table, got %+v", got)
+			}
+			if !strings.Contains(got.RiskReason, "请确认对象范围") {
+				t.Fatalf("expected confirmation reason, got %q", got.RiskReason)
+			}
+		})
 	}
 }
 

@@ -382,7 +382,8 @@ created_at
 | 明显高危 SQL 强拦截 | 已实现 | `DROP DATABASE`、`DROP SCHEMA`、`DROP OWNED`、`ALTER SYSTEM`、`COPY PROGRAM`、`REINDEX DATABASE`、`VACUUM FULL` 会标记不可执行。 |
 | 字段类型变更视图依赖检测 | 已实现 | 对 `ALTER TABLE ... ALTER COLUMN ... TYPE` 查询依赖视图；如果发现依赖，会阻止直接执行并提示导出重建 SQL。 |
 | 视图备份和重建 SQL 导出 | 已实现 | 保存依赖视图定义、DROP SQL、CREATE SQL 到 `SQLViewBackup`，不可执行 SQL 导出会包含视图重建计划。 |
-| `DROP TABLE` / `TRUNCATE` 内置策略 | 已实现 | 临时/备份命名规则降为 LOW；普通表 WARN；连接 PostgreSQL 读取到大表元数据时提升为 BLOCKED。 |
+| `DROP TABLE` / `TRUNCATE` 内置策略 | 已实现 | 临时/备份命名规则降为 LOW；无法确认元数据的普通表默认 BLOCKED；连接 PostgreSQL 读取到小表元数据时可降为 WARN，大表保持 BLOCKED。 |
+| DML 高危条件拦截 | 已实现 | `UPDATE` / `DELETE` 缺少 `WHERE` 或使用 `WHERE true`、`WHERE 1=1` 等无效过滤条件时标记 BLOCKED；普通 DML 继续结合 `EXPLAIN (FORMAT JSON)` 估算影响行数。 |
 | `CREATE OR REPLACE VIEW` 兼容性提示 | 已实现 | 如果目标视图已存在，会追加“列名/顺序/类型兼容性限制”的保守风险提示。 |
 | Bytebase 风险规则吸收 | 已实现 | 吸收 Bytebase SQL Review 的规则思路，补充 AST 识别 volatile default、DML `EXPLAIN (FORMAT JSON)` 影响行数预估、DROP INDEX CONCURRENTLY 策略、CHECK NOT VALID 判断。 |
 | SQL 执行策略标记 | 已实现 | 每条 SQL 记录 `executionStrategy` 和 `canRunInTransaction`；并发索引、并发删除索引、VACUUM、REINDEX 标记为非事务直接执行，BLOCKED 标记为导出处理。 |
@@ -394,7 +395,7 @@ created_at
 
 | 功能点 | 当前状态 | 差距 |
 |---|---|---|
-| 风险分类细粒度判断 | 部分实现 | 已区分 `varchar`/`text`/`numeric` 变更、`USING` 转换、存储格式变化、时区语义变化、AST volatile default、DROP/TRUNCATE 大表风险、DML 估算影响行数、外键/主键/唯一约束、分区、物化视图、函数、扩展风险；尚未覆盖所有 PostgreSQL 类型组合和表达式语义。 |
+| 风险分类细粒度判断 | 部分实现 | 已区分 `varchar`/`text`/`numeric` 变更、`USING` 转换、存储格式变化、时区语义变化、AST volatile default、DROP/TRUNCATE 默认阻断与大表风险、DML 无 WHERE/无效 WHERE/估算影响行数、外键/主键/唯一约束、分区、物化视图、函数、扩展风险；尚未覆盖所有 PostgreSQL 类型组合和表达式语义。 |
 | `CREATE OR REPLACE VIEW` 兼容性风险 | 部分实现 | 已对已有视图追加兼容性风险提示；尚未解析新 SELECT 输出列并精确比较列名、顺序、类型，也没有依赖链分析。 |
 | SQL 事务策略 | 部分实现 | 当前是逐条执行，不启用文件级事务；已记录每条 SQL 是否可放入事务，但尚未提供文件级事务执行模式。 |
 | schema 推断 | 已调整策略 | 不再规划全局默认 schema；业务对象 SQL 必须显式指定 schema，文件级 schema 只作为展示和归类辅助。 |

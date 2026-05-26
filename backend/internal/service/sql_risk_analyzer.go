@@ -23,7 +23,7 @@ func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
 		return RiskAnalysis{SQLType: "MISSING_SCHEMA", RiskLevel: "BLOCKED", RiskReason: reason}
 	}
 	if risk, ok := analyzeSQLRiskFromAST(tree); ok {
-		return enrichStaticRisk(sqlText, risk)
+		return enrichStaticRisk(sqlText, classifyTrivialDMLWhere(sqlText, risk))
 	}
 
 	normalized := normalizeSQL(sqlText)
@@ -144,6 +144,40 @@ func classifyStaticAddCheck(sqlText string, risk RiskAnalysis) RiskAnalysis {
 		return RiskAnalysis{SQLType: "ADD_CHECK_NOT_VALID", RiskLevel: "LOW", RiskReason: "CHECK 使用 NOT VALID，不立即校验已有数据"}
 	}
 	return risk
+}
+
+func classifyTrivialDMLWhere(sqlText string, risk RiskAnalysis) RiskAnalysis {
+	if risk.SQLType != "UPDATE" && risk.SQLType != "DELETE" {
+		return risk
+	}
+	whereExpr := extractDMLWhereExpression(sqlText)
+	if !isTrivialWhereExpression(whereExpr) {
+		return risk
+	}
+	if risk.SQLType == "UPDATE" {
+		return RiskAnalysis{SQLType: "UPDATE_TRIVIAL_WHERE", RiskLevel: "BLOCKED", RiskReason: "UPDATE 条件无有效过滤条件，禁止直接执行"}
+	}
+	return RiskAnalysis{SQLType: "DELETE_TRIVIAL_WHERE", RiskLevel: "BLOCKED", RiskReason: "DELETE 条件无有效过滤条件，禁止直接执行"}
+}
+
+func extractDMLWhereExpression(sqlText string) string {
+	normalized := strings.TrimSuffix(normalizeSQL(sqlText), ";")
+	matches := regexp.MustCompile(`(?is)\bWHERE\s+(.+)$`).FindStringSubmatch(normalized)
+	if len(matches) < 2 {
+		return ""
+	}
+	whereExpr := matches[1]
+	whereExpr = regexp.MustCompile(`(?is)\bRETURNING\b.*$`).ReplaceAllString(whereExpr, "")
+	return strings.TrimSpace(whereExpr)
+}
+
+func isTrivialWhereExpression(whereExpr string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(whereExpr))
+	for strings.HasPrefix(normalized, "(") && strings.HasSuffix(normalized, ")") {
+		normalized = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(normalized, "("), ")"))
+	}
+	compact := regexp.MustCompile(`\s+`).ReplaceAllString(normalized, "")
+	return compact == "true" || compact == "1=1"
 }
 
 func extractAlterColumnTargetType(sqlText string) string {
@@ -321,6 +355,14 @@ func classifyDestructiveTableOperation(sqlType string, stats TableStats) RiskAna
 	if isTemporaryOrBackupTableName(tableName) {
 		return RiskAnalysis{SQLType: sqlType, RiskLevel: "LOW", RiskReason: "临时/备份表命名规则命中"}
 	}
+	hasMetadata := strings.TrimSpace(stats.SchemaName) != "" || stats.TotalBytes > 0 || stats.EstimatedRows > 0
+	if !hasMetadata {
+		return RiskAnalysis{
+			SQLType:    sqlType,
+			RiskLevel:  "BLOCKED",
+			RiskReason: fmt.Sprintf("%s 默认禁止直接执行，请确认对象范围或导出处理", sqlType),
+		}
+	}
 	if stats.TotalBytes > largeTableBytes || stats.EstimatedRows > largeTableRows {
 		return RiskAnalysis{
 			SQLType:    sqlType,
@@ -439,8 +481,14 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 	case node.GetInsertStmt() != nil:
 		return RiskAnalysis{SQLType: "INSERT", RiskLevel: "LOW"}, true
 	case node.GetUpdateStmt() != nil:
+		if node.GetUpdateStmt().GetWhereClause() == nil {
+			return RiskAnalysis{SQLType: "UPDATE_WITHOUT_WHERE", RiskLevel: "BLOCKED", RiskReason: "UPDATE 缺少 WHERE 条件，禁止直接执行"}, true
+		}
 		return RiskAnalysis{SQLType: "UPDATE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}, true
 	case node.GetDeleteStmt() != nil:
+		if node.GetDeleteStmt().GetWhereClause() == nil {
+			return RiskAnalysis{SQLType: "DELETE_WITHOUT_WHERE", RiskLevel: "BLOCKED", RiskReason: "DELETE 缺少 WHERE 条件，禁止直接执行"}, true
+		}
 		return RiskAnalysis{SQLType: "DELETE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}, true
 	case node.GetCreateStmt() != nil:
 		return RiskAnalysis{SQLType: "CREATE_TABLE", RiskLevel: "LOW"}, true
@@ -473,7 +521,7 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 		}
 		return RiskAnalysis{SQLType: "CREATE_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 创建索引可能阻塞写入"}, true
 	case node.GetTruncateStmt() != nil:
-		return RiskAnalysis{SQLType: "TRUNCATE", RiskLevel: "WARN", RiskReason: "TRUNCATE 会快速清空表数据，请确认对象范围"}, true
+		return analyzeTruncateStmt(node.GetTruncateStmt()), true
 	case node.GetReindexStmt() != nil:
 		reindexStmt := node.GetReindexStmt()
 		if reindexStmt.GetKind() == pg_query.ReindexObjectType_REINDEX_OBJECT_DATABASE {
@@ -698,7 +746,7 @@ func analyzeDropStmt(stmt *pg_query.DropStmt) RiskAnalysis {
 	case pg_query.ObjectType_OBJECT_SCHEMA:
 		return RiskAnalysis{SQLType: "DROP_SCHEMA", RiskLevel: "BLOCKED", RiskReason: "禁止通过普通入口删除 schema"}
 	case pg_query.ObjectType_OBJECT_TABLE:
-		return RiskAnalysis{SQLType: "DROP_TABLE", RiskLevel: "WARN", RiskReason: "DROP TABLE 会删除表结构和数据，请确认对象范围"}
+		return classifyDestructiveTableOperation("DROP_TABLE", TableStats{TableName: firstDropObjectName(stmt)})
 	case pg_query.ObjectType_OBJECT_INDEX:
 		if stmt.GetConcurrent() {
 			return RiskAnalysis{SQLType: "DROP_INDEX_CONCURRENTLY", RiskLevel: "WARN", RiskReason: "并发删除索引耗时可能较长"}
@@ -711,6 +759,30 @@ func analyzeDropStmt(stmt *pg_query.DropStmt) RiskAnalysis {
 	default:
 		return RiskAnalysis{SQLType: "DROP", RiskLevel: "WARN", RiskReason: "DROP 会删除数据库对象，请确认对象范围"}
 	}
+}
+
+func analyzeTruncateStmt(stmt *pg_query.TruncateStmt) RiskAnalysis {
+	for _, relNode := range stmt.GetRelations() {
+		rel := relNode.GetRangeVar()
+		if rel == nil {
+			continue
+		}
+		risk := classifyDestructiveTableOperation("TRUNCATE", TableStats{TableName: rel.GetRelname()})
+		if risk.RiskLevel != "LOW" {
+			return risk
+		}
+	}
+	return RiskAnalysis{SQLType: "TRUNCATE", RiskLevel: "LOW", RiskReason: "临时/备份表命名规则命中"}
+}
+
+func firstDropObjectName(stmt *pg_query.DropStmt) string {
+	for _, obj := range stmt.GetObjects() {
+		parts := stringListFromNode(obj)
+		if len(parts) > 0 {
+			return parts[len(parts)-1]
+		}
+	}
+	return ""
 }
 
 func analyzeAlterTableStmt(stmt *pg_query.AlterTableStmt) RiskAnalysis {
