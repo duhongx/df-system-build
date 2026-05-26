@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  cancelSQLBatch,
   cancelSQLFile,
   deleteSQLFile,
   executeSQLBatch,
@@ -221,6 +222,16 @@ async function handleCancelExecution() {
   ElMessage.warning('已提交取消请求')
 }
 
+async function handleCancelBatch() {
+  if (!currentBatch.value) {
+    ElMessage.warning('请选择正在执行的 SQL 批次')
+    return
+  }
+  const batch = await cancelSQLBatch(currentBatch.value.id)
+  currentBatch.value = batch
+  ElMessage.warning('已提交批次取消请求')
+}
+
 async function handleOpen(row: SQLChangeFile) {
   const data = await getSQLFile(row.id)
   currentFile.value = data.file
@@ -376,6 +387,7 @@ function reasonText(row: SQLChangeStatement) {
         <el-button :disabled="!currentFile" :loading="executing" @click="handleExecuteFile()">执行当前文件</el-button>
         <el-button v-if="currentFile?.executeStatus === 'RUNNING'" type="warning" @click="handleCancelExecution">取消执行</el-button>
         <el-button :disabled="!currentBatch" :loading="executing" @click="handleExecuteBatch()">执行当前批次</el-button>
+        <el-button v-if="currentBatch?.executeStatus === 'RUNNING'" type="warning" @click="handleCancelBatch">取消批次</el-button>
         <el-input v-model="serverFilePath" placeholder="服务器 .sql 或 .zip 文件路径" style="width: 360px;" />
         <el-button :loading="importing" @click="handleImportServerSQL">导入服务器文件</el-button>
       </div>

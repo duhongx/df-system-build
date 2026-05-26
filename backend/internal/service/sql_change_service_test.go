@@ -426,6 +426,22 @@ func TestSQLExecutionCancelRegistry(t *testing.T) {
 	}
 }
 
+func TestBatchExecutionSummaryHandlesCanceledFiles(t *testing.T) {
+	status, message := batchExecutionSummary(1, 0, 0, 2)
+
+	if status != "PARTIAL_FAILED" {
+		t.Fatalf("expected PARTIAL_FAILED, got %q", status)
+	}
+	if !strings.Contains(message, "取消文件 2") {
+		t.Fatalf("expected canceled file count in message, got %q", message)
+	}
+
+	status, _ = batchExecutionSummary(0, 0, 0, 2)
+	if status != "CANCELED" {
+		t.Fatalf("expected CANCELED for only canceled files, got %q", status)
+	}
+}
+
 func TestParseSQLBatchCreatesOrderedFiles(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 

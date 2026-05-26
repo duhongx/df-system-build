@@ -25,12 +25,17 @@ import (
 )
 
 type PostgreSQLService struct {
-	settingsRepo *repository.SettingsRepo
-	cancelReg    *sqlExecutionCancelRegistry
+	settingsRepo   *repository.SettingsRepo
+	cancelReg      *sqlExecutionCancelRegistry
+	batchCancelReg *sqlExecutionCancelRegistry
 }
 
 func NewPostgreSQLService() *PostgreSQLService {
-	return &PostgreSQLService{settingsRepo: repository.NewSettingsRepo(), cancelReg: globalSQLExecutionCancelRegistry}
+	return &PostgreSQLService{
+		settingsRepo:   repository.NewSettingsRepo(),
+		cancelReg:      globalSQLExecutionCancelRegistry,
+		batchCancelReg: globalSQLBatchCancelRegistry,
+	}
 }
 
 type PostgreSQLConfig struct {
@@ -125,6 +130,7 @@ type sqlExecutionCancelRegistry struct {
 }
 
 var globalSQLExecutionCancelRegistry = newSQLExecutionCancelRegistry()
+var globalSQLBatchCancelRegistry = newSQLExecutionCancelRegistry()
 
 func newSQLExecutionCancelRegistry() *sqlExecutionCancelRegistry {
 	return &sqlExecutionCancelRegistry{cancels: map[uint]context.CancelFunc{}}
@@ -1088,6 +1094,16 @@ func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, u
 	if len(files) == 0 {
 		return nil, nil, fmt.Errorf("批次下没有 SQL 文件")
 	}
+	batchCtx, cancelBatch := context.WithCancel(ctx)
+	if s.batchCancelReg != nil {
+		if !s.batchCancelReg.register(batchID, cancelBatch) {
+			cancelBatch()
+			return nil, nil, fmt.Errorf("SQL 批次正在执行中")
+		}
+		defer s.batchCancelReg.unregister(batchID)
+	}
+	defer cancelBatch()
+
 	batch.ExecuteStatus = "RUNNING"
 	batch.ExecuteUser = username
 	_ = repository.DB.Save(&batch).Error
@@ -1095,12 +1111,23 @@ func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, u
 	successFiles := 0
 	failedFiles := 0
 	skippedFiles := 0
+	canceledFiles := 0
 	for i := range files {
-		file, _, err := s.ExecuteSQLFileWithOptions(ctx, files[i].ID, username, options)
+		if batchCtx.Err() != nil {
+			canceledFiles += markRemainingBatchFilesCanceled(files[i:], username)
+			break
+		}
+		file, _, err := s.ExecuteSQLFileWithOptions(batchCtx, files[i].ID, username, options)
 		if err != nil {
-			files[i].ExecuteStatus = "FAILED"
-			files[i].ExecuteMessage = err.Error()
-			failedFiles++
+			if batchCtx.Err() != nil || errors.Is(err, context.Canceled) {
+				files[i].ExecuteStatus = "CANCELED"
+				files[i].ExecuteMessage = "批次取消"
+				canceledFiles++
+			} else {
+				files[i].ExecuteStatus = "FAILED"
+				files[i].ExecuteMessage = err.Error()
+				failedFiles++
+			}
 			break
 		}
 		files[i] = *file
@@ -1109,6 +1136,8 @@ func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, u
 			successFiles++
 		case "SKIPPED":
 			skippedFiles++
+		case "CANCELED":
+			canceledFiles++
 		default:
 			failedFiles++
 		}
@@ -1121,19 +1150,59 @@ func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, u
 	batch.SuccessFiles = successFiles
 	batch.FailedFiles = failedFiles
 	batch.SkippedFiles = skippedFiles
-	switch {
-	case failedFiles > 0 && successFiles == 0 && skippedFiles == 0:
-		batch.ExecuteStatus = "FAILED"
-	case failedFiles > 0:
-		batch.ExecuteStatus = "PARTIAL_FAILED"
-	default:
-		batch.ExecuteStatus = "SUCCESS"
-	}
-	batch.ExecuteMessage = fmt.Sprintf("成功文件 %d，失败文件 %d，跳过文件 %d", successFiles, failedFiles, skippedFiles)
+	batch.ExecuteStatus, batch.ExecuteMessage = batchExecutionSummary(successFiles, failedFiles, skippedFiles, canceledFiles)
 	if err := repository.DB.Save(&batch).Error; err != nil {
 		return nil, nil, err
 	}
 	return &batch, files, nil
+}
+
+func (s *PostgreSQLService) CancelSQLBatch(batchID uint, username string) (*model.SQLChangeBatch, error) {
+	var batch model.SQLChangeBatch
+	if err := repository.DB.Where("is_deleted = ?", false).First(&batch, batchID).Error; err != nil {
+		return nil, err
+	}
+	if batch.ExecuteStatus != "RUNNING" {
+		return nil, fmt.Errorf("SQL 批次未在执行中")
+	}
+	if s.batchCancelReg == nil || !s.batchCancelReg.cancel(batchID) {
+		return nil, fmt.Errorf("未找到正在执行的 SQL 批次")
+	}
+	batch.ExecuteMessage = "取消批次执行请求已提交: " + username
+	if err := repository.DB.Save(&batch).Error; err != nil {
+		return nil, err
+	}
+	return &batch, nil
+}
+
+func markRemainingBatchFilesCanceled(files []model.SQLChangeFile, username string) int {
+	canceled := 0
+	now := time.Now()
+	for i := range files {
+		if files[i].ExecuteStatus == "SUCCESS" || files[i].ExecuteStatus == "SKIPPED" {
+			continue
+		}
+		files[i].ExecuteStatus = "CANCELED"
+		files[i].ExecuteMessage = "批次取消: " + username
+		files[i].ExecuteTime = &now
+		_ = repository.DB.Save(&files[i]).Error
+		canceled++
+	}
+	return canceled
+}
+
+func batchExecutionSummary(successFiles, failedFiles, skippedFiles, canceledFiles int) (string, string) {
+	message := fmt.Sprintf("成功文件 %d，失败文件 %d，跳过文件 %d，取消文件 %d", successFiles, failedFiles, skippedFiles, canceledFiles)
+	switch {
+	case canceledFiles > 0 && successFiles == 0 && failedFiles == 0 && skippedFiles == 0:
+		return "CANCELED", message
+	case failedFiles > 0 && successFiles == 0 && skippedFiles == 0:
+		return "FAILED", message
+	case failedFiles > 0 || canceledFiles > 0:
+		return "PARTIAL_FAILED", message
+	default:
+		return "SUCCESS", message
+	}
 }
 
 func (s *PostgreSQLService) ListSQLBatches(page, pageSize int) ([]model.SQLChangeBatch, int64, error) {

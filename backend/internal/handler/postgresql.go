@@ -33,6 +33,7 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/sql-batches/:id", h.GetSQLBatch)
 		g.POST("/sql-batches/parse", h.ParseSQLBatch)
 		g.POST("/sql-batches/:id/execute", h.ExecuteSQLBatch)
+		g.POST("/sql-batches/:id/cancel", h.CancelSQLBatch)
 		g.POST("/sql-files/parse", h.ParseSQL)
 		g.POST("/sql-files/:id/execute", h.ExecuteSQLFile)
 		g.POST("/sql-files/:id/cancel", h.CancelSQLFile)
@@ -118,6 +119,16 @@ func (h *PostgreSQLHandler) ExecuteSQLBatch(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"batch": batch, "files": files})
+}
+
+func (h *PostgreSQLHandler) CancelSQLBatch(c *gin.Context) {
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+	batch, err := h.svc.CancelSQLBatch(uint(id), middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14015, err.Error())
+		return
+	}
+	response.OK(c, batch)
 }
 
 func (h *PostgreSQLHandler) ExecuteSQLContent(c *gin.Context) {

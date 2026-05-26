@@ -126,6 +126,9 @@ export const parseSQLBatch = (data: { batchName?: string; overwrite?: boolean; f
 export const executeSQLBatch = (id: number, options: SQLExecuteOptions) =>
   request.post<any, { batch: SQLChangeBatch; files: SQLChangeFile[] }>(`/postgresql/sql-batches/${id}/execute`, { options })
 
+export const cancelSQLBatch = (id: number) =>
+  request.post<any, SQLChangeBatch>(`/postgresql/sql-batches/${id}/cancel`)
+
 export const listSQLBatches = (page = 1, pageSize = 20) =>
   request.get<any, PageResult<SQLChangeBatch>>('/postgresql/sql-batches', { params: { page, pageSize } })
 
