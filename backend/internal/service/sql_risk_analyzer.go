@@ -14,6 +14,45 @@ const (
 	largeTableRows  = 10_000_000
 )
 
+// Package-level compiled regexes to avoid recompilation in hot paths
+var (
+	reDropDatabase             = regexp.MustCompile(`^DROP\s+DATABASE\b`)
+	reDropSchema               = regexp.MustCompile(`^DROP\s+SCHEMA\b`)
+	reDropOwned                = regexp.MustCompile(`^DROP\s+OWNED\b`)
+	reAlterSystem              = regexp.MustCompile(`^ALTER\s+SYSTEM\b`)
+	reCopyProgram              = regexp.MustCompile(`^COPY\b.*\bPROGRAM\b`)
+	reReindexDatabase          = regexp.MustCompile(`^REINDEX\s+DATABASE\b`)
+	reVacuumFull               = regexp.MustCompile(`^VACUUM\s+FULL\b`)
+	reCreateTable              = regexp.MustCompile(`^CREATE\s+TABLE\b`)
+	reCreateOrReplaceView      = regexp.MustCompile(`^CREATE\s+(OR\s+REPLACE\s+)?VIEW\b`)
+	reAlterTableAddColumn      = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bADD\s+COLUMN\b`)
+	reAlterTableAlterType      = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bALTER\s+COLUMN\b.*\bTYPE\b`)
+	reAlterTableSetNotNull     = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bSET\s+NOT\s+NULL\b`)
+	reAlterTableAddCheck       = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bADD\s+CHECK\b`)
+	reCreateIndexConcurrently  = regexp.MustCompile(`^CREATE\s+INDEX\s+CONCURRENTLY\b`)
+	reCreateIndex              = regexp.MustCompile(`^CREATE\s+INDEX\b`)
+	reTruncate                 = regexp.MustCompile(`^TRUNCATE\b`)
+	reDropTable                = regexp.MustCompile(`^DROP\s+TABLE\b`)
+	reAlterColumnUsing         = regexp.MustCompile(`(?i)\bTYPE\b[^;]*\bUSING\b`)
+	reAlterColumnTargetType    = regexp.MustCompile(`(?is)\bTYPE\s+([a-zA-Z_][\w. ]*(?:\s*\([^)]*\))?)`)
+	reAlterColumnUsingInType   = regexp.MustCompile(`(?i)\bUSING\b`)
+	reWhereClause              = regexp.MustCompile(`(?is)\bWHERE\s+(.+)$`)
+	reReturningClause          = regexp.MustCompile(`(?is)\bRETURNING\b.*$`)
+	reWhitespace               = regexp.MustCompile(`\s+`)
+	reIsNotNull                = regexp.MustCompile(`(?i)\bis\s+not\s+null\b`)
+	reBooleanCondition         = regexp.MustCompile(`(?i)\b[a-zA-Z_][\w.]*\s*=\s*(true|false)\b`)
+	reLikePrefix               = regexp.MustCompile(`(?i)\b(?:like|ilike)\s+'%`)
+	reTimeCondition            = regexp.MustCompile(`(?i)(<|<=|>|>=)\s*(now\s*\(\s*\)|current_timestamp\b)`)
+	reSetExpression            = regexp.MustCompile(`(?is)\bSET\s+(.+?)(?:\bWHERE\b|\bRETURNING\b|$)`)
+	reNotValid                 = regexp.MustCompile(`(?i)\bNOT\s+VALID\b`)
+)
+
+type blockedRule struct {
+	re     *regexp.Regexp
+	typ    string
+	reason string
+}
+
 func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
 	tree, err := pg_query.Parse(sqlText)
 	if err != nil {
@@ -29,21 +68,17 @@ func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
 	normalized := normalizeSQL(sqlText)
 	upper := strings.ToUpper(normalized)
 
-	blocked := []struct {
-		pattern string
-		typ     string
-		reason  string
-	}{
-		{`^DROP\s+DATABASE\b`, "DROP_DATABASE", "禁止通过普通入口删除数据库"},
-		{`^DROP\s+SCHEMA\b`, "DROP_SCHEMA", "禁止通过普通入口删除 schema"},
-		{`^DROP\s+OWNED\b`, "DROP_OWNED", "禁止执行 DROP OWNED"},
-		{`^ALTER\s+SYSTEM\b`, "ALTER_SYSTEM", "禁止修改数据库系统级参数"},
-		{`^COPY\b.*\bPROGRAM\b`, "COPY_PROGRAM", "禁止执行 COPY PROGRAM"},
-		{`^REINDEX\s+DATABASE\b`, "REINDEX_DATABASE", "禁止执行 REINDEX DATABASE"},
-		{`^VACUUM\s+FULL\b`, "VACUUM_FULL", "禁止执行 VACUUM FULL"},
+	blocked := []blockedRule{
+		{reDropDatabase, "DROP_DATABASE", "禁止通过普通入口删除数据库"},
+		{reDropSchema, "DROP_SCHEMA", "禁止通过普通入口删除 schema"},
+		{reDropOwned, "DROP_OWNED", "禁止执行 DROP OWNED"},
+		{reAlterSystem, "ALTER_SYSTEM", "禁止修改数据库系统级参数"},
+		{reCopyProgram, "COPY_PROGRAM", "禁止执行 COPY PROGRAM"},
+		{reReindexDatabase, "REINDEX_DATABASE", "禁止执行 REINDEX DATABASE"},
+		{reVacuumFull, "VACUUM_FULL", "禁止执行 VACUUM FULL"},
 	}
 	for _, rule := range blocked {
-		if regexp.MustCompile(rule.pattern).MatchString(upper) {
+		if rule.re.MatchString(upper) {
 			return RiskAnalysis{SQLType: rule.typ, RiskLevel: "BLOCKED", RiskReason: rule.reason}
 		}
 	}
@@ -55,25 +90,25 @@ func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
 		return RiskAnalysis{SQLType: "UPDATE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}
 	case strings.HasPrefix(upper, "DELETE"):
 		return RiskAnalysis{SQLType: "DELETE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}
-	case regexp.MustCompile(`^CREATE\s+TABLE\b`).MatchString(upper):
+	case reCreateTable.MatchString(upper):
 		return RiskAnalysis{SQLType: "CREATE_TABLE", RiskLevel: "LOW"}
-	case regexp.MustCompile(`^CREATE\s+(OR\s+REPLACE\s+)?VIEW\b`).MatchString(upper):
+	case reCreateOrReplaceView.MatchString(upper):
 		return RiskAnalysis{SQLType: "CREATE_VIEW", RiskLevel: "LOW"}
-	case regexp.MustCompile(`^ALTER\s+TABLE\b.*\bADD\s+COLUMN\b`).MatchString(upper):
+	case reAlterTableAddColumn.MatchString(upper):
 		return RiskAnalysis{SQLType: "ADD_COLUMN", RiskLevel: "LOW"}
-	case regexp.MustCompile(`^ALTER\s+TABLE\b.*\bALTER\s+COLUMN\b.*\bTYPE\b`).MatchString(upper):
+	case reAlterTableAlterType.MatchString(upper):
 		return enrichStaticRisk(sqlText, RiskAnalysis{SQLType: "ALTER_COLUMN_TYPE", RiskLevel: "WARN", RiskReason: "字段类型变更可能触发表重写或被视图依赖阻塞"})
-	case regexp.MustCompile(`^ALTER\s+TABLE\b.*\bSET\s+NOT\s+NULL\b`).MatchString(upper):
+	case reAlterTableSetNotNull.MatchString(upper):
 		return RiskAnalysis{SQLType: "ALTER_SET_NOT_NULL", RiskLevel: "WARN", RiskReason: "设置 NOT NULL 可能扫描全表"}
-	case regexp.MustCompile(`^ALTER\s+TABLE\b.*\bADD\s+CHECK\b`).MatchString(upper):
+	case reAlterTableAddCheck.MatchString(upper):
 		return RiskAnalysis{SQLType: "ADD_CHECK", RiskLevel: "WARN", RiskReason: "新增 CHECK 默认校验已有数据，可能扫描全表"}
-	case regexp.MustCompile(`^CREATE\s+INDEX\s+CONCURRENTLY\b`).MatchString(upper):
+	case reCreateIndexConcurrently.MatchString(upper):
 		return RiskAnalysis{SQLType: "CREATE_INDEX_CONCURRENTLY", RiskLevel: "WARN", RiskReason: "并发索引耗时可能较长"}
-	case regexp.MustCompile(`^CREATE\s+INDEX\b`).MatchString(upper):
+	case reCreateIndex.MatchString(upper):
 		return RiskAnalysis{SQLType: "CREATE_INDEX", RiskLevel: "WARN", RiskReason: "非 CONCURRENTLY 创建索引可能阻塞写入"}
-	case regexp.MustCompile(`^TRUNCATE\b`).MatchString(upper):
+	case reTruncate.MatchString(upper):
 		return enrichStaticRisk(sqlText, RiskAnalysis{SQLType: "TRUNCATE", RiskLevel: "WARN", RiskReason: "TRUNCATE 会快速清空表数据，请确认对象范围"})
-	case regexp.MustCompile(`^DROP\s+TABLE\b`).MatchString(upper):
+	case reDropTable.MatchString(upper):
 		return enrichStaticRisk(sqlText, RiskAnalysis{SQLType: "DROP_TABLE", RiskLevel: "WARN", RiskReason: "DROP TABLE 会删除表结构和数据，请确认对象范围"})
 	default:
 		return RiskAnalysis{SQLType: firstKeyword(upper), RiskLevel: "LOW"}
@@ -140,7 +175,7 @@ func classifyStaticAddColumn(sqlText string, risk RiskAnalysis) RiskAnalysis {
 }
 
 func classifyStaticAddCheck(sqlText string, risk RiskAnalysis) RiskAnalysis {
-	if regexp.MustCompile(`(?i)\bNOT\s+VALID\b`).MatchString(sqlText) {
+	if reNotValid.MatchString(sqlText) {
 		return RiskAnalysis{SQLType: "ADD_CHECK_NOT_VALID", RiskLevel: "LOW", RiskReason: "CHECK 使用 NOT VALID，不立即校验已有数据"}
 	}
 	return risk
@@ -185,12 +220,12 @@ func classifyDMLExpressionRisk(sqlText string, risk RiskAnalysis) RiskAnalysis {
 
 func extractDMLWhereExpression(sqlText string) string {
 	normalized := strings.TrimSuffix(normalizeSQL(sqlText), ";")
-	matches := regexp.MustCompile(`(?is)\bWHERE\s+(.+)$`).FindStringSubmatch(normalized)
+	matches := reWhereClause.FindStringSubmatch(normalized)
 	if len(matches) < 2 {
 		return ""
 	}
 	whereExpr := matches[1]
-	whereExpr = regexp.MustCompile(`(?is)\bRETURNING\b.*$`).ReplaceAllString(whereExpr, "")
+	whereExpr = reReturningClause.ReplaceAllString(whereExpr, "")
 	return strings.TrimSpace(whereExpr)
 }
 
@@ -199,26 +234,34 @@ func isTrivialWhereExpression(whereExpr string) bool {
 	for strings.HasPrefix(normalized, "(") && strings.HasSuffix(normalized, ")") {
 		normalized = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(normalized, "("), ")"))
 	}
-	compact := regexp.MustCompile(`\s+`).ReplaceAllString(normalized, "")
+	compact := reWhitespace.ReplaceAllString(normalized, "")
 	return compact == "true" || compact == "1=1"
 }
 
 func weakDMLWhereReason(whereExpr string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(whereExpr))
-	if regexp.MustCompile(`(?i)\bis\s+not\s+null\b`).MatchString(normalized) {
+	if reIsNotNull.MatchString(normalized) {
 		return "IS NOT NULL 通常不能有效限制数据范围", true
 	}
-	if regexp.MustCompile(`(?i)\b[a-zA-Z_][\w.]*\s*=\s*(true|false)\b`).MatchString(normalized) {
+	if reBooleanCondition.MatchString(normalized) {
 		return "布尔条件可能命中大量数据，请结合 EXPLAIN 估算影响行数", false
 	}
-	if regexp.MustCompile(`(?i)\b(?:like|ilike)\s+'%`).MatchString(normalized) {
+	if reLikePrefix.MatchString(normalized) {
 		return "LIKE 前缀通配符可能导致全表扫描", false
 	}
-	if regexp.MustCompile(`(?i)(<|<=|>|>=)\s*(now\s*\(\s*\)|current_timestamp\b)`).MatchString(normalized) {
+	if reTimeCondition.MatchString(normalized) {
 		return "时间条件使用当前时间且缺少固定边界，请确认影响范围", false
 	}
 	return "", false
 }
+
+// Pre-compiled regexes for riskyUpdateSetReason
+var (
+	reSetNull       = regexp.MustCompile(`(?i)=\s*null\b`)
+	reSetArithmetic = regexp.MustCompile(`(?i)=\s*[a-zA-Z_][\w.]*\s*[-+*/]\s*`)
+	reSetEmptyJSON  = regexp.MustCompile(`(?i)=\s*'(\{\}|\[\])'\s*(::\s*jsonb?)?`)
+	reSetDeleted    = regexp.MustCompile(`(?i)\b(status|state)\b\s*=\s*'(deleted|delete|removed|invalid)'`)
+)
 
 func riskyUpdateSetReason(sqlText string) string {
 	setExpr := extractUpdateSetExpression(sqlText)
@@ -226,16 +269,16 @@ func riskyUpdateSetReason(sqlText string) string {
 		return ""
 	}
 	checks := []struct {
-		pattern string
-		reason  string
+		re     *regexp.Regexp
+		reason string
 	}{
-		{`(?i)=\s*null\b`, "UPDATE 将字段置空，请确认业务含义和影响范围"},
-		{`(?i)=\s*[a-zA-Z_][\w.]*\s*[-+*/]\s*`, "UPDATE 使用算术表达式批量改值，请确认计算逻辑"},
-		{`(?i)=\s*'(\{\}|\[\])'\s*(::\s*jsonb?)?`, "UPDATE 清空 JSON 字段，请确认是否会覆盖已有扩展数据"},
-		{`(?i)\b(status|state)\b\s*=\s*'(deleted|delete|removed|invalid)'`, "UPDATE 将状态设置为删除状态，请确认是否应使用软删除流程"},
+		{reSetNull, "UPDATE 将字段置空，请确认业务含义和影响范围"},
+		{reSetArithmetic, "UPDATE 使用算术表达式批量改值，请确认计算逻辑"},
+		{reSetEmptyJSON, "UPDATE 清空 JSON 字段，请确认是否会覆盖已有扩展数据"},
+		{reSetDeleted, "UPDATE 将状态设置为删除状态，请确认是否应使用软删除流程"},
 	}
 	for _, check := range checks {
-		if regexp.MustCompile(check.pattern).MatchString(setExpr) {
+		if check.re.MatchString(setExpr) {
 			return check.reason
 		}
 	}
@@ -244,7 +287,7 @@ func riskyUpdateSetReason(sqlText string) string {
 
 func extractUpdateSetExpression(sqlText string) string {
 	normalized := strings.TrimSuffix(normalizeSQL(sqlText), ";")
-	matches := regexp.MustCompile(`(?is)\bSET\s+(.+?)(?:\bWHERE\b|\bRETURNING\b|$)`).FindStringSubmatch(normalized)
+	matches := reSetExpression.FindStringSubmatch(normalized)
 	if len(matches) < 2 {
 		return ""
 	}
@@ -252,13 +295,12 @@ func extractUpdateSetExpression(sqlText string) string {
 }
 
 func extractAlterColumnTargetType(sqlText string) string {
-	re := regexp.MustCompile(`(?is)\bTYPE\s+([a-zA-Z_][\w. ]*(?:\s*\([^)]*\))?)`)
-	matches := re.FindStringSubmatch(sqlText)
+	matches := reAlterColumnTargetType.FindStringSubmatch(sqlText)
 	if len(matches) < 2 {
 		return ""
 	}
 	typeName := strings.TrimSpace(matches[1])
-	if idx := regexp.MustCompile(`(?i)\bUSING\b`).FindStringIndex(typeName); idx != nil {
+	if idx := reAlterColumnUsingInType.FindStringIndex(typeName); idx != nil {
 		typeName = strings.TrimSpace(typeName[:idx[0]])
 	}
 	return strings.TrimSpace(typeName)
@@ -418,7 +460,7 @@ func isVolatileFunctionName(name string) bool {
 }
 
 func hasAlterColumnUsing(sqlText string) bool {
-	return regexp.MustCompile(`(?i)\bUSING\b`).MatchString(sqlText)
+	return reAlterColumnUsing.MatchString(sqlText)
 }
 
 func classifyDestructiveTableOperation(sqlType string, stats TableStats) RiskAnalysis {

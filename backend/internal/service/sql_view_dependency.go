@@ -24,7 +24,7 @@ func BuildViewRebuildPlan(dep ViewDependency) ViewRebuildPlan {
 	dropObject := "VIEW"
 	if dep.Kind == "m" {
 		dropObject = "MATERIALIZED VIEW"
-		createSQL = fmt.Sprintf("CREATE MATERIALIZED VIEW %s AS\n%s;", qualifiedName, strings.TrimSuffix(definition, ";"))
+		createSQL = fmt.Sprintf("CREATE MATERIALIZED VIEW %s AS\n%s\nWITH NO DATA;", qualifiedName, strings.TrimSuffix(definition, ";"))
 	}
 	return ViewRebuildPlan{
 		DropSQL:   fmt.Sprintf("DROP %s IF EXISTS %s;", dropObject, qualifiedName),

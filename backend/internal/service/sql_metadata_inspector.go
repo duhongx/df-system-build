@@ -169,7 +169,17 @@ func (i *SQLMetadataInspector) ProbeSelectColumns(ctx context.Context, selectSQL
 	if i == nil || i.db == nil {
 		return nil, fmt.Errorf("PostgreSQL 连接未初始化")
 	}
-	rows, err := i.db.QueryContext(ctx, fmt.Sprintf("SELECT * FROM (%s) AS __df_sql_view_probe LIMIT 0", selectSQL))
+	tx, err := i.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "SET LOCAL statement_timeout = '5s'"); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT * FROM (%s) AS __df_sql_view_probe LIMIT 0", selectSQL))
 	if err != nil {
 		return nil, err
 	}
@@ -180,11 +190,11 @@ func (i *SQLMetadataInspector) ProbeSelectColumns(ctx context.Context, selectSQL
 		return nil, err
 	}
 	columns := make([]ViewColumn, 0, len(columnTypes))
-	for i, columnType := range columnTypes {
+	for idx, columnType := range columnTypes {
 		columns = append(columns, ViewColumn{
 			Name:     columnType.Name(),
 			DataType: columnType.DatabaseTypeName(),
-			Ordinal:  i + 1,
+			Ordinal:  idx + 1,
 		})
 	}
 	return columns, nil

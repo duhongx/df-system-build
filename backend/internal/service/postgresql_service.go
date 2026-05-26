@@ -28,6 +28,9 @@ type PostgreSQLService struct {
 	settingsRepo   *repository.SettingsRepo
 	cancelReg      *sqlExecutionCancelRegistry
 	batchCancelReg *sqlExecutionCancelRegistry
+	dbPool         *sql.DB
+	dbPoolMu       sync.Mutex
+	dbPoolCfgHash  string
 }
 
 func NewPostgreSQLService() *PostgreSQLService {
@@ -36,6 +39,47 @@ func NewPostgreSQLService() *PostgreSQLService {
 		cancelReg:      globalSQLExecutionCancelRegistry,
 		batchCancelReg: globalSQLBatchCancelRegistry,
 	}
+}
+
+var validSchemaNameRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+func validateSchemaName(name string) error {
+	if name == "" {
+		return nil
+	}
+	if !validSchemaNameRegex.MatchString(name) {
+		return fmt.Errorf("schema 名称包含非法字符: %s", name)
+	}
+	return nil
+}
+
+func (s *PostgreSQLService) getDB() (*sql.DB, error) {
+	s.dbPoolMu.Lock()
+	defer s.dbPoolMu.Unlock()
+
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	cfgHash := cfg.Host + ":" + cfg.Port + ":" + cfg.Database + ":" + cfg.User
+
+	if s.dbPool != nil && s.dbPoolCfgHash == cfgHash {
+		if err := s.dbPool.Ping(); err == nil {
+			return s.dbPool, nil
+		}
+		s.dbPool.Close()
+	}
+
+	db, err := openPostgreSQL(cfg)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(10 * time.Minute)
+	s.dbPool = db
+	s.dbPoolCfgHash = cfgHash
+	return db, nil
 }
 
 type PostgreSQLConfig struct {
@@ -231,6 +275,9 @@ func (s *PostgreSQLService) ParseSQL(req ParseSQLRequest) (*model.SQLChangeFile,
 	if schemaName == "" {
 		schemaName = inferSQLSchema(statements)
 	}
+	if err := validateSchemaName(schemaName); err != nil {
+		return nil, nil, err
+	}
 
 	var exists model.SQLChangeFile
 	if fileName != "" {
@@ -361,15 +408,10 @@ func (s *PostgreSQLService) enrichColumnTypeRiskWithMetadata(defaultSchema, sqlT
 	if strings.TrimSpace(targetType) == "" {
 		return analysis
 	}
-	cfg, err := s.loadConfig()
+	db, err := s.getDB()
 	if err != nil {
 		return analysis
 	}
-	db, err := openPostgreSQL(cfg)
-	if err != nil {
-		return analysis
-	}
-	defer db.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -389,15 +431,10 @@ func (s *PostgreSQLService) enrichDestructiveTableRiskWithMetadata(defaultSchema
 	if ref.schema == "" || ref.table == "" {
 		return analysis
 	}
-	cfg, err := s.loadConfig()
+	db, err := s.getDB()
 	if err != nil {
 		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
 	}
-	db, err := openPostgreSQL(cfg)
-	if err != nil {
-		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
-	}
-	defer db.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -413,15 +450,10 @@ func (s *PostgreSQLService) enrichLargeTableSensitiveRiskWithMetadata(defaultSch
 	if ref.schema == "" || ref.table == "" {
 		return analysis
 	}
-	cfg, err := s.loadConfig()
+	db, err := s.getDB()
 	if err != nil {
 		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
 	}
-	db, err := openPostgreSQL(cfg)
-	if err != nil {
-		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
-	}
-	defer db.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -433,25 +465,22 @@ func (s *PostgreSQLService) enrichLargeTableSensitiveRiskWithMetadata(defaultSch
 }
 
 func (s *PostgreSQLService) enrichDMLRiskWithExplainEstimate(defaultSchema, sqlText string, analysis RiskAnalysis) RiskAnalysis {
-	cfg, err := s.loadConfig()
+	db, err := s.getDB()
 	if err != nil {
 		return analysis
 	}
-	db, err := openPostgreSQL(cfg)
-	if err != nil {
-		return analysis
-	}
-	defer db.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := db.Conn(ctx)
+
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return analysis
 	}
-	defer conn.Close()
+	defer tx.Rollback()
+
 	if strings.TrimSpace(defaultSchema) != "" {
-		if _, err := conn.ExecContext(ctx, "SELECT set_config('search_path', $1, false)", searchPathValue(defaultSchema)); err != nil {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('search_path', $1, true)", searchPathValue(defaultSchema)); err != nil {
 			return analysis
 		}
 	}
@@ -460,9 +489,11 @@ func (s *PostgreSQLService) enrichDMLRiskWithExplainEstimate(defaultSchema, sqlT
 		return analysis
 	}
 	var explainJSON string
-	if err := conn.QueryRowContext(ctx, explainSQL).Scan(&explainJSON); err != nil {
+	if err := tx.QueryRowContext(ctx, explainSQL).Scan(&explainJSON); err != nil {
 		return analysis
 	}
+	tx.Rollback() // explicit rollback before processing result
+
 	estimatedRows, ok := extractPlanRowsFromExplainJSON(explainJSON)
 	if !ok {
 		return analysis
@@ -479,15 +510,10 @@ func (s *PostgreSQLService) enrichReplaceViewRiskWithMetadata(defaultSchema, sql
 	if !ok {
 		return appendRiskReason(analysis, "无法解析新视图 SELECT，重建视图可能受列名/顺序/类型兼容性限制")
 	}
-	cfg, err := s.loadConfig()
+	db, err := s.getDB()
 	if err != nil {
 		return analysis
 	}
-	db, err := openPostgreSQL(cfg)
-	if err != nil {
-		return analysis
-	}
-	defer db.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -524,15 +550,10 @@ func (s *PostgreSQLService) findViewDependenciesWithDefinitions(ctx context.Cont
 	if ref.schema == "" || ref.table == "" || ref.column == "" {
 		return nil, nil
 	}
-	cfg, err := s.loadConfig()
+	db, err := s.getDB()
 	if err != nil {
 		return nil, err
 	}
-	db, err := openPostgreSQL(cfg)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -1302,26 +1323,47 @@ func (s *PostgreSQLService) ImportServerSQL(req ImportServerSQLRequest) (int, er
 	if path == "" {
 		return 0, fmt.Errorf("文件路径不能为空")
 	}
-	info, err := os.Stat(path)
+
+	// Security: validate path is under allowed directories
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return 0, fmt.Errorf("路径无效")
+	}
+	allowedPrefixes := []string{"/opt/df-build-server", "/root/", "/tmp/"}
+	allowed := false
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(absPath, prefix) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return 0, fmt.Errorf("不允许访问该路径，仅支持 /opt/df-build-server、/root/、/tmp/ 下的文件")
+	}
+	if strings.Contains(absPath, "..") {
+		return 0, fmt.Errorf("路径不能包含 ..")
+	}
+
+	info, err := os.Stat(absPath)
 	if err != nil {
 		return 0, fmt.Errorf("文件不存在")
 	}
 	if info.IsDir() {
 		return 0, fmt.Errorf("不支持导入目录")
 	}
-	switch strings.ToLower(filepath.Ext(path)) {
+	switch strings.ToLower(filepath.Ext(absPath)) {
 	case ".sql":
-		content, err := os.ReadFile(path)
+		content, err := os.ReadFile(absPath)
 		if err != nil {
 			return 0, err
 		}
-		_, _, err = s.ParseSQL(ParseSQLRequest{FileName: filepath.Base(path), Content: string(content), Overwrite: req.Overwrite})
+		_, _, err = s.ParseSQL(ParseSQLRequest{FileName: filepath.Base(absPath), Content: string(content), Overwrite: req.Overwrite})
 		if err != nil {
 			return 0, err
 		}
 		return 1, nil
 	case ".zip":
-		return s.importSQLZip(path, req.Overwrite)
+		return s.importSQLZip(absPath, req.Overwrite)
 	default:
 		return 0, fmt.Errorf("仅支持 .sql 或 .zip 文件")
 	}
@@ -1333,16 +1375,26 @@ func (s *PostgreSQLService) importSQLZip(path string, overwrite bool) (int, erro
 		return 0, fmt.Errorf("解压提取 SQL 错误: %w", err)
 	}
 	defer reader.Close()
+
+	const maxFileSize = 50 * 1024 * 1024 // 50MB per file
+	const maxFiles = 500
+
 	count := 0
 	for _, f := range reader.File {
 		if f.FileInfo().IsDir() || !strings.EqualFold(filepath.Ext(f.Name), ".sql") {
 			continue
 		}
+		if f.UncompressedSize64 > maxFileSize {
+			return count, fmt.Errorf("文件 %s 超过大小限制 (50MB)", f.Name)
+		}
+		if count >= maxFiles {
+			return count, fmt.Errorf("超过最大文件数量限制 (%d)", maxFiles)
+		}
 		rc, err := f.Open()
 		if err != nil {
 			return count, err
 		}
-		content, readErr := io.ReadAll(rc)
+		content, readErr := io.ReadAll(io.LimitReader(rc, maxFileSize))
 		_ = rc.Close()
 		if readErr != nil {
 			return count, readErr
@@ -1454,6 +1506,9 @@ func openPostgreSQL(cfg PostgreSQLConfig) (*sql.DB, error) {
 }
 
 func executeOneSQL(ctx context.Context, db *sql.DB, schemaName, sqlText, sqlType string) (int64, string, error) {
+	if err := validateSchemaName(schemaName); err != nil {
+		return 0, "", err
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return 0, "", err
@@ -1825,13 +1880,8 @@ ORDER BY client_addr::text`)
 }
 
 func maskPassword(password string) string {
-	password = strings.TrimSpace(password)
-	if password == "" {
+	if strings.TrimSpace(password) == "" {
 		return ""
 	}
-	if len([]rune(password)) <= 2 {
-		return "**"
-	}
-	runes := []rune(password)
-	return string(runes[:1]) + strings.Repeat("*", len(runes)-2) + string(runes[len(runes)-1:])
+	return "********"
 }
