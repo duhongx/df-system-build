@@ -469,6 +469,10 @@ func (s *PostgreSQLService) enrichReplaceViewRiskWithMetadata(defaultSchema, sql
 	if ref.schema == "" || ref.table == "" {
 		return analysis
 	}
+	selectSQL, ok := extractCreateOrReplaceViewSelectSQL(sqlText)
+	if !ok {
+		return appendRiskReason(analysis, "无法解析新视图 SELECT，重建视图可能受列名/顺序/类型兼容性限制")
+	}
 	cfg, err := s.loadConfig()
 	if err != nil {
 		return analysis
@@ -485,11 +489,16 @@ func (s *PostgreSQLService) enrichReplaceViewRiskWithMetadata(defaultSchema, sql
 	if err != nil || len(columns) == 0 {
 		return analysis
 	}
-	result := compareViewColumns(columns, nil)
+	newColumns, err := NewSQLMetadataInspector(db).ProbeSelectColumns(ctx, selectSQL)
+	if err != nil {
+		return appendRiskReason(analysis, "无法探测新视图输出列，重建视图可能受列名/顺序/类型兼容性限制")
+	}
+	result := compareViewColumns(columns, newColumns)
 	if result.Exists && !result.Compatible {
+		analysis.RiskLevel = "BLOCKED"
 		return appendRiskReason(analysis, result.Reason)
 	}
-	return appendRiskReason(analysis, "重建视图可能受列名/顺序/类型兼容性限制")
+	return appendRiskReason(analysis, "CREATE OR REPLACE VIEW 输出列与已有视图兼容")
 }
 
 func (s *PostgreSQLService) findViewDependencies(defaultSchema, sqlText string) []string {
@@ -621,6 +630,24 @@ func parseCreateOrReplaceViewRef(sqlText, defaultSchema string) tableRef {
 		schema = "public"
 	}
 	return tableRef{schema: schema, table: m[2]}
+}
+
+func extractCreateOrReplaceViewSelectSQL(sqlText string) (string, bool) {
+	tree, err := pg_query.Parse(sqlText)
+	if err != nil || tree == nil || len(tree.GetStmts()) != 1 {
+		return "", false
+	}
+	viewStmt := tree.GetStmts()[0].GetStmt().GetViewStmt()
+	if viewStmt == nil || !viewStmt.GetReplace() || viewStmt.GetQuery() == nil {
+		return "", false
+	}
+	selectSQL, err := pg_query.Deparse(&pg_query.ParseResult{
+		Stmts: []*pg_query.RawStmt{{Stmt: viewStmt.GetQuery()}},
+	})
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimSpace(selectSQL), ";"), true
 }
 
 func parseTableRefForRiskOperation(sqlText, defaultSchema string) tableRef {

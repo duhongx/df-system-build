@@ -165,6 +165,31 @@ ORDER BY ordinal_position`, schemaName, viewName)
 	return columns, rows.Err()
 }
 
+func (i *SQLMetadataInspector) ProbeSelectColumns(ctx context.Context, selectSQL string) ([]ViewColumn, error) {
+	if i == nil || i.db == nil {
+		return nil, fmt.Errorf("PostgreSQL 连接未初始化")
+	}
+	rows, err := i.db.QueryContext(ctx, fmt.Sprintf("SELECT * FROM (%s) AS __df_sql_view_probe LIMIT 0", selectSQL))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, err
+	}
+	columns := make([]ViewColumn, 0, len(columnTypes))
+	for i, columnType := range columnTypes {
+		columns = append(columns, ViewColumn{
+			Name:     columnType.Name(),
+			DataType: columnType.DatabaseTypeName(),
+			Ordinal:  i + 1,
+		})
+	}
+	return columns, nil
+}
+
 func (i *SQLMetadataInspector) EstimateDMLAffectedRows(ctx context.Context, sqlText string) (int64, error) {
 	if i == nil || i.db == nil {
 		return 0, fmt.Errorf("PostgreSQL 连接未初始化")
@@ -275,11 +300,39 @@ func compareViewColumns(oldCols, newCols []ViewColumn) ViewCompatibilityResult {
 		if !strings.EqualFold(oldCols[i].Name, newCols[i].Name) {
 			return ViewCompatibilityResult{Exists: true, Compatible: false, Reason: "视图输出列顺序或列名变化，CREATE OR REPLACE VIEW 可能不兼容"}
 		}
-		if !strings.EqualFold(oldCols[i].DataType, newCols[i].DataType) {
+		if normalizeViewDataType(oldCols[i].DataType) != normalizeViewDataType(newCols[i].DataType) {
 			return ViewCompatibilityResult{Exists: true, Compatible: false, Reason: "视图输出列类型变化，CREATE OR REPLACE VIEW 可能不兼容"}
 		}
 	}
 	return ViewCompatibilityResult{Exists: true, Compatible: true}
+}
+
+func normalizeViewDataType(dataType string) string {
+	normalized := strings.ToLower(strings.TrimSpace(dataType))
+	switch normalized {
+	case "int2":
+		return "smallint"
+	case "int4":
+		return "integer"
+	case "int8":
+		return "bigint"
+	case "float4":
+		return "real"
+	case "float8":
+		return "double precision"
+	case "bool":
+		return "boolean"
+	case "varchar":
+		return "character varying"
+	case "bpchar":
+		return "character"
+	case "timestamptz":
+		return "timestamp with time zone"
+	case "timestamp":
+		return "timestamp without time zone"
+	default:
+		return normalized
+	}
 }
 
 func classifyColumnTypeChangeWithMetadata(column ColumnInfo, targetType string, hasUsing bool) RiskAnalysis {

@@ -134,6 +134,17 @@ func TestCompareViewColumnsDetectsIncompatibleColumnType(t *testing.T) {
 	}
 }
 
+func TestCompareViewColumnsTreatsPostgresTypeAliasesAsCompatible(t *testing.T) {
+	oldCols := []ViewColumn{{Name: "id", DataType: "integer", Ordinal: 1}}
+	newCols := []ViewColumn{{Name: "id", DataType: "INT4", Ordinal: 1}}
+
+	got := compareViewColumns(oldCols, newCols)
+
+	if !got.Compatible {
+		t.Fatalf("expected postgres integer aliases to be compatible, got %+v", got)
+	}
+}
+
 func TestBuildDMLExplainSQL(t *testing.T) {
 	tests := []struct {
 		name string

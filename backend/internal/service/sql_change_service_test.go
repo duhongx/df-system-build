@@ -176,6 +176,20 @@ func TestParseCreateOrReplaceViewRef(t *testing.T) {
 	}
 }
 
+func TestExtractCreateOrReplaceViewSelectSQL(t *testing.T) {
+	got, ok := extractCreateOrReplaceViewSelectSQL(`CREATE OR REPLACE VIEW "his"."v_patient" AS SELECT id, name FROM his.patient WHERE deleted = false`)
+
+	if !ok {
+		t.Fatalf("expected view select SQL to be extracted")
+	}
+	if !strings.HasPrefix(strings.ToUpper(got), "SELECT") {
+		t.Fatalf("expected SELECT SQL, got %q", got)
+	}
+	if !strings.Contains(got, "his.patient") {
+		t.Fatalf("expected source table in SELECT SQL, got %q", got)
+	}
+}
+
 func TestParseTableRefForRiskOperations(t *testing.T) {
 	tests := []struct {
 		name string
