@@ -329,6 +329,13 @@ function strategyTag(row: SQLChangeStatement) {
   if (strategy === 'DIRECT_NO_TRANSACTION') return 'warning'
   return 'info'
 }
+
+function reasonText(row: SQLChangeStatement) {
+  if (row.sqlType === 'MISSING_SCHEMA') {
+    return row.executeMessage || `业务对象必须显式指定 schema，例如 his.patient。${row.riskReason || '当前 SQL 禁止执行。'}`
+  }
+  return row.executeMessage || row.riskReason
+}
 </script>
 
 <template>
@@ -401,8 +408,11 @@ function strategyTag(row: SQLChangeStatement) {
         <el-table-column prop="durationMs" label="耗时(ms)" width="100" />
         <el-table-column prop="sqlState" label="SQLState" width="100" />
         <el-table-column prop="sqlContent" label="SQL" min-width="320" show-overflow-tooltip />
-        <el-table-column label="原因" min-width="260" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.executeMessage || row.riskReason }}</template>
+        <el-table-column label="原因" min-width="300" show-overflow-tooltip>
+          <template #default="{ row }">
+            <el-tag v-if="row.sqlType === 'MISSING_SCHEMA'" type="danger" size="small" class="risk-tag">缺少 schema</el-tag>
+            <span>{{ reasonText(row) }}</span>
+          </template>
         </el-table-column>
         <el-table-column label="操作" width="90" fixed="right">
           <template #default="{ row }">
@@ -516,6 +526,7 @@ function strategyTag(row: SQLChangeStatement) {
 .summary-item.danger strong { color: #f56c6c; }
 .summary-item.warning strong { color: #e6a23c; }
 .section-title { font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 12px; }
+.risk-tag { margin-right: 6px; }
 .file-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .pager-row { display: flex; justify-content: flex-end; margin-top: 10px; }
 @media (max-width: 1200px) {

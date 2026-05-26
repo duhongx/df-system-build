@@ -66,6 +66,7 @@ func TestAnalyzeSQLRiskAllowsExplicitSchemaBusinessSQL(t *testing.T) {
 		"DELETE FROM his.patient WHERE id = 1",
 		"CREATE INDEX idx_patient_id ON his.patient(id)",
 		"CREATE VIEW his.v_patient AS SELECT id FROM his.patient",
+		"CREATE VIEW his.v_patient AS WITH recent_patient AS (SELECT id FROM his.patient) SELECT id FROM recent_patient",
 		"TRUNCATE TABLE his.patient",
 	}
 
@@ -76,6 +77,16 @@ func TestAnalyzeSQLRiskAllowsExplicitSchemaBusinessSQL(t *testing.T) {
 				t.Fatalf("expected explicit schema SQL to pass schema guard, got %+v", got)
 			}
 		})
+	}
+}
+
+func TestAnalyzeSQLRiskStillBlocksMissingSchemaInsideCTE(t *testing.T) {
+	got := AnalyzeSQLRisk("CREATE VIEW his.v_patient AS WITH recent_patient AS (SELECT id FROM patient) SELECT id FROM recent_patient")
+	if got.SQLType != "MISSING_SCHEMA" {
+		t.Fatalf("expected MISSING_SCHEMA for unqualified table inside CTE, got %+v", got)
+	}
+	if !strings.Contains(got.RiskReason, "patient") {
+		t.Fatalf("expected reason to mention unqualified table, got %q", got.RiskReason)
 	}
 }
 

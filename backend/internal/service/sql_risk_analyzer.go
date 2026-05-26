@@ -511,19 +511,57 @@ func missingExplicitSchemaReason(tree *pg_query.ParseResult) (string, bool) {
 				return fmt.Sprintf("%s 未显式指定 schema，请使用 schema.object 形式", target.name), true
 			}
 		}
-		if relName, ok := findMissingSchemaRangeVar(rawStmt.GetStmt().ProtoReflect()); ok {
+		cteNames := collectCTENames(rawStmt.GetStmt().ProtoReflect(), nil)
+		if relName, ok := findMissingSchemaRangeVar(rawStmt.GetStmt().ProtoReflect(), cteNames); ok {
 			return fmt.Sprintf("SQL 引用对象 %s 未显式指定 schema，请使用 schema.object 形式", relName), true
 		}
 	}
 	return "", false
 }
 
-func findMissingSchemaRangeVar(message protoreflect.Message) (string, bool) {
+func collectCTENames(message protoreflect.Message, names map[string]struct{}) map[string]struct{} {
+	if !message.IsValid() {
+		return names
+	}
+	if cte, ok := message.Interface().(*pg_query.CommonTableExpr); ok {
+		name := strings.ToLower(strings.TrimSpace(cte.GetCtename()))
+		if name != "" {
+			if names == nil {
+				names = make(map[string]struct{})
+			}
+			names[name] = struct{}{}
+		}
+	}
+	fields := message.Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
+			continue
+		}
+		value := message.Get(field)
+		if field.IsList() {
+			list := value.List()
+			for j := 0; j < list.Len(); j++ {
+				names = collectCTENames(list.Get(j).Message(), names)
+			}
+			continue
+		}
+		if value.Message().IsValid() {
+			names = collectCTENames(value.Message(), names)
+		}
+	}
+	return names
+}
+
+func findMissingSchemaRangeVar(message protoreflect.Message, cteNames map[string]struct{}) (string, bool) {
 	if !message.IsValid() {
 		return "", false
 	}
 	if rel, ok := message.Interface().(*pg_query.RangeVar); ok {
 		if strings.TrimSpace(rel.GetRelname()) != "" && strings.TrimSpace(rel.GetSchemaname()) == "" {
+			if _, isCTE := cteNames[strings.ToLower(strings.TrimSpace(rel.GetRelname()))]; isCTE {
+				return "", false
+			}
 			return rel.GetRelname(), true
 		}
 	}
@@ -537,14 +575,14 @@ func findMissingSchemaRangeVar(message protoreflect.Message) (string, bool) {
 		if field.IsList() {
 			list := value.List()
 			for j := 0; j < list.Len(); j++ {
-				if name, ok := findMissingSchemaRangeVar(list.Get(j).Message()); ok {
+				if name, ok := findMissingSchemaRangeVar(list.Get(j).Message(), cteNames); ok {
 					return name, true
 				}
 			}
 			continue
 		}
 		if value.Message().IsValid() {
-			if name, ok := findMissingSchemaRangeVar(value.Message()); ok {
+			if name, ok := findMissingSchemaRangeVar(value.Message(), cteNames); ok {
 				return name, true
 			}
 		}
