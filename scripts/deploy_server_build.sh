@@ -71,7 +71,10 @@ if [ -f "${BINARY_NAME}" ]; then
 fi
 cp ${WORK_DIR}/backend/${BINARY_NAME} ${REMOTE_DIR}/${BINARY_NAME}
 chmod +x ${REMOTE_DIR}/${BINARY_NAME}
-cp ${WORK_DIR}/backend/config/config.yaml ${REMOTE_DIR}/config.yaml
+# Only copy config if it doesn't exist on server
+if [ ! -f "${REMOTE_DIR}/config.yaml" ]; then
+    cp ${WORK_DIR}/backend/config/config.yaml ${REMOTE_DIR}/config.yaml 2>/dev/null || true
+fi
 
 echo "[$(date '+%H:%M:%S')] === Step 8: 启动服务 ==="
 mkdir -p data workspaces logs
