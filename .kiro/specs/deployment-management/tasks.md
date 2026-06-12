@@ -252,7 +252,7 @@ graph TD
 - [ ] 22. Property Tests (Phase 6)
   - [ ] 22.1 `render/merge_property_test.go` — CP-2 parameter merge precedence (rapid).
   - [x] 22.2 `conflict/matrix_property_test.go` — CP-3 conflict matrix invariant.
-  - [ ] 22.3 `offline/atomic_property_test.go` — CP-4 install atomicity under fault injection.
+  - [x] 22.3 `offline/atomic_property_test.go` — CP-4 install atomicity under fault injection.
   - [ ] 22.4 `repository/state_property_test.go` — CP-1 state machine atomicity.
   - [ ] 22.5 `handler/sse_property_test.go` — CP-6 no-loss SSE replay.
   - [ ] 22.6 Run `go test -count=10 -timeout=10m ./internal/deploy/...` to shake out flakiness.
