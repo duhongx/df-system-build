@@ -46,7 +46,7 @@ onMounted(load)
     <h4 class="page-title">部署运行</h4>
     <div class="content-card">
       <el-table :data="runs" v-loading="loading" size="small" border stripe
-        @row-click="(row) => router.push(`/deployment/runs/${row.id}`)" style="cursor: pointer;">
+        @row-click="(row: DeploymentRun) => router.push(`/deployment/runs/${row.id}`)" style="cursor: pointer;">
         <el-table-column prop="id" label="#" width="70" />
         <el-table-column prop="targetComponent" label="组件/范围" min-width="160" />
         <el-table-column prop="taskType" label="类型" width="100" />
