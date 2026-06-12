@@ -1,0 +1,2 @@
+nfs:
+  share_dir: /data/nfs

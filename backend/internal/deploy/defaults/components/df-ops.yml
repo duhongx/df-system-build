@@ -1,0 +1,8 @@
+df-ops:
+  install_dir: /opt/df-ops
+  server_port: "8800"
+  java_home: /usr/local/src/jdk-21.0.5
+  redis_password: devops@2024
+  db_password: devops@2024
+  db_user: df_devops
+  db_name: df_his

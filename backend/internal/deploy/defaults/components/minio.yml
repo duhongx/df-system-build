@@ -1,0 +1,7 @@
+minio:
+  install_dir: /opt/minio
+  data_dir: /opt/minio/data
+  access_key: admin
+  secret_key: cloudhis@2123
+  console_port: "8000"
+  api_port: "9000"

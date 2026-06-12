@@ -1,0 +1,2 @@
+containerd:
+  root_dir: /var/lib/containerd

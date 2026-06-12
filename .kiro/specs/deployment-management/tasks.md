@@ -132,13 +132,13 @@ graph TD
 
 - [ ] 8. Resource Embed + StateDir (Phase 5)
   - [ ] 8.1 Copy `his-deploy/resources/` into `backend/internal/deploy/resources/` (offline tree + manifest.yml).
-  - [ ] 8.2 Copy `his-deploy/config/components/*.yml` into `defaults/components/`.
-  - [ ] 8.3 Copy each component's pipeline YAML into `defaults/pipelines/`.
-  - [ ] 8.4 Add `//go:embed` in `defaults/defaults.go` and `defaults/pipelines.go`.
+  - [x] 8.2 Copy `his-deploy/config/components/*.yml` into `defaults/components/`.
+  - [x] 8.3 Copy each component's pipeline YAML into `defaults/pipelines/`.
+  - [x] 8.4 Add `//go:embed` in `defaults/defaults.go` and `defaults/pipelines.go`.
   - [ ] 8.5 Add `//go:embed all:resources` in `resources/resources.go` exposing an `fs.FS`.
   - [ ] 8.6 Update `actions/file.go` copy_file/extract_archive to read embedded FS unless an installed bundle overrides Resource_Dir.
-  - [ ] 8.7 Implement `statedir` package with marker conventions (created/backups/sysctl/meta.json) per design.
-  - [ ] 8.8 Replace Task 5.4 stubs with real statedir helpers.
+  - [x] 8.7 Implement `statedir` package with marker conventions (created/backups/sysctl/meta.json) per design.
+  - [x] 8.8 Replace Task 5.4 stubs with real statedir helpers.
   - _Requirements: 7.5, 11.1, 11.2, 11.3, 11.4, 11.5_
 
 - [ ] 9. SSH Backend via Server (Phase 2)

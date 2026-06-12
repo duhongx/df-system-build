@@ -1,0 +1,2 @@
+docker:
+  data_root: /var/lib/docker

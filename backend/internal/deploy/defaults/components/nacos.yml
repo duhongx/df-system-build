@@ -1,0 +1,3 @@
+nacos:
+  db_user: nacos
+  db_password: cloudhis@2123

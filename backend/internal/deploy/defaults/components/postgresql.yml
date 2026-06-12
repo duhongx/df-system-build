@@ -1,0 +1,11 @@
+postgresql:
+  install_dir: /opt/PostgreSQL
+  data_dir: /opt/PostgreSQL/14/data
+  shared_buffers: 3GB
+  effective_cache_size: 11GB
+  superuser_password: cloudhis@2123
+  repl_password: repl@his2022
+  # postgres OS 系统用户的登录密码 (chpasswd 写入)。运维需要
+  # ssh postgres@host 时使用;跟 PostgreSQL 内部的 superuser_password
+  # (角色密码) 是不同概念,改 superuser_password 不会影响这个。
+  os_user_password: dFhIs@2119

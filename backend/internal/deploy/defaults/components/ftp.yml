@@ -1,0 +1,4 @@
+ftp:
+  data_dir: /data/ftp
+  user: csharp
+  password: csharp@123

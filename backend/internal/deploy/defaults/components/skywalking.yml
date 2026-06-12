@@ -1,0 +1,3 @@
+skywalking:
+  install_dir: /opt/skywalking
+  web_port: "8080"

@@ -1,0 +1,5 @@
+nexus:
+  install_dir: /opt/nexus
+  data_dir: /opt/sonatype-work
+  http_port: "8081"
+  admin_password: cloudhis@2123

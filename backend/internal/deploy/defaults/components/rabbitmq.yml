@@ -1,0 +1,6 @@
+rabbitmq:
+  admin_user: admin
+  admin_password: cloudhis@2123
+  data_dir: /var/lib/rabbitmq
+  log_dir: /var/log/rabbitmq
+  config_dir: /etc/rabbitmq
