@@ -86,6 +86,17 @@ export const getEnabled = () =>
   request.get<any, string[]>('/deployment/components/enabled')
 export const putEnabled = (components: string[]) =>
   request.put<any, any>('/deployment/components/enabled', { components })
+export const getComponentDefaults = () =>
+  request.get<any, Record<string, Record<string, any>>>('/deployment/components/defaults')
+export interface ComponentTask {
+  component: string
+  phase: string
+  id: string
+  name: string
+  actions: { type: string; name: string }[]
+}
+export const getComponentTasks = (name: string) =>
+  request.get<any, { name: string; pipelineComponents: string[]; items: ComponentTask[] }>(`/deployment/components/${name}/tasks`)
 
 // ---- global config ----
 export const getGlobalConfig = () =>

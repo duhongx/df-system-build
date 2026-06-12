@@ -60,6 +60,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		g.POST("/runs/:id/cancel", h.CancelRun)
 
 		h.registerOffline(g)
+		h.registerComponentExtras(g)
 	}
 	// SSE endpoint is registered outside the header-JWT group because the
 	// browser EventSource API cannot set an Authorization header; it
@@ -396,10 +397,27 @@ func (h *Handler) submit(c *gin.Context, mode runtime.Mode) {
 		response.Fail(c, 4001, "请求体格式错误")
 		return
 	}
+	// Mirror his-deploy: all-scope deploy is intentionally disabled (its success
+	// state isn't recorded per-component, defeating the clean-before-redeploy
+	// guard). All-scope rollback remains allowed.
+	if body.All && mode == runtime.ModeDeploy {
+		response.Fail(c, 4001, "全量部署已关闭，请按组件依次部署；全量清理（回滚）仍可使用")
+		return
+	}
 	if !body.All {
 		if msg, ok := h.checkHasTargets(c, body.Component); !ok {
 			response.Fail(c, 4001, msg)
 			return
+		}
+		// Clean-before-redeploy hard constraint (mirrors his-deploy
+		// deployStateBlocks): a component-scope deploy is only allowed when the
+		// component is not_deployed. A deployed/failed component must be rolled
+		// back first — re-deploying on residue is a whole class of bugs.
+		if mode == runtime.ModeDeploy {
+			if msg, blocked := h.deployStateBlocks(c, body.Component); blocked {
+				response.FailWithStatus(c, 409, 4090, msg)
+				return
+			}
 		}
 	}
 	// Conflict pre-check before any deploy run.
@@ -449,6 +467,24 @@ func (h *Handler) checkHasTargets(c *gin.Context, component string) (string, boo
 		return fmt.Sprintf("组件 %s 未绑定目标主机，请先在「主机绑定」页面选择主机", component), false
 	}
 	return "", true
+}
+
+// deployStateBlocks enforces the clean-before-redeploy hard constraint: a
+// deployed or failed component must be rolled back before it can be deployed
+// again. Returns (message, true) when the deploy should be blocked.
+func (h *Handler) deployStateBlocks(c *gin.Context, component string) (string, bool) {
+	st, err := h.svc.Store().GetComponentDeployState(c.Request.Context(), component)
+	if err != nil || st == nil {
+		return "", false // transient lookup error: don't wedge the operator
+	}
+	switch st.Status {
+	case store.DeployStateDeployed:
+		return fmt.Sprintf("组件「%s」已部署，重复部署可能因残留文件互相干扰。请先清理（回滚）后再部署。", component), true
+	case store.DeployStateFailed:
+		return fmt.Sprintf("组件「%s」上次部署失败，可能残留中间文件。请先分析问题并清理（回滚）后再部署。", component), true
+	default:
+		return "", false
+	}
 }
 
 func (h *Handler) ListRuns(c *gin.Context) {

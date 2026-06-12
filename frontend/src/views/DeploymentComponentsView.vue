@@ -3,8 +3,8 @@ import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createRun, listComponents, previewRun, rollbackRun,
-  getEnabled, putEnabled, getOverride, putOverride,
-  type DeploymentComponent,
+  getEnabled, putEnabled, getOverride, putOverride, getComponentDefaults, getComponentTasks,
+  type DeploymentComponent, type ComponentTask,
 } from '../api/deployment'
 import { useRouter } from 'vue-router'
 
@@ -12,6 +12,7 @@ const router = useRouter()
 const loading = ref(false)
 const components = ref<DeploymentComponent[]>([])
 const savingEnabled = ref(false)
+let defaultsCache: Record<string, Record<string, any>> | null = null
 
 // Override editor state (key-value form)
 const overrideVisible = ref(false)
@@ -19,6 +20,12 @@ const overrideComponent = ref('')
 const overrideRows = ref<{ key: string; value: string }[]>([])
 const overrideSaving = ref(false)
 const overrideError = ref('')
+
+// Tasks (plan) viewer
+const tasksVisible = ref(false)
+const tasksComponent = ref('')
+const tasksItems = ref<ComponentTask[]>([])
+const tasksLoading = ref(false)
 
 async function load() {
   loading.value = true
@@ -97,6 +104,40 @@ async function openOverride(row: DeploymentComponent) {
 function addRow() { overrideRows.value.push({ key: '', value: '' }) }
 function removeRow(i: number) { overrideRows.value.splice(i, 1) }
 
+async function restoreDefaults() {
+  try {
+    if (!defaultsCache) defaultsCache = await getComponentDefaults()
+    const d = defaultsCache[overrideComponent.value] || {}
+    overrideRows.value = Object.keys(d).sort().map(k => ({
+      key: k,
+      value: typeof d[k] === 'object' ? JSON.stringify(d[k]) : String(d[k]),
+    }))
+    if (overrideRows.value.length === 0) {
+      overrideRows.value = [{ key: '', value: '' }]
+      ElMessage.info('该组件没有出厂默认参数')
+    } else {
+      ElMessage.success('已恢复出厂默认参数（未保存）')
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.message || '加载默认参数失败')
+  }
+}
+
+async function openTasks(row: DeploymentComponent) {
+  tasksComponent.value = row.code
+  tasksVisible.value = true
+  tasksLoading.value = true
+  try {
+    const data = await getComponentTasks(row.code)
+    tasksItems.value = data.items || []
+  } catch (e: any) {
+    tasksItems.value = []
+    ElMessage.error(e?.message || '加载任务计划失败')
+  } finally {
+    tasksLoading.value = false
+  }
+}
+
 async function saveOverride() {
   overrideError.value = ''
   const params: Record<string, any> = {}
@@ -154,6 +195,7 @@ onMounted(load)
             <el-button size="small" link @click="preview(row)">预览</el-button>
             <el-button size="small" link type="warning" @click="rollback(row)">回滚</el-button>
             <el-button size="small" link @click="openOverride(row)">参数</el-button>
+            <el-button size="small" link @click="openTasks(row)">计划</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -174,9 +216,26 @@ onMounted(load)
       </div>
       <el-button size="small" @click="addRow" style="margin-top: 8px;">+ 添加参数</el-button>
       <template #footer>
+        <el-button @click="restoreDefaults" style="float: left;">恢复默认</el-button>
         <el-button @click="overrideVisible = false">取消</el-button>
         <el-button type="primary" :loading="overrideSaving" @click="saveOverride">保存</el-button>
       </template>
+    </el-dialog>
+
+    <el-dialog v-model="tasksVisible" :title="`部署计划 · ${tasksComponent}`" width="680px">
+      <div v-loading="tasksLoading" class="tasks-box">
+        <div v-for="(t, i) in tasksItems" :key="i" class="task-item">
+          <div class="task-head">
+            <el-tag size="small" type="info">{{ t.phase }}</el-tag>
+            <span class="task-name">{{ t.name }}</span>
+            <span class="task-comp">{{ t.component }}</span>
+          </div>
+          <div class="task-actions">
+            <span v-for="(a, j) in t.actions" :key="j" class="action-chip">{{ a.type }}</span>
+          </div>
+        </div>
+        <el-empty v-if="!tasksLoading && !tasksItems.length" :image-size="50" description="无任务计划" />
+      </div>
     </el-dialog>
   </div>
 </template>
@@ -191,4 +250,11 @@ onMounted(load)
 .kv-k { width: 220px; flex-shrink: 0; }
 .kv-v { flex: 1; }
 .kv-op { width: 48px; flex-shrink: 0; text-align: center; }
+.tasks-box { max-height: 460px; overflow-y: auto; }
+.task-item { border: 1px solid #ebeef5; border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; }
+.task-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.task-name { font-size: 13px; font-weight: 500; color: #303133; }
+.task-comp { font-size: 12px; color: #909399; margin-left: auto; }
+.task-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.action-chip { font-size: 11px; background: #f0f2f5; color: #606266; border-radius: 4px; padding: 2px 8px; font-family: 'JetBrains Mono', Consolas, monospace; }
 </style>
