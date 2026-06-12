@@ -216,7 +216,7 @@ graph TD
   - [x] 17.2 On Save call PUT /targets/{component}; surface 409 conflicts inline naming the conflicting pair.
   - [x] 17.3 `DeploymentGlobalConfigView.vue` categorized editor; inline password-charset validation errors.
   - [x] 17.4 `DeploymentOfflineView.vue` upload dropzone + server-local path + bundle metadata + install progress.
-  - [ ] 17.5 ComponentOverride editor (modal JSON editor with shell-charset feedback).
+  - [x] 17.5 ComponentOverride editor (modal JSON editor with shell-charset feedback).
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 3.5, 4.1, 4.2, 4.3, 4.4, 4.5, 8.3, 9.2, 9.5, 9.7_
 
 - [ ] 18. Frontend Run Detail SSE (Phase 4)

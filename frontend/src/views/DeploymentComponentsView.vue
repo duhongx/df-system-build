@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createRun, listComponents, previewRun, rollbackRun,
+  getOverride, putOverride,
   type DeploymentComponent,
 } from '../api/deployment'
 import { useRouter } from 'vue-router'
@@ -10,6 +11,13 @@ import { useRouter } from 'vue-router'
 const router = useRouter()
 const loading = ref(false)
 const components = ref<DeploymentComponent[]>([])
+
+// Override editor state
+const overrideVisible = ref(false)
+const overrideComponent = ref('')
+const overrideText = ref('')
+const overrideSaving = ref(false)
+const overrideError = ref('')
 
 async function load() {
   loading.value = true
@@ -44,6 +52,40 @@ async function preview(row: DeploymentComponent) {
   router.push(`/deployment/runs/${res.runId}`)
 }
 
+async function openOverride(row: DeploymentComponent) {
+  overrideComponent.value = row.code
+  overrideError.value = ''
+  try {
+    const o = await getOverride(row.code)
+    overrideText.value = JSON.stringify(o.params || {}, null, 2)
+  } catch {
+    overrideText.value = '{}'
+  }
+  overrideVisible.value = true
+}
+
+async function saveOverride() {
+  overrideError.value = ''
+  let params: Record<string, any>
+  try {
+    params = JSON.parse(overrideText.value || '{}')
+  } catch (e: any) {
+    overrideError.value = 'JSON 格式错误：' + (e?.message || '')
+    return
+  }
+  overrideSaving.value = true
+  try {
+    await putOverride(overrideComponent.value, params)
+    ElMessage.success('已保存组件参数覆盖')
+    overrideVisible.value = false
+  } catch (e: any) {
+    // backend rejects shell-metachar passwords with a 400; surface inline.
+    overrideError.value = e?.message || '保存失败'
+  } finally {
+    overrideSaving.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -61,19 +103,32 @@ onMounted(load)
             <el-tag :type="statusTag(row.status)" size="small">{{ row.status }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <el-button size="small" link type="primary" @click="deploy(row)">部署</el-button>
             <el-button size="small" link @click="preview(row)">预览</el-button>
             <el-button size="small" link type="warning" @click="rollback(row)">回滚</el-button>
+            <el-button size="small" link @click="openOverride(row)">参数</el-button>
           </template>
         </el-table-column>
       </el-table>
     </div>
+
+    <el-dialog v-model="overrideVisible" :title="`组件参数覆盖 · ${overrideComponent}`" width="560px">
+      <el-alert v-if="overrideError" type="error" :closable="false" :title="overrideError" style="margin-bottom: 10px;" />
+      <p class="dlg-hint">JSON 格式；密码类字段不能包含 shell 元字符（单引号 双引号 反斜杠 $ 反引号 空格）。</p>
+      <el-input v-model="overrideText" type="textarea" :rows="14" class="json-area" />
+      <template #footer>
+        <el-button @click="overrideVisible = false">取消</el-button>
+        <el-button type="primary" :loading="overrideSaving" @click="saveOverride">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
 .page-title { font-size: 15px; font-weight: 600; color: #303133; margin: 0 0 16px 0; }
 .content-card { background: #fff; border-radius: 8px; border: 1px solid #ebeef5; padding: 16px; }
+.dlg-hint { font-size: 12px; color: #909399; margin: 0 0 10px; }
+.json-area :deep(textarea) { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; }
 </style>
