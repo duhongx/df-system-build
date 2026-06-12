@@ -1,0 +1,548 @@
+display_name: node
+enabled: true
+order: 10
+depends_on: [prepare, containerd, kube-lb, master]
+target_roles: [master, node]
+tasks:
+  - id: node.preflight.001.check-resources
+    name: 预检查node组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查node离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+      - type: kubernetes_artifacts_check
+        name: 校验当前主机在K8s节点快照内
+        target: ${cluster.remote_root}/cloudhis/kubernetes
+  - id: node.render.001.render-kubelet-kubeproxy
+    name: 生成node组件-001任务-生成kubelet和kube-proxy配置
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建node生成配置目录
+        target: ${cluster.remote_root}/cloudhis/node/${host.address}
+        mode: "0755"
+      - type: render_template
+        name: 渲染kubelet systemd服务文件
+        source: node/templates/kubelet.service.tmpl
+        target: ${cluster.remote_root}/cloudhis/node/${host.address}/kubelet.service
+        mode: "0644"
+        template_vars:
+          host_address: ${host.address}
+          root_dir: ${node.kubelet_root_dir}
+          kube_reserved_enabled: ${node.kube_reserved_enabled}
+          sys_reserved_enabled: ${node.sys_reserved_enabled}
+      - type: render_template
+        name: 渲染kubelet配置kubelet-config.yaml
+        source: node/templates/kubelet-config.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/node/${host.address}/kubelet-config.yaml
+        mode: "0644"
+        template_vars:
+          local_dns_cache: ${kubernetes.local_dns_cache}
+          cluster_dns_svc_ip: ${kubernetes.dns_service_ip}
+          enable_local_dns_cache: ${node.enable_local_dns_cache}
+          kube_reserved_enabled: ${node.kube_reserved_enabled}
+          sys_reserved_enabled: ${node.sys_reserved_enabled}
+          resolv_conf: ${node.resolv_conf}
+      - type: render_template
+        name: 渲染默认CNI配置
+        source: node/templates/cni-default.conf.tmpl
+        target: ${cluster.remote_root}/cloudhis/node/${host.address}/10-default.conf
+        mode: "0644"
+        template_vars:
+          cluster_cidr: ${network.cluster_cidr}
+      - type: render_template
+        name: 渲染kube-proxy systemd服务文件
+        source: node/templates/kube-proxy.service.tmpl
+        target: ${cluster.remote_root}/cloudhis/node/${host.address}/kube-proxy.service
+        mode: "0644"
+        template_vars: {}
+      - type: render_template
+        name: 渲染kube-proxy配置kube-proxy-config.yaml
+        source: node/templates/kube-proxy-config.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/node/${host.address}/kube-proxy-config.yaml
+        mode: "0644"
+        template_vars:
+          cluster_cidr: ${network.cluster_cidr}
+          host_address: ${host.address}
+      - type: render_template
+        name: 渲染machine systemd服务文件
+        source: node/templates/machine.service.tmpl
+        target: ${cluster.remote_root}/cloudhis/node/${host.address}/machine.service
+        mode: "0644"
+        template_vars: {}
+  - id: node.deploy.001.install-and-start
+    name: 部署node组件-001任务-安装节点二进制和启动服务
+    phase: deploy
+    actions:
+      - type: record_path_state
+        name: 记录kubelet数据目录部署前状态
+        target: /var/lib/kubelet
+      - type: record_path_state
+        name: 记录kube-proxy数据目录部署前状态
+        target: /var/lib/kube-proxy
+      - type: backup_file
+        name: 备份kubelet二进制文件
+        target: /usr/local/bin/kubelet
+      - type: copy_file
+        name: 复制kubelet二进制文件
+        source: node/kubelet
+        target: /usr/local/bin/kubelet
+        mode: "0755"
+      - type: backup_file
+        name: 备份kube-proxy二进制文件
+        target: /usr/local/bin/kube-proxy
+      - type: copy_file
+        name: 复制kube-proxy二进制文件
+        source: node/kube-proxy
+        target: /usr/local/bin/kube-proxy
+        mode: "0755"
+      - type: backup_file
+        name: 备份kubectl二进制文件
+        target: /usr/local/bin/kubectl
+      - type: copy_file
+        name: 复制kubectl二进制文件
+        source: node/kubectl
+        target: /usr/local/bin/kubectl
+        mode: "0755"
+      # kubectl bash completion only belongs on K8s nodes (which have
+      # the kubectl binary). node pipeline runs on every K8s node
+      # (masters run node too), so adding it here covers them all and
+      # keeps non-K8s nodes (postgresql/redis/...) clean. Append/sed
+      # rather than backup/restore — /root/.bashrc is shared across
+      # components, so restoring the whole file would clobber peers.
+      - type: run_command
+        name: 添加kubectl命令补全到bashrc
+        command: bash
+        args: ["-lc", "grep -q 'kubectl completion bash' /root/.bashrc || echo 'command -v kubectl >/dev/null 2>&1 && source <(kubectl completion bash)' >> /root/.bashrc"]
+      - type: backup_file
+        name: 备份bridge CNI插件
+        target: /usr/local/bin/bridge
+      - type: copy_file
+        name: 复制bridge CNI插件
+        source: node/bridge
+        target: /usr/local/bin/bridge
+        mode: "0755"
+      - type: backup_file
+        name: 备份host-local CNI插件
+        target: /usr/local/bin/host-local
+      - type: copy_file
+        name: 复制host-local CNI插件
+        source: node/host-local
+        target: /usr/local/bin/host-local
+        mode: "0755"
+      - type: backup_file
+        name: 备份loopback CNI插件
+        target: /usr/local/bin/loopback
+      - type: copy_file
+        name: 复制loopback CNI插件
+        source: node/loopback
+        target: /usr/local/bin/loopback
+        mode: "0755"
+      - type: systemd_service
+        name: 停止machine避免覆盖二进制失败
+        service: machine
+        state: stopped
+        ignore_error: true
+      - type: backup_file
+        name: 备份machine二进制文件
+        target: /usr/local/bin/machine
+      - type: copy_file
+        name: 复制文件
+        source: node/machine
+        target: /usr/local/bin/machine
+        mode: "0755"
+      - type: backup_file
+        name: 备份kubelet systemd服务文件
+        target: /etc/systemd/system/kubelet.service
+      - type: copy_path
+        name: 部署kubelet systemd服务文件
+        source: ${cluster.remote_root}/cloudhis/node/${host.address}/kubelet.service
+        target: /etc/systemd/system/kubelet.service
+        mode: "0644"
+      - type: ensure_dir
+        name: 创建kubelet数据目录
+        target: /var/lib/kubelet
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建kube-proxy数据目录
+        target: /var/lib/kube-proxy
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建CNI配置目录
+        target: /etc/cni/net.d
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建Kubernetes SSL证书目录
+        target: /etc/kubernetes/ssl
+        mode: "0755"
+      - type: backup_file
+        name: 备份默认CNI配置
+        target: /etc/cni/net.d/10-default.conf
+      - type: copy_path
+        name: 部署默认CNI配置
+        source: ${cluster.remote_root}/cloudhis/node/${host.address}/10-default.conf
+        target: /etc/cni/net.d/10-default.conf
+        mode: "0644"
+      - type: backup_file
+        name: 备份kubelet kubeconfig
+        target: /etc/kubernetes/kubelet.kubeconfig
+      - type: copy_path
+        name: 复制kubelet kubeconfig
+        source: ${cluster.remote_root}/cloudhis/kubernetes/${host.address}/kubelet.kubeconfig
+        target: /etc/kubernetes/kubelet.kubeconfig
+        mode: "0600"
+      - type: backup_file
+        name: 备份CA证书ca.pem
+        target: /etc/kubernetes/ssl/ca.pem
+      - type: copy_path
+        name: 复制CA证书ca.pem
+        source: ${cluster.remote_root}/cloudhis/kubernetes/ssl/ca.pem
+        target: /etc/kubernetes/ssl/ca.pem
+        mode: "0600"
+      - type: backup_file
+        name: 备份kubelet证书kubelet.pem
+        target: /etc/kubernetes/ssl/kubelet.pem
+      - type: copy_path
+        name: 复制kubelet证书kubelet.pem
+        source: ${cluster.remote_root}/cloudhis/kubernetes/ssl/${host.address}-kubelet.pem
+        target: /etc/kubernetes/ssl/kubelet.pem
+        mode: "0600"
+      - type: backup_file
+        name: 备份kubelet私钥kubelet-key.pem
+        target: /etc/kubernetes/ssl/kubelet-key.pem
+      - type: copy_path
+        name: 复制kubelet私钥kubelet-key.pem
+        source: ${cluster.remote_root}/cloudhis/kubernetes/ssl/${host.address}-kubelet-key.pem
+        target: /etc/kubernetes/ssl/kubelet-key.pem
+        mode: "0600"
+      - type: copy_path
+        name: 部署kubelet配置kubelet-config.yaml
+        source: ${cluster.remote_root}/cloudhis/node/${host.address}/kubelet-config.yaml
+        target: /var/lib/kubelet/config.yaml
+        mode: "0644"
+      - type: copy_path
+        name: 部署kube-proxy配置kube-proxy-config.yaml
+        source: ${cluster.remote_root}/cloudhis/node/${host.address}/kube-proxy-config.yaml
+        target: /var/lib/kube-proxy/kube-proxy-config.yaml
+        mode: "0644"
+      - type: copy_path
+        name: 部署node节点admin kubeconfig
+        source: ${cluster.remote_root}/cloudhis/kubernetes/kubectl.kubeconfig
+        target: /root/.kube/config
+        mode: "0600"
+      - type: copy_path
+        name: 部署kube-proxy kubeconfig
+        source: ${cluster.remote_root}/cloudhis/kubernetes/kube-proxy.kubeconfig
+        target: /etc/kubernetes/kube-proxy.kubeconfig
+        mode: "0600"
+      - type: run_command
+        name: 替换node本地kubeconfig的apiserver地址
+        command: bash
+        args:
+          - -lc
+          - |
+            for file in /root/.kube/config /etc/kubernetes/kube-proxy.kubeconfig /etc/kubernetes/kubelet.kubeconfig; do
+              if [ -f "$file" ]; then
+                sed -i 's#^    server:.*#    server: https://127.0.0.1:6443#' "$file"
+              fi
+            done
+      - type: backup_file
+        name: 备份kube-proxy systemd服务文件
+        target: /etc/systemd/system/kube-proxy.service
+      - type: copy_path
+        name: 部署kube-proxy systemd服务文件
+        source: ${cluster.remote_root}/cloudhis/node/${host.address}/kube-proxy.service
+        target: /etc/systemd/system/kube-proxy.service
+        mode: "0644"
+      - type: backup_file
+        name: 备份machine systemd服务文件
+        target: /etc/systemd/system/machine.service
+      - type: copy_path
+        name: 部署machine systemd服务文件
+        source: ${cluster.remote_root}/cloudhis/node/${host.address}/machine.service
+        target: /etc/systemd/system/machine.service
+        mode: "0644"
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: systemd_service
+        name: 启动kubelet服务
+        service: kubelet
+        enabled: true
+        state: restarted
+      - type: systemd_service
+        name: 启动kube-proxy服务
+        service: kube-proxy
+        enabled: true
+        state: restarted
+      - type: systemd_service
+        name: 启动machine服务
+        service: machine
+        enabled: true
+        state: restarted
+      - type: run_command
+        name: 轮询等待kube-proxy启动
+        command: bash
+        args: ["-lc", "for i in $(seq 1 30); do systemctl is-active kube-proxy.service | grep -qx active && exit 0; sleep 2; done; systemctl is-active kube-proxy.service"]
+      - type: run_command
+        name: 轮询等待kubelet启动
+        command: bash
+        args: ["-lc", "for i in $(seq 1 30); do systemctl is-active kubelet.service | grep -qx active && exit 0; sleep 2; done; systemctl is-active kubelet.service"]
+      - type: backup_file
+        name: 备份微服务日志清理脚本
+        target: /usr/bin/del_log.sh
+      - type: render_template
+        name: 渲染微服务日志清理脚本
+        source: node/templates/del_log.sh.tmpl
+        target: /usr/bin/del_log.sh
+        mode: "0755"
+        template_vars:
+          env_name: ${env.name}
+      - type: cron_line
+        name: 安装微服务日志清理定时任务
+        state: present
+        marker: 清理微服务的日志
+        line: "0 1 * * * /usr/bin/del_log.sh # 清理微服务的日志"
+      - type: backup_file
+        name: 备份containerd镜像清理脚本
+        target: /usr/bin/del_crictl_images.sh
+      - type: render_template
+        name: 渲染containerd镜像清理脚本
+        source: node/templates/del_crictl_images.sh.tmpl
+        target: /usr/bin/del_crictl_images.sh
+        mode: "0755"
+        template_vars:
+          env_name: ${env.name}
+      - type: cron_line
+        name: 安装containerd镜像清理定时任务
+        state: present
+        marker: 清理过期的镜像
+        line: "30 1 * * * /usr/bin/del_crictl_images.sh # 清理过期的镜像"
+      - type: run_command
+        name: 等待节点注册
+        command: bash
+        args: ["-lc", "for i in $(seq 1 8); do status=$(kubectl --kubeconfig /root/.kube/config get node ${host.address} 2>/dev/null | awk 'NR>1{print $2}'); [ \"$status\" = \"Ready\" ] || [ \"$status\" = \"Ready,SchedulingDisabled\" ] && exit 0; sleep 8; done; kubectl --kubeconfig /root/.kube/config get node ${host.address}"]
+      - type: run_command
+        name: 设置node节点role
+        command: bash
+        args: ["-lc", "if printf '%s\n' '${node.addresses}' | tr ' ' '\n' | grep -qx '${host.address}'; then current=$(kubectl --kubeconfig /root/.kube/config get node ${host.address} -o jsonpath='{.metadata.labels.kubernetes\\.io/role}' 2>/dev/null || true); [ \"$current\" = \"node\" ] || kubectl --kubeconfig /root/.kube/config label node ${host.address} kubernetes.io/role=node --overwrite; fi"]
+        ignore_error: true
+      - type: run_command
+        name: 对齐Ansible设置master节点不可调度和role
+        command: bash
+        args:
+          - -lc
+          - |
+            if printf '%s\n' '${master.addresses}' | tr ' ' '\n' | grep -qx '${host.address}'; then
+              for i in $(seq 1 8); do kubectl get node ${host.address} >/dev/null 2>&1 && break; sleep 8; done
+              # Only cordon master when masters and nodes are separate
+              # boxes (6-node split topology). When the same hosts run
+              # both roles (1-node or 3-node co-located), cordoning
+              # masters leaves no schedulable nodes and business pods
+              # never come up.
+              # 用集合比较 (sort -u) 避免相同 IP 不同顺序被错判为
+              # split topology — master.addresses 和 node.addresses
+              # 来自 hosts 配置渲染,顺序没有强保证。
+              m=$(printf '%s\n' ${master.addresses} | sort -u)
+              n=$(printf '%s\n' ${node.addresses} | sort -u)
+              if [ "$m" != "$n" ]; then
+                kubectl cordon ${host.address} || true
+              fi
+              current=$(kubectl get node ${host.address} -o jsonpath='{.metadata.labels.kubernetes\.io/role}' 2>/dev/null || true)
+              [ "$current" = "master" ] || kubectl label node ${host.address} kubernetes.io/role=master --overwrite
+            fi
+        ignore_error: true
+  - id: node.test.001.check-kubelet
+    name: 测试node组件-001任务-检查kubelet服务
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查kubelet服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "kubelet"]
+  - id: node.rollback.001.clean
+    name: 清理node组件-001任务-停止节点服务并恢复文件
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止kubelet服务
+        service: kubelet
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止kube-proxy服务
+        service: kube-proxy
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止machine服务
+        service: machine
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: run_command
+        name: 卸载kubelet挂载点
+        command: bash
+        args:
+          - -lc
+          - |
+            awk '$5 ~ /^\/var\/lib\/kubelet(\/|$)/ {print $5}' /proc/self/mountinfo | sort -r | while read -r mount_point; do
+              [ -n "$mount_point" ] && umount -lf "$mount_point" 2>/dev/null || true
+            done
+        ignore_error: true
+      - type: cron_line
+        name: 删除微服务日志清理定时任务
+        state: absent
+        marker: 清理微服务的日志
+        ignore_error: true
+      - type: cron_line
+        name: 删除containerd镜像清理定时任务
+        state: absent
+        marker: 清理过期的镜像
+        ignore_error: true
+      - type: restore_file
+        name: 恢复kubelet systemd服务文件
+        target: /etc/systemd/system/kubelet.service
+      - type: restore_file
+        name: 恢复kube-proxy systemd服务文件
+        target: /etc/systemd/system/kube-proxy.service
+      - type: restore_file
+        name: 恢复machine systemd服务文件
+        target: /etc/systemd/system/machine.service
+      - type: restore_file
+        name: 恢复kubelet kubeconfig
+        target: /etc/kubernetes/kubelet.kubeconfig
+      - type: restore_file
+        name: 恢复CA证书ca.pem
+        target: /etc/kubernetes/ssl/ca.pem
+      - type: restore_file
+        name: 恢复kubelet证书kubelet.pem
+        target: /etc/kubernetes/ssl/kubelet.pem
+      - type: restore_file
+        name: 恢复kubelet私钥kubelet-key.pem
+        target: /etc/kubernetes/ssl/kubelet-key.pem
+      - type: restore_file
+        name: 恢复默认CNI配置
+        target: /etc/cni/net.d/10-default.conf
+      - type: remove_path_if_untracked
+        name: 删除kubelet服务文件残留
+        target: /etc/systemd/system/kubelet.service
+      - type: remove_path_if_untracked
+        name: 删除kube-proxy服务文件残留
+        target: /etc/systemd/system/kube-proxy.service
+      - type: remove_path_if_untracked
+        name: 删除machine服务文件残留
+        target: /etc/systemd/system/machine.service
+      - type: remove_path_if_untracked
+        name: 删除kubelet kubeconfig残留
+        target: /etc/kubernetes/kubelet.kubeconfig
+      - type: remove_path_if_untracked
+        name: 删除CA证书残留
+        target: /etc/kubernetes/ssl/ca.pem
+      - type: remove_path_if_untracked
+        name: 删除kubelet证书残留
+        target: /etc/kubernetes/ssl/kubelet.pem
+      - type: remove_path_if_untracked
+        name: 删除kubelet私钥残留
+        target: /etc/kubernetes/ssl/kubelet-key.pem
+      - type: remove_path_if_untracked
+        name: 删除默认CNI配置残留
+        target: /etc/cni/net.d/10-default.conf
+      - type: restore_file
+        name: 恢复kubelet二进制文件
+        target: /usr/local/bin/kubelet
+      - type: restore_file
+        name: 恢复kube-proxy二进制文件
+        target: /usr/local/bin/kube-proxy
+      - type: restore_file
+        name: 恢复kubectl二进制文件
+        target: /usr/local/bin/kubectl
+      - type: restore_file
+        name: 恢复bridge CNI插件
+        target: /usr/local/bin/bridge
+      - type: restore_file
+        name: 恢复host-local CNI插件
+        target: /usr/local/bin/host-local
+      - type: restore_file
+        name: 恢复loopback CNI插件
+        target: /usr/local/bin/loopback
+      - type: restore_file
+        name: 恢复machine二进制文件
+        target: /usr/local/bin/machine
+      - type: remove_path
+        name: 删除微服务日志清理脚本
+        target: /usr/bin/del_log.sh
+      - type: remove_path
+        name: 删除containerd镜像清理脚本
+        target: /usr/bin/del_crictl_images.sh
+      - type: remove_path_if_untracked
+        name: 删除kubelet二进制文件残留
+        target: /usr/local/bin/kubelet
+      - type: remove_path_if_untracked
+        name: 删除kube-proxy二进制文件残留
+        target: /usr/local/bin/kube-proxy
+      - type: remove_path_if_untracked
+        name: 删除kubectl二进制文件残留
+        target: /usr/local/bin/kubectl
+      - type: run_command
+        name: 删除kubectl命令补全残留
+        command: bash
+        args: ["-lc", "sed -i '/kubectl completion bash/d' /root/.bashrc 2>/dev/null || true"]
+        ignore_error: true
+      - type: remove_path_if_untracked
+        name: 删除bridge CNI插件残留
+        target: /usr/local/bin/bridge
+      - type: remove_path_if_untracked
+        name: 删除host-local CNI插件残留
+        target: /usr/local/bin/host-local
+      - type: remove_path_if_untracked
+        name: 删除loopback CNI插件残留
+        target: /usr/local/bin/loopback
+      - type: remove_path_if_untracked
+        name: 删除machine二进制文件残留
+        target: /usr/local/bin/machine
+      - type: remove_path_if_created_or_untracked
+        name: 删除kubelet数据目录
+        target: /var/lib/kubelet
+      - type: remove_path_if_created_or_untracked
+        name: 删除kube-proxy数据目录
+        target: /var/lib/kube-proxy
+      - type: remove_path_if_created_or_untracked
+        name: 删除Kubernetes SSL证书目录残留
+        target: /etc/kubernetes/ssl
+      - type: remove_path_if_created_or_untracked
+        name: 删除Kubernetes配置目录残留
+        target: /etc/kubernetes
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: node.residue.001.check-clean
+    name: 残留检查node组件-001任务-确认节点服务文件已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认kubelet服务文件已删除
+        command: test
+        args: ["!", "-e", "/etc/systemd/system/kubelet.service"]
+      - type: run_command
+        name: 确认微服务日志清理脚本已删除
+        command: test
+        args: ["!", "-e", "/usr/bin/del_log.sh"]
+      - type: run_command
+        name: 确认containerd镜像清理脚本已删除
+        command: test
+        args: ["!", "-e", "/usr/bin/del_crictl_images.sh"]
+      - type: run_command
+        name: 确认微服务日志清理定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F '清理微服务的日志')"]
+      - type: run_command
+        name: 确认containerd镜像清理定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F '清理过期的镜像')"]

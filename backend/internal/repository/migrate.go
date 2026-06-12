@@ -27,21 +27,49 @@ func AutoMigrate() error {
 		&model.Server{},
 		&model.ServerLog{},
 		&model.NotificationMsg{},
-		&model.DeployPlan{},
-		&model.DeployExecution{},
-		&model.DeployLog{},
-		&model.EnvironmentInfo{},
 		&model.SQLChangeBatch{},
 		&model.SQLChangeFile{},
 		&model.SQLChangeStatement{},
 		&model.SQLViewBackup{},
+		// Deployment-management models (replaces legacy DeployPlan/* set).
+		&model.DeploymentSettings{},
+		&model.DeploymentNetworkSettings{},
+		&model.DeploymentEnvEntry{},
+		&model.DeploymentEnabledComponent{},
+		&model.DeploymentComponentTarget{},
+		&model.DeploymentComponentState{},
+		&model.DeploymentComponentOverride{},
+		&model.Deployment{},
+		&model.DeploymentRunLog{},
+		&model.OfflineBundle{},
 	)
 	if err != nil {
 		return err
 	}
 
+	dropLegacyDeployTables()
+
 	logger.Log.Info("Database migration completed")
 	return nil
+}
+
+// dropLegacyDeployTables removes the early "基础设施" stub tables that the
+// deployment-management module replaces. Safe to run repeatedly.
+func dropLegacyDeployTables() {
+	for _, table := range []string{
+		"deploy_plans",
+		"deploy_executions",
+		"deploy_logs",
+		"environment_infos",
+	} {
+		if DB.Migrator().HasTable(table) {
+			if err := DB.Migrator().DropTable(table); err != nil {
+				logger.Log.Warnf("failed to drop legacy table %s: %v", table, err)
+			} else {
+				logger.Log.Infof("dropped legacy deploy table %s", table)
+			}
+		}
+	}
 }
 
 // SeedCoreData seeds essential data on every startup (idempotent).

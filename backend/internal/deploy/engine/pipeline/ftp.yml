@@ -1,0 +1,119 @@
+display_name: ftp
+enabled: true
+order: 18
+target_roles: [ftp]
+tasks:
+  - id: ftp.preflight.001.check-system
+    name: 预检查ftp组件-001任务-检查系统环境
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查FTP离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+      - type: run_command
+        name: 检查yum包管理器可用
+        command: yum
+        args: ["--version"]
+  - id: ftp.render.001.render-vsftpd-config
+    name: 生成ftp组件-001任务-生成vsftpd配置
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建FTP生成配置目录
+        target: ${cluster.remote_root}/cloudhis/ftp
+        mode: "0755"
+      - type: render_template
+        name: 渲染vsftpd主配置文件
+        source: ftp/templates/vsftpd.conf.tmpl
+        target: ${cluster.remote_root}/cloudhis/ftp/vsftpd.conf
+        mode: "0644"
+        template_vars: {}
+  - id: ftp.deploy.001.install-config-and-start
+    name: 部署ftp组件-001任务-安装vsftpd创建用户并启动服务
+    phase: deploy
+    actions:
+      - type: yum_package
+        name: 安装vsftpd软件包
+        state: present
+        packages: [vsftpd]
+      - type: record_path_state
+        name: 记录FTP数据目录部署前状态
+        target: ${ftp.data_dir}
+      - type: ensure_dir
+        name: 创建FTP数据目录
+        target: ${ftp.data_dir}
+        mode: "0755"
+      - type: system_user
+        name: 创建FTP专用系统用户
+        state: present
+        user: ${ftp.user}
+        home: ${ftp.data_dir}
+        create_home: false
+      - type: run_command
+        name: 设置FTP用户密码
+        command: bash
+        args: ["-lc", "echo '${ftp.user}:${ftp.password}' | chpasswd"]
+      - type: backup_file
+        name: 备份vsftpd主配置文件
+        target: /etc/vsftpd/vsftpd.conf
+      - type: copy_path
+        name: 部署vsftpd主配置文件
+        source: ${cluster.remote_root}/cloudhis/ftp/vsftpd.conf
+        target: /etc/vsftpd/vsftpd.conf
+        mode: "0644"
+      - type: systemd_service
+        name: 启动vsftpd服务
+        service: vsftpd
+        enabled: true
+        state: started
+  - id: ftp.test.001.check-service
+    name: 测试ftp组件-001任务-检查服务状态
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查vsftpd服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "vsftpd"]
+  - id: ftp.rollback.001.clean
+    name: 清理ftp组件-001任务-停止服务恢复配置清理用户目录并卸载vsftpd
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止vsftpd服务
+        service: vsftpd
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: system_user
+        name: 删除FTP专用系统用户
+        state: absent
+        user: ${ftp.user}
+        ignore_error: true
+      - type: restore_file
+        name: 恢复vsftpd主配置文件
+        target: /etc/vsftpd/vsftpd.conf
+      - type: remove_path_if_created
+        name: 删除FTP数据目录
+        target: ${ftp.data_dir}
+      # vsftpd 是 FTP 部署专属包,按"装+卸"对称原则必须卸载;不卸
+      # 会留下 /usr/sbin/vsftpd 和 /etc/vsftpd 残留,且下次部署再装
+      # 也会跳过 (yum install 已装包是 no-op)。卸载顺序放最后,
+      # restore_file 已经把 vsftpd.conf 还原(若 yum 卸时检测到改动
+      # 会写 .rpmsave;由后续 deploy 重置)。
+      - type: rpm_package
+        name: 卸载vsftpd主程序包
+        state: removed
+        package: vsftpd
+        ignore_error: true
+  - id: ftp.residue.001.check-clean
+    name: 残留检查ftp组件-001任务-确认FTP目录已清理且vsftpd已卸载
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认FTP数据目录已删除
+        command: test
+        args: ["!", "-e", "${ftp.data_dir}"]
+      - type: run_command
+        name: 确认vsftpd主程序包已卸载
+        command: bash
+        args: ["-lc", "! rpm -q vsftpd >/dev/null 2>&1"]

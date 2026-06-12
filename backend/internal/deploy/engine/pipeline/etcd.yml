@@ -1,0 +1,147 @@
+display_name: etcd
+enabled: true
+order: 5
+depends_on: [prepare]
+target_roles: [etcd]
+tasks:
+  - id: etcd.preflight.001.check-resources
+    name: 预检查etcd组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查etcd离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+      - type: kubernetes_artifacts_check
+        name: 校验当前主机在K8s节点快照内
+        target: ${cluster.remote_root}/cloudhis/kubernetes
+  - id: etcd.render.001.render-unit
+    name: 生成etcd组件-001任务-生成证书和服务文件
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建etcd生成配置目录
+        # Per-host subdir keeps render output for each peer separated.
+        # Without this, three master targets would all overwrite the
+        # same control-side etcd.service (the dfctl engine routes
+        # ${remote_root}/generated/... to the control LocalBackend),
+        # leaving every node with the last-rendered host's IP and
+        # bind:cannot-assign-requested-address on startup.
+        target: ${cluster.remote_root}/cloudhis/etcd/${host.address}
+        mode: "0755"
+      - type: render_template
+        name: 渲染etcd systemd服务文件
+        source: etcd/templates/etcd.service.tmpl
+        target: ${cluster.remote_root}/cloudhis/etcd/${host.address}/etcd.service
+        mode: "0644"
+        template_vars:
+          host_address: ${host.address}
+          etcd_nodes: ${etcd.nodes}
+  - id: etcd.deploy.001.install-and-start
+    name: 部署etcd组件-001任务-安装二进制证书并启动服务
+    phase: deploy
+    actions:
+      - type: backup_file
+        name: 备份etcd二进制文件
+        target: /usr/local/bin/etcd
+      - type: copy_file
+        name: 复制etcd二进制文件
+        source: etcd/etcd
+        target: /usr/local/bin/etcd
+        mode: "0755"
+      - type: backup_file
+        name: 备份etcdctl二进制文件
+        target: /usr/local/bin/etcdctl
+      - type: copy_file
+        name: 复制etcdctl二进制文件
+        source: etcd/etcdctl
+        target: /usr/local/bin/etcdctl
+        mode: "0755"
+      - type: record_path_state
+        name: 记录etcd数据目录部署前状态
+        target: /var/lib/etcd
+      - type: ensure_dir
+        name: 创建etcd数据目录
+        target: /var/lib/etcd
+        mode: "0700"
+      - type: copy_dir
+        name: 复制Kubernetes SSL证书目录
+        source: ${cluster.remote_root}/cloudhis/kubernetes/ssl
+        target: /etc/kubernetes/ssl
+        mode: "0600"
+      - type: backup_file
+        name: 备份etcd systemd服务文件
+        target: /etc/systemd/system/etcd.service
+      - type: copy_path
+        name: 部署etcd systemd服务文件
+        source: ${cluster.remote_root}/cloudhis/etcd/${host.address}/etcd.service
+        target: /etc/systemd/system/etcd.service
+        mode: "0644"
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 设置etcd服务开机自启
+        command: systemctl
+        args: ["enable", "etcd"]
+      - type: run_command
+        name: 重启etcd以加载最新证书
+        command: bash
+        args: ["-lc", "systemctl reset-failed etcd 2>/dev/null || true; systemctl restart --no-block etcd"]
+  - id: etcd.test.001.endpoint-health
+    name: 测试etcd组件-001任务-检查etcd健康状态
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查etcd服务运行状态
+        command: bash
+        args: ["-lc", "for i in $(seq 1 30); do systemctl is-active --quiet etcd && exit 0; sleep 2; done; systemctl is-active etcd"]
+  - id: etcd.rollback.001.clean
+    name: 清理etcd组件-001任务-停止服务恢复文件并删除数据
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止etcd服务
+        service: etcd
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: restore_file
+        name: 恢复etcd systemd服务文件
+        target: /etc/systemd/system/etcd.service
+      - type: restore_file
+        name: 恢复etcd二进制文件
+        target: /usr/local/bin/etcd
+      - type: remove_path_if_untracked
+        name: 删除etcd二进制残留
+        target: /usr/local/bin/etcd
+      - type: restore_file
+        name: 恢复etcdctl二进制文件
+        target: /usr/local/bin/etcdctl
+      - type: remove_path_if_untracked
+        name: 删除etcdctl二进制残留
+        target: /usr/local/bin/etcdctl
+      - type: remove_path
+        name: 删除etcd数据目录
+        target: /var/lib/etcd
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: etcd.residue.001.check-clean
+    name: 残留检查etcd组件-001任务-确认etcd数据已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认etcd数据目录已删除
+        command: test
+        args: ["!", "-e", "/var/lib/etcd"]
+      - type: run_command
+        name: 确认etcd二进制已删除
+        command: test
+        args: ["!", "-e", "/usr/local/bin/etcd"]
+      - type: run_command
+        name: 确认etcdctl二进制已删除
+        command: test
+        args: ["!", "-e", "/usr/local/bin/etcdctl"]

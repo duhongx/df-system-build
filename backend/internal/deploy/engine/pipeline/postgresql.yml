@@ -1,0 +1,672 @@
+display_name: postgresql
+enabled: true
+order: 13
+target_roles: [postgresql]
+tasks:
+  - id: postgresql.preflight.001.check-resources
+    name: 预检查postgresql组件-001任务-检查离线资源和节点规划
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查PostgreSQL离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: postgresql.render.001.render-config
+    name: 生成postgresql组件-001任务-生成证书和etcd/patroni配置
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建PostgreSQL生成配置目录
+        # Per-host subdir keeps render output for each Patroni node
+        # separated. Without this, three soft hosts all overwrite the
+        # same control-side patroni.yml — the operator sees every node
+        # report the third host's IP in `patronictl list` because the
+        # last-rendered host wins.
+        target: ${cluster.remote_root}/cloudhis/postgresql/${host.address}
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建PostgreSQL证书生成目录
+        target: ${cluster.remote_root}/cloudhis/postgresql/ssl
+        mode: "0755"
+      - type: render_template
+        name: 渲染PostgreSQL CA签名配置
+        source: postgresql/templates/ca-config.json.tmpl
+        target: ${cluster.remote_root}/cloudhis/postgresql/ssl/ca-config.json
+        mode: "0644"
+        template_vars: {}
+      - type: render_template
+        name: 渲染PostgreSQL CA CSR
+        source: postgresql/templates/ca-csr.json.tmpl
+        target: ${cluster.remote_root}/cloudhis/postgresql/ssl/ca-csr.json
+        mode: "0644"
+        template_vars: {}
+      - type: render_template
+        name: 渲染PostgreSQL etcd CSR
+        source: postgresql/templates/etcd-csr.json.tmpl
+        target: ${cluster.remote_root}/cloudhis/postgresql/ssl/etcd-csr.json
+        mode: "0644"
+        template_vars:
+          postgresql_etcd_csr_hosts_json: ${postgresql.etcd_csr_hosts_json}
+      - type: render_template
+        name: 渲染Patroni REST CSR
+        source: postgresql/templates/patroni-csr.json.tmpl
+        target: ${cluster.remote_root}/cloudhis/postgresql/ssl/patroni-csr.json
+        mode: "0644"
+        template_vars:
+          postgresql_etcd_csr_hosts_json: ${postgresql.etcd_csr_hosts_json}
+      - type: render_template
+        name: 渲染PostgreSQL服务端CSR
+        source: postgresql/templates/postgresql-csr.json.tmpl
+        target: ${cluster.remote_root}/cloudhis/postgresql/ssl/postgresql-csr.json
+        mode: "0644"
+        template_vars:
+          postgresql_server_csr_hosts_json: ${postgresql.server_csr_hosts_json}
+      - type: run_command
+        name: 生成PostgreSQL CA证书
+        scope: control
+        command: bash
+        args: ["-lc", "cd ${cluster.remote_root}/cloudhis/postgresql/ssl && ${cluster.resource_dir}/controller-render/cfssl gencert -initca ca-csr.json | ${cluster.resource_dir}/controller-render/cfssljson -bare ca"]
+        creates: ${cluster.remote_root}/cloudhis/postgresql/ssl/ca.pem
+      - type: run_command
+        name: 生成PostgreSQL etcd证书
+        scope: control
+        command: bash
+        args: ["-lc", "cd ${cluster.remote_root}/cloudhis/postgresql/ssl && ${cluster.resource_dir}/controller-render/cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=server etcd-csr.json | ${cluster.resource_dir}/controller-render/cfssljson -bare etcd"]
+        creates: ${cluster.remote_root}/cloudhis/postgresql/ssl/etcd.pem
+      - type: run_command
+        name: 生成Patroni REST证书
+        scope: control
+        command: bash
+        args: ["-lc", "cd ${cluster.remote_root}/cloudhis/postgresql/ssl && ${cluster.resource_dir}/controller-render/cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=server patroni-csr.json | ${cluster.resource_dir}/controller-render/cfssljson -bare patroni"]
+        creates: ${cluster.remote_root}/cloudhis/postgresql/ssl/patroni.pem
+      - type: run_command
+        name: 生成PostgreSQL服务端证书
+        scope: control
+        command: bash
+        args: ["-lc", "cd ${cluster.remote_root}/cloudhis/postgresql/ssl && ${cluster.resource_dir}/controller-render/cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=server postgresql-csr.json | ${cluster.resource_dir}/controller-render/cfssljson -bare postgresql"]
+        creates: ${cluster.remote_root}/cloudhis/postgresql/ssl/postgresql.pem
+      - type: render_template
+        name: 渲染Patroni主配置patroni.yml
+        source: postgresql/templates/patroni.yml.tmpl
+        target: ${cluster.remote_root}/cloudhis/postgresql/${host.address}/patroni.yml
+        mode: "0644"
+        template_vars:
+          env_name: ${env.name}
+          host_address: ${host.address}
+          patroni_etcd_hosts: ${postgresql.patroni_etcd_hosts}
+          data_dir: ${postgresql.data_dir}
+          install_dir: ${postgresql.install_dir}
+          repl_password: ${postgresql.repl_password}
+          superuser_password: ${postgresql.superuser_password}
+          pg_shared_buffers: ${postgresql.shared_buffers}
+          pg_effective_cache_size: ${postgresql.effective_cache_size}
+      - type: render_template
+        name: 渲染PostgreSQL单机postgresql.conf
+        source: postgresql/templates/postgresql.conf.tmpl
+        target: ${cluster.remote_root}/cloudhis/postgresql/${host.address}/postgresql.conf
+        mode: "0600"
+        template_vars:
+          pg_shared_buffers: ${postgresql.shared_buffers}
+          pg_effective_cache_size: ${postgresql.effective_cache_size}
+      - type: render_template
+        name: 渲染PostgreSQL单机pg_hba.conf
+        source: postgresql/templates/pg_hba.conf.tmpl
+        target: ${cluster.remote_root}/cloudhis/postgresql/${host.address}/pg_hba.conf
+        mode: "0600"
+        template_vars: {}
+  - id: postgresql.deploy.001.install-and-configure
+    name: 部署postgresql组件-001任务-安装PostgreSQL和Patroni高可用服务
+    phase: deploy
+    actions:
+      - type: yum_package
+        name: 安装PostgreSQL编译依赖包
+        state: present
+        packages: [gcc, wget, curl, readline-devel, zlib, zlib-devel, bzip2, bzip2-devel, make, automake, gcc-c++, openssl-devel, python-psycopg2, lrzsz, jq, libxml2, libxml2-devel, e2fsprogs-devel, uuid-devel, libuuid-devel, libffi, libffi-devel, ncurses, ncurses-devel, python3-devel, watchdog]
+      - type: system_group
+        name: 创建postgres用户组
+        state: present
+        group: postgres
+        ignore_error: true
+      - type: system_user
+        name: 创建postgres系统用户
+        state: present
+        user: postgres
+        group: postgres
+        home: /home/postgres
+        shell: /bin/bash
+        create_home: true
+        ignore_error: true
+      - type: backup_file
+        name: 备份sudoers配置
+        target: /etc/sudoers
+      - type: run_command
+        name: 配置postgres用户sudo权限
+        command: bash
+        args: ["-lc", "grep -Eq '^postgres[[:space:]]+ALL=\\(root\\)[[:space:]]+NOPASSWD:[[:space:]]+ALL$' /etc/sudoers || { echo 'postgres        ALL=(root)        NOPASSWD: ALL' >> /etc/sudoers; visudo -cf /etc/sudoers; }"]
+      - type: run_command
+        name: 设置postgres用户密码
+        # 密码通过 ${postgresql.os_user_password} 配置,默认值在
+        # internal/dfctlv2/defaults/components/postgresql.yml,运维
+        # 可在 /api/overrides/postgresql 改 os_user_password 字段。
+        command: bash
+        args: ["-lc", "echo \"postgres:${postgresql.os_user_password}\" | chpasswd"]
+      - type: run_command
+        name: 配置PostgreSQL环境变量到root bashrc和profile
+        command: bash
+        args: ["-lc", "for f in /root/.bashrc /etc/profile; do touch \"$f\"; for line in 'export PGHOME=/opt/PostgreSQL/14' 'export PGDATA=/opt/PostgreSQL/14/data' 'export LD_LIBRARY_PATH=/opt/PostgreSQL/14/lib' 'export PATH=$PATH:$HOME/bin:/opt/PostgreSQL/14/bin' 'export ETCDCTL_API=3' 'export PATRONICTL_CONFIG_FILE=/etc/patroni/patroni.yml'; do grep -qxF \"$line\" \"$f\" || printf '%s\\n' \"$line\" >> \"$f\"; done; done"]
+      - type: record_path_state
+        name: 记录PostgreSQL安装目录部署前状态
+        target: /opt/PostgreSQL
+      - type: record_path_state
+        name: 记录etcd数据目录部署前状态
+        target: /var/lib/etcd
+      - type: extract_archive
+        name: 解压PostgreSQL源码包
+        source: postgresql/postgresql-14.19.tar.gz
+        target: /opt
+        creates: /opt/postgresql-14.19
+      - type: run_command
+        name: 配置PostgreSQL源码
+        command: ./configure
+        work_dir: /opt/postgresql-14.19
+        args: ["--prefix=/opt/PostgreSQL/14", "--with-pgport=5432", "--with-python", "--with-openssl", "--with-uuid=ossp", "--with-libxml"]
+        creates: /opt/postgresql-14.19/GNUmakefile
+      - type: run_command
+        name: 编译PostgreSQL源码
+        command: gmake
+        work_dir: /opt/postgresql-14.19
+        args: ["-j", "8", "world"]
+        creates: /opt/postgresql-14.19/src/backend/postgres
+      - type: run_command
+        name: 安装PostgreSQL
+        command: make
+        work_dir: /opt/postgresql-14.19
+        args: ["install-world"]
+        creates: /opt/PostgreSQL/14/bin/postgres
+      - type: ensure_dir
+        name: 创建Patroni配置目录
+        target: /etc/patroni
+        mode: "0700"
+      - type: ensure_dir
+        name: 创建Patroni证书目录
+        target: /etc/patroni/ssl
+        mode: "0700"
+      - type: ensure_dir
+        name: 创建etcd数据目录
+        target: /var/lib/etcd
+        mode: "0700"
+      - type: ensure_dir
+        name: 创建etcd配置父目录
+        target: /etc/etcd
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建etcd证书目录
+        target: /etc/etcd/ssl
+        mode: "0700"
+      - type: ensure_dir
+        name: 创建PostgreSQL数据目录
+        target: /opt/PostgreSQL/14/data
+        mode: "0700"
+      - type: ensure_dir
+        name: 创建PostgreSQL归档目录
+        target: /opt/PostgreSQL/14/archive
+        mode: "0700"
+      - type: copy_file
+        name: 拷贝Patroni离线pip包
+        source: postgresql/pg_pip.zip
+        target: /opt/pg_pip.zip
+        mode: "0644"
+      - type: copy_file
+        name: 拷贝Patroni requirements.txt
+        source: postgresql/requirements.txt
+        target: /opt/requirements.txt
+        mode: "0644"
+      - type: extract_archive
+        name: 解压Patroni pip离线依赖包
+        source: postgresql/pg_pip.zip
+        target: /opt
+        creates: /opt/pg_pip
+      - type: run_command
+        name: 全局安装Patroni离线依赖
+        command: pip3
+        args: ["install", "--no-index", "--find-links=/opt/pg_pip", "-r", "/opt/requirements.txt"]
+        creates: /usr/local/bin/patroni
+      - type: copy_file
+        name: 复制etcd二进制文件
+        source: postgresql/etcd
+        target: /usr/local/bin/etcd
+        mode: "0755"
+        creates: /usr/local/bin/etcd
+      - type: copy_file
+        name: 复制etcdctl二进制文件
+        source: postgresql/etcdctl
+        target: /usr/local/bin/etcdctl
+        mode: "0755"
+        creates: /usr/local/bin/etcdctl
+      - type: copy_path
+        name: 分发etcd CA证书
+        source: ${cluster.remote_root}/cloudhis/postgresql/ssl/ca.pem
+        target: /etc/etcd/ssl/ca.pem
+        mode: "0644"
+      - type: copy_path
+        name: 分发etcd服务证书
+        source: ${cluster.remote_root}/cloudhis/postgresql/ssl/etcd.pem
+        target: /etc/etcd/ssl/etcd.pem
+        mode: "0644"
+      - type: copy_path
+        name: 分发etcd服务私钥
+        source: ${cluster.remote_root}/cloudhis/postgresql/ssl/etcd-key.pem
+        target: /etc/etcd/ssl/etcd-key.pem
+        mode: "0600"
+      - type: copy_path
+        name: 分发Patroni CA证书
+        source: ${cluster.remote_root}/cloudhis/postgresql/ssl/ca.pem
+        target: /etc/patroni/ssl/ca.pem
+        mode: "0644"
+      - type: copy_path
+        name: 分发Patroni REST证书
+        source: ${cluster.remote_root}/cloudhis/postgresql/ssl/patroni.pem
+        target: /etc/patroni/ssl/patroni.pem
+        mode: "0644"
+      - type: copy_path
+        name: 分发Patroni REST私钥
+        source: ${cluster.remote_root}/cloudhis/postgresql/ssl/patroni-key.pem
+        target: /etc/patroni/ssl/patroni-key.pem
+        mode: "0600"
+      - type: copy_path
+        name: 分发PostgreSQL服务端证书
+        source: ${cluster.remote_root}/cloudhis/postgresql/ssl/postgresql.pem
+        target: /etc/patroni/ssl/server.crt
+        mode: "0644"
+      - type: copy_path
+        name: 分发PostgreSQL服务端私钥
+        source: ${cluster.remote_root}/cloudhis/postgresql/ssl/postgresql-key.pem
+        target: /etc/patroni/ssl/server.key
+        mode: "0600"
+      - type: backup_file
+        name: 备份Patroni主配置patroni.yml
+        target: /etc/patroni/patroni.yml
+      - type: copy_path
+        name: 部署Patroni主配置patroni.yml
+        source: ${cluster.remote_root}/cloudhis/postgresql/${host.address}/patroni.yml
+        target: /etc/patroni/patroni.yml
+        mode: "0644"
+      - type: backup_file
+        name: 备份etcd systemd服务文件
+        target: /etc/systemd/system/etcd.service
+      - type: render_template
+        name: 渲染PostgreSQL HA etcd服务文件
+        source: postgresql/templates/etcd.service.tmpl
+        target: /etc/systemd/system/etcd.service
+        mode: "0644"
+        template_vars:
+          host_address: ${host.address}
+          etcd_nodes: ${postgresql.etcd_nodes}
+      - type: backup_file
+        name: 备份PostgreSQL单机服务文件
+        target: /etc/systemd/system/postgresql.service
+      - type: render_template
+        name: 渲染PostgreSQL单机systemd服务文件
+        source: postgresql/templates/postgresql.service.tmpl
+        target: /etc/systemd/system/postgresql.service
+        mode: "0644"
+        template_vars: {}
+      - type: backup_file
+        name: 备份Patroni systemd服务文件
+        target: /etc/systemd/system/patroni.service
+      - type: render_template
+        name: 渲染Patroni systemd服务文件
+        source: postgresql/templates/patroni.service.tmpl
+        target: /etc/systemd/system/patroni.service
+        mode: "0644"
+        template_vars: {}
+      - type: run_command
+        name: 单机模式初始化前预先设置PostgreSQL相关目录属主
+        command: chown
+        args: ["-R", "postgres:postgres", "/home/postgres", "/opt/PostgreSQL", "/etc/patroni", "/etc/etcd/ssl", "/var/lib/etcd"]
+      - type: run_command
+        name: 单机模式初始化数据库
+        command: bash
+        args: ["-lc", "if [ \"${postgresql.mode}\" = \"single\" ]; then test -e /opt/PostgreSQL/14/data/PG_VERSION || sudo -u postgres /opt/PostgreSQL/14/bin/initdb -D /opt/PostgreSQL/14/data; fi"]
+      - type: copy_path
+        name: 单机模式部署postgresql.conf
+        source: ${cluster.remote_root}/cloudhis/postgresql/${host.address}/postgresql.conf
+        target: /opt/PostgreSQL/14/data/postgresql.conf
+        mode: "0600"
+        # HA 模式下 patroni 自己负责 initdb + 写 postgresql.conf,如果
+        # 我们在 patroni 启动前把 conf 拷进 data dir,patroni 看见目录
+        # 不空就拒绝 initdb 进入死循环。only_when 把 copy_path 限制
+        # 在 single 模式,HA 模式整个 action 跳过。
+        only_when: ${postgresql.mode}=single
+      - type: copy_path
+        name: 单机模式部署pg_hba.conf
+        source: ${cluster.remote_root}/cloudhis/postgresql/${host.address}/pg_hba.conf
+        target: /opt/PostgreSQL/14/data/pg_hba.conf
+        mode: "0600"
+        only_when: ${postgresql.mode}=single
+      - type: run_command
+        name: 单机模式收尾postgresql配置属主
+        command: bash
+        args: ["-lc", "if [ \"${postgresql.mode}\" = \"single\" ]; then chown postgres:postgres /opt/PostgreSQL/14/data/postgresql.conf /opt/PostgreSQL/14/data/pg_hba.conf; fi"]
+      - type: run_command
+        name: 设置PostgreSQL相关目录属主为postgres
+        command: chown
+        args: ["-R", "postgres:postgres", "/home/postgres", "/opt/PostgreSQL", "/etc/patroni", "/etc/etcd/ssl", "/var/lib/etcd"]
+      - type: run_command
+        name: 修正Patroni pgpass权限
+        command: bash
+        args: ["-lc", "test ! -e /home/postgres/pgpass || { chown postgres:postgres /home/postgres/pgpass && chmod 0600 /home/postgres/pgpass; }"]
+      - type: run_command
+        name: 加载softdog watchdog内核模块
+        command: bash
+        args: ["-lc", "modprobe softdog || true; test -e /dev/watchdog && chmod 0666 /dev/watchdog || true"]
+      # softdog 模块通过 modprobe 加载是临时的,reboot 后失效。
+      # 写入 /etc/modules-load.d/softdog.conf 让 systemd-modules-load
+      # 在每次启动时自动加载,patroni watchdog 才能持续工作。
+      - type: backup_file
+        name: 备份softdog modules-load配置
+        target: /etc/modules-load.d/softdog.conf
+      - type: write_file
+        name: 持久化softdog内核模块加载配置
+        target: /etc/modules-load.d/softdog.conf
+        content: "softdog\n"
+        mode: "0644"
+      # watchdog systemd 服务跟 etcd/patroni 一样需要 reset-failed
+      # 兜底,否则上一次 deploy 失败遗留的 failed status 会让本次
+      # start 直接失败(systemd 拒绝 start 处于 failed 状态的服务)。
+      - type: run_command
+        name: 重置watchdog服务失败状态
+        command: systemctl
+        args: ["reset-failed", "watchdog"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动watchdog服务
+        service: watchdog
+        enabled: true
+        state: started
+        ignore_error: true
+      - type: backup_file
+        name: 备份cron.allow配置
+        target: /etc/cron.allow
+      - type: run_command
+        name: 允许postgres用户使用crontab
+        command: bash
+        args: ["-lc", "touch /etc/cron.allow && grep -qxF postgres /etc/cron.allow || echo postgres >> /etc/cron.allow"]
+      - type: backup_file
+        name: 备份PostgreSQL归档日志清理脚本
+        target: /home/postgres/del_pg_archive.sh
+      - type: render_template
+        name: 渲染PostgreSQL归档日志清理脚本
+        source: postgresql/templates/del_pg_archive.sh.tmpl
+        target: /home/postgres/del_pg_archive.sh
+        mode: "0755"
+        template_vars: {}
+      - type: run_command
+        name: 设置归档日志清理脚本属主为postgres
+        command: chown
+        args: ["postgres:postgres", "/home/postgres/del_pg_archive.sh"]
+      - type: cron_line
+        name: 安装PostgreSQL归档清理定时任务
+        state: present
+        user: postgres
+        marker: PostgreSQL Archive Cleanup
+        line: "0 2 * * * /home/postgres/del_pg_archive.sh # PostgreSQL Archive Cleanup"
+      - type: ensure_dir
+        name: 创建PostgreSQL备份目录
+        target: /opt/pgbackup
+        mode: "0700"
+      - type: run_command
+        name: 设置PostgreSQL备份目录属主为postgres
+        command: chown
+        args: ["postgres:postgres", "/opt/pgbackup"]
+      - type: backup_file
+        name: 备份PostgreSQL备份脚本
+        target: /home/postgres/pg-backup
+      - type: render_template
+        name: 渲染PostgreSQL备份脚本
+        source: postgresql/templates/pg-backup.tmpl
+        target: /home/postgres/pg-backup
+        mode: "0755"
+        template_vars: {}
+      - type: run_command
+        name: 设置PostgreSQL备份脚本属主为postgres
+        command: chown
+        args: ["postgres:postgres", "/home/postgres/pg-backup"]
+      - type: cron_line
+        name: 安装PostgreSQL备份定时任务
+        state: present
+        user: postgres
+        marker: PostgreSQL Backup
+        line: "40 3 * * * /home/postgres/pg-backup > /opt/pgbackup/backup.log 2>&1 # PostgreSQL Backup"
+        only_host_address: ${postgresql.backup_address}
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 根据postgresql.mode决定是否启动单机服务
+        command: bash
+        args: ["-lc", "if [ \"${postgresql.mode}\" = \"single\" ]; then systemctl enable --now postgresql; else echo \"postgresql.mode=${postgresql.mode}, skip single postgresql.service\"; fi"]
+  - id: postgresql.deploy.002.start-etcd
+    name: 部署postgresql组件-002任务-启动etcd集群
+    phase: deploy
+    actions:
+      - type: run_command
+        name: 重置etcd服务失败状态
+        command: systemctl
+        args: ["reset-failed", "etcd"]
+        ignore_error: true
+      - type: run_command
+        name: 启动PostgreSQL HA etcd服务
+        command: bash
+        args: ["-lc", "if [ \"${postgresql.mode}\" = \"single\" ]; then echo 'postgresql.mode=single, skip etcd'; else systemctl enable etcd && systemctl start --no-block etcd; fi"]
+  - id: postgresql.deploy.003.start-patroni
+    name: 部署postgresql组件-003任务-启动Patroni服务
+    phase: deploy
+    actions:
+      - type: run_command
+        name: 重置patroni服务失败状态
+        command: systemctl
+        args: ["reset-failed", "patroni"]
+        ignore_error: true
+      - type: run_command
+        name: 启动Patroni高可用服务
+        command: bash
+        args: ["-lc", "if [ \"${postgresql.mode}\" = \"single\" ]; then echo 'postgresql.mode=single, skip patroni'; else systemctl enable --now patroni; fi"]
+  - id: postgresql.test.001.sql-check
+    name: 测试postgresql组件-001任务-检查Patroni和SQL连接
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查PostgreSQL服务运行状态
+        command: bash
+        args: ["-lc", "if [ \"${postgresql.mode}\" = \"single\" ]; then systemctl is-active --quiet postgresql; else systemctl is-active --quiet patroni; fi"]
+      - type: tcp_check
+        name: 检查PostgreSQL 5432端口连通性
+        address: ${host.address}:5432
+        timeout: 3s
+        attempts: 30
+        interval: 3s
+  - id: postgresql.rollback.001.clean
+    name: 清理postgresql组件-001任务-停止服务删除数据和全局Patroni文件
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止Patroni服务
+        service: patroni
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止PostgreSQL HA etcd服务
+        service: etcd
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止PostgreSQL单机服务
+        service: postgresql
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止watchdog服务
+        service: watchdog
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: cron_line
+        name: 删除PostgreSQL归档清理定时任务
+        state: absent
+        user: postgres
+        marker: PostgreSQL Archive Cleanup
+        ignore_error: true
+      - type: cron_line
+        name: 删除PostgreSQL备份定时任务
+        state: absent
+        user: postgres
+        marker: PostgreSQL Backup
+        ignore_error: true
+      - type: run_command
+        name: 卸载Patroni pip依赖
+        command: bash
+        args: ["-lc", "test ! -f /opt/requirements.txt || python3 -m pip uninstall -y -r /opt/requirements.txt"]
+        ignore_error: true
+      - type: restore_file
+        name: 恢复Patroni systemd服务文件
+        target: /etc/systemd/system/patroni.service
+      - type: restore_file
+        name: 恢复etcd systemd服务文件
+        target: /etc/systemd/system/etcd.service
+      - type: restore_file
+        name: 恢复PostgreSQL单机服务文件
+        target: /etc/systemd/system/postgresql.service
+      - type: restore_file
+        name: 恢复Patroni主配置patroni.yml
+        target: /etc/patroni/patroni.yml
+      - type: restore_file
+        name: 恢复sudoers配置
+        target: /etc/sudoers
+      - type: run_command
+        name: 清理PostgreSQL环境变量
+        command: bash
+        args: ["-lc", "for f in /root/.bashrc /etc/profile; do [ -f \"$f\" ] && sed -i '/^export PGHOME=/d;/^export PGDATA=/d;/^export LD_LIBRARY_PATH=.*PostgreSQL/d;/^export PATH=.*PostgreSQL/d;/^export ETCDCTL_API=3$/d;/^export PATRONICTL_CONFIG_FILE=\\/etc\\/patroni\\/patroni.yml$/d' \"$f\" || true; done"]
+        ignore_error: true
+      - type: restore_file
+        name: 恢复cron.allow配置
+        target: /etc/cron.allow
+      - type: remove_path
+        name: 删除PostgreSQL归档日志清理脚本
+        target: /home/postgres/del_pg_archive.sh
+      - type: remove_path
+        name: 删除PostgreSQL备份脚本
+        target: /home/postgres/pg-backup
+      - type: remove_path
+        name: 删除PostgreSQL安装目录
+        target: /opt/PostgreSQL
+      - type: remove_path
+        name: 删除PostgreSQL备份目录
+        target: /opt/pgbackup
+      - type: remove_path
+        name: 删除etcd数据目录
+        target: /var/lib/etcd
+      - type: remove_path
+        name: 删除etcd证书目录
+        target: /etc/etcd/ssl
+      - type: remove_path_if_created
+        name: 删除etcd父目录
+        target: /etc/etcd
+      - type: restore_file
+        name: 恢复softdog modules-load配置
+        target: /etc/modules-load.d/softdog.conf
+      - type: remove_path_if_untracked
+        name: 删除softdog modules-load配置残留
+        target: /etc/modules-load.d/softdog.conf
+      - type: remove_path
+        name: 删除Patroni配置目录
+        target: /etc/patroni
+      - type: remove_path
+        name: 删除PostgreSQL源码目录
+        target: /opt/postgresql-14.19
+      - type: remove_path
+        name: 删除Patroni pip离线包目录
+        target: /opt/pg_pip
+      - type: remove_path
+        name: 删除Patroni pip离线包
+        target: /opt/pg_pip.zip
+      - type: remove_path
+        name: 删除Patroni requirements
+        target: /opt/requirements.txt
+      - type: remove_path
+        name: 删除postgres home目录
+        target: /home/postgres
+      - type: system_user
+        name: 删除postgres系统用户
+        state: absent
+        user: postgres
+        ignore_error: true
+      - type: system_group
+        name: 删除postgres用户组
+        state: absent
+        group: postgres
+        ignore_error: true
+      # Control-side render output: PKI under cloudhis/postgresql/ssl/
+      # plus per-host patroni.yml / postgresql.conf / pg_hba.conf under
+      # cloudhis/postgresql/<ip>/. "Whoever deploys it cleans it" —
+      # if rollback leaves these around, the next deploy's `creates:`
+      # short-circuit reuses stale CAs / certs even when the operator
+      # changed host selection, producing the kind of host-mismatch
+      # bugs that masquerade as deploy success.
+      - type: run_command
+        name: 删除PostgreSQL控制端生成目录(cloudhis/postgresql)
+        scope: control
+        command: bash
+        args:
+          - -lc
+          - |
+            rm -rf "${cluster.remote_root}/cloudhis/postgresql"
+        ignore_error: true
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: postgresql.residue.001.check-clean
+    name: 残留检查postgresql组件-001任务-确认PostgreSQL目录已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认PostgreSQL安装目录已删除
+        command: test
+        args: ["!", "-e", "/opt/PostgreSQL"]
+      - type: run_command
+        name: 确认PostgreSQL源码目录已删除
+        command: test
+        args: ["!", "-e", "/opt/postgresql-14.19"]
+      - type: run_command
+        name: 确认归档清理脚本已删除
+        command: test
+        args: ["!", "-e", "/home/postgres/del_pg_archive.sh"]
+      - type: run_command
+        name: 确认备份脚本已删除
+        command: test
+        args: ["!", "-e", "/home/postgres/pg-backup"]
+      - type: run_command
+        name: 确认归档清理定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -u postgres -l 2>/dev/null | grep -F 'PostgreSQL Archive Cleanup')"]
+      - type: run_command
+        name: 确认PostgreSQL环境变量已从profile清理
+        command: bash
+        args: ["-lc", "! grep -qE '^export (PGHOME|PGDATA|PATRONICTL_CONFIG_FILE)=' /etc/profile /root/.bashrc 2>/dev/null"]
+      - type: run_command
+        name: 确认备份定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -u postgres -l 2>/dev/null | grep -F 'PostgreSQL Backup')"]
+      - type: run_command
+        name: 确认控制端PostgreSQL生成目录已删除
+        scope: control
+        command: bash
+        args:
+          - -lc
+          - |
+            test ! -e "${cluster.remote_root}/cloudhis/postgresql"

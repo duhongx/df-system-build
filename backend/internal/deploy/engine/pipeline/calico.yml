@@ -1,0 +1,244 @@
+display_name: calico
+enabled: true
+order: 11
+depends_on: [master, node]
+target_roles: [calico]
+tasks:
+  - id: calico.preflight.001.check-resources
+    name: 预检查calico组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查Calico离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+      - type: kubernetes_artifacts_check
+        name: 校验当前主机在K8s节点快照内
+        target: ${cluster.remote_root}/cloudhis/kubernetes
+  - id: calico.render.001.render-manifest
+    name: 生成calico组件-001任务-生成网络插件资源
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建Calico生成配置目录
+        target: ${cluster.remote_root}/cloudhis/calico
+        mode: "0755"
+      - type: run_command
+        name: 渲染Calico资源
+        scope: control
+        command: bash
+        args:
+          - -lc
+          - |
+            cp ${cluster.resource_dir}/calico/templates/calico.yaml.j2 ${cluster.remote_root}/cloudhis/calico/calico.yaml &&
+            sed -i "s|{{ ETCD_ENDPOINTS }}|${etcd.endpoints}|g" ${cluster.remote_root}/cloudhis/calico/calico.yaml &&
+            sed -i "s|{{ CLUSTER_CIDR }}|${network.cluster_cidr}|g" ${cluster.remote_root}/cloudhis/calico/calico.yaml &&
+            sed -i "s|__CNI_MTU__|0|g" ${cluster.remote_root}/cloudhis/calico/calico.yaml &&
+            sed -i "s|{{ groups\['nexus'\]\[0\] }}|${nexus.address}|g" ${cluster.remote_root}/cloudhis/calico/calico.yaml
+  - id: calico.deploy.001.apply-manifest
+    name: 部署calico组件-001任务-应用网络插件资源并安装calicoctl
+    phase: deploy
+    actions:
+      - type: record_path_state
+        name: 记录Calico配置目录部署前状态
+        target: /etc/calico
+      - type: record_path_state
+        name: 记录Calico SSL证书目录部署前状态
+        target: /etc/calico/ssl
+      - type: ensure_dir
+        name: 创建Calico SSL证书目录
+        target: /etc/calico/ssl
+        mode: "0755"
+      - type: backup_file
+        name: 备份Calico CA证书
+        target: /etc/calico/ssl/ca.pem
+      - type: copy_path
+        name: 复制Calico CA证书
+        source: ${cluster.remote_root}/cloudhis/kubernetes/ssl/ca.pem
+        target: /etc/calico/ssl/ca.pem
+        mode: "0644"
+      - type: backup_file
+        name: 备份Calico节点证书
+        target: /etc/calico/ssl/calico.pem
+      - type: copy_path
+        name: 复制Calico节点证书
+        source: ${cluster.remote_root}/cloudhis/kubernetes/ssl/calico.pem
+        target: /etc/calico/ssl/calico.pem
+        mode: "0644"
+      - type: backup_file
+        name: 备份Calico节点私钥
+        target: /etc/calico/ssl/calico-key.pem
+      - type: copy_path
+        name: 复制Calico节点私钥
+        source: ${cluster.remote_root}/cloudhis/kubernetes/ssl/calico-key.pem
+        target: /etc/calico/ssl/calico-key.pem
+        mode: "0600"
+      - type: run_command
+        name: 创建Calico etcd证书Secret
+        scope: control
+        command: bash
+        args:
+          - -lc
+          - |
+            cd ${cluster.remote_root}/cloudhis/kubernetes/ssl &&
+            kubectl --kubeconfig /root/.kube/config -n kube-system create secret generic calico-etcd-secrets \
+              --from-file=etcd-ca=ca.pem \
+              --from-file=etcd-key=calico-key.pem \
+              --from-file=etcd-cert=calico.pem \
+              --dry-run=client -o yaml |
+            kubectl --kubeconfig /root/.kube/config apply -f -
+      - type: run_command
+        name: 按diff应用Calico网络插件K8s资源
+        scope: control
+        command: bash
+        args:
+          - -lc
+          - |
+            set +e
+            kubectl --kubeconfig /root/.kube/config diff -f ${cluster.remote_root}/cloudhis/calico/calico.yaml
+            rc=$?
+            set -e
+            if [ "$rc" -eq 1 ]; then
+              kubectl --kubeconfig /root/.kube/config apply -f ${cluster.remote_root}/cloudhis/calico/calico.yaml
+            elif [ "$rc" -ne 0 ]; then
+              exit "$rc"
+            fi
+      - type: remove_path
+        name: 删除默认CNI配置
+        target: /etc/cni/net.d/10-default.conf
+      - type: backup_file
+        name: 备份calicoctl二进制文件
+        target: /usr/local/bin/calicoctl
+      - type: copy_file
+        name: 复制calicoctl二进制文件
+        source: calico/calicoctl
+        target: /usr/local/bin/calicoctl
+        mode: "0755"
+      - type: render_template
+        name: 渲染calicoctl配置文件
+        source: calico/templates/calicoctl.cfg.tmpl
+        target: /etc/calico/calicoctl.cfg
+        mode: "0644"
+        template_vars:
+          ETCD_ENDPOINTS: ${etcd.endpoints}
+  - id: calico.test.001.check-pods
+    name: 测试calico组件-001任务-检查网络插件资源
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查Calico DaemonSet资源存在
+        scope: control
+        command: kubectl
+        args: ["--kubeconfig", "/root/.kube/config", "-n", "kube-system", "get", "ds", "calico-node"]
+      - type: run_command
+        name: 等待Calico节点Pod就绪
+        scope: control
+        command: kubectl
+        args: ["--kubeconfig", "/root/.kube/config", "-n", "kube-system", "wait", "--for=condition=Ready", "pod", "-l", "k8s-app=calico-node", "--timeout=300s"]
+  - id: calico.rollback.001.clean
+    name: 清理calico组件-001任务-删除网络插件资源和工具
+    phase: rollback
+    actions:
+      - type: kubectl_delete
+        name: 删除Calico网络插件K8s资源
+        file: ${cluster.remote_root}/cloudhis/calico/calico.yaml
+        kubeconfig: /root/.kube/config
+        ignore_not_found: true
+        ignore_error: true
+      - type: run_command
+        name: 删除Calico etcd证书Secret
+        scope: control
+        command: kubectl
+        args: ["--kubeconfig", "/root/.kube/config", "-n", "kube-system", "delete", "secret", "calico-etcd-secrets", "--ignore-not-found=true"]
+        ignore_error: true
+      - type: restore_file
+        name: 恢复Calico节点私钥
+        target: /etc/calico/ssl/calico-key.pem
+      - type: restore_file
+        name: 恢复Calico节点证书
+        target: /etc/calico/ssl/calico.pem
+      - type: restore_file
+        name: 恢复Calico CA证书
+        target: /etc/calico/ssl/ca.pem
+      - type: remove_path_if_created
+        name: 删除Calico SSL证书目录
+        target: /etc/calico/ssl
+      - type: remove_path_if_created
+        name: 删除Calico配置目录
+        target: /etc/calico
+      - type: restore_file
+        name: 恢复calicoctl二进制文件
+        target: /usr/local/bin/calicoctl
+      - type: remove_path_if_untracked
+        name: 删除calicoctl二进制文件残留
+        target: /usr/local/bin/calicoctl
+      - type: remove_path
+        name: 删除Calico CNI插件calico残留
+        target: /opt/cni/bin/calico
+      - type: remove_path
+        name: 删除Calico CNI插件calico-ipam残留
+        target: /opt/cni/bin/calico-ipam
+      - type: remove_path
+        name: 删除Calico CNI配置残留
+        target: /etc/cni/net.d/10-calico.conflist
+      - type: remove_path
+        name: 删除Calico kubeconfig残留
+        target: /etc/cni/net.d/calico-kubeconfig
+      - type: remove_path
+        name: 删除Calico运行状态目录
+        target: /var/lib/calico
+      # calico-node DaemonSet ships every CNI binary it needs (loopback,
+      # flannel, tuning, host-local, portmap, bandwidth, install,
+      # plus calico/calico-ipam) into /opt/cni/bin via the install-cni
+      # initContainer's hostPath: DirectoryOrCreate volume. K8s reset
+      # never reclaims hostPath dirs, so without explicit cleanup the
+      # whole /opt/cni tree leaks across rollback/redeploy cycles and
+      # the next deploy reuses stale binaries.
+      - type: remove_path
+        name: 删除Calico CNI hostPath目录
+        target: /opt/cni
+      # var-run-calico / var-log-calico / var-run-nodeagent are the
+      # other DirectoryOrCreate hostPath volumes calico-node mounts.
+      # /var/run/calico in particular gets a cgroup2 fs mounted into
+      # /var/run/calico/cgroup by calico-node's BPF dataplane init.
+      # When the DaemonSet is killed the mount is orphaned, so we
+      # have to umount before remove_path can succeed (otherwise we
+      # hit "permission denied" trying to unlink cgroup.procs).
+      # Note: /var/run is typically a symlink to /run, and the kernel
+      # records the resolved path in /proc/self/mountinfo. Match both
+      # so we catch the mount no matter which path the kubelet
+      # supplied to runc.
+      - type: run_command
+        name: 卸载Calico运行时cgroup挂载
+        command: bash
+        args:
+          - -lc
+          - |
+            awk '$5 ~ /^(\/var)?\/run\/calico(\/|$)/ {print $5}' /proc/self/mountinfo | sort -r | while read -r mp; do
+              [ -n "$mp" ] && umount -lf "$mp" 2>/dev/null || true
+            done
+        ignore_error: true
+      - type: remove_path
+        name: 删除Calico运行时目录
+        target: /var/run/calico
+      - type: remove_path
+        name: 删除Calico CNI日志目录
+        target: /var/log/calico
+      - type: remove_path
+        name: 删除Calico节点agent socket目录
+        target: /var/run/nodeagent
+  - id: calico.residue.001.check-clean
+    name: 残留检查calico组件-001任务-确认calicoctl已恢复
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认calicoctl二进制文件已删除
+        command: test
+        args: ["!", "-e", "/usr/local/bin/calicoctl"]
+      - type: run_command
+        name: 确认Calico CNI hostPath目录已删除
+        command: test
+        args: ["!", "-e", "/opt/cni"]
+      - type: run_command
+        name: 确认Calico运行时目录已删除
+        command: test
+        args: ["!", "-e", "/var/run/calico"]

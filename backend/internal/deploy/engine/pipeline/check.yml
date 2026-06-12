@@ -1,0 +1,111 @@
+display_name: check
+enabled: true
+order: -3
+# check is the "OS-init acceptance gate": it verifies the operating
+# system was prepared per the hospital's OS-initialization runbook
+# (hostname / firewalld / SELinux / swap / ulimit / offline yum /
+# chrony / base packages / python / sysctl / journald / ssh trust /
+# sctp hardening) BEFORE any component is deployed. It is read-only:
+# any failure aborts the deploy without changing the host. dfctl does
+# NOT perform OS-level configuration itself — that's the (manual)
+# OS-initialization stage; dfctl only checks it was done.
+#
+# Runs on every host (BindAllHosts via the init/check virtual mapping).
+target_roles: [controller-render, docker, dns, df-ops, ftp, nfs, skywalking, slb, prepare, containerd, kube-lb, etcd, master, nacos, calico, node, plugin, nexus, rabbitmq, redis, minio, postgresql, elasticsearch]
+tasks:
+  - id: check.preflight.001.os-init-acceptance
+    name: 检查check组件-001任务-操作系统初始化配置验收
+    phase: preflight
+    actions:
+      - type: run_command
+        name: 检查主机名已配置
+        command: bash
+        args: ["-lc", "hostnamectl --static | grep -Ev '^(|localhost|localhost.localdomain)$'"]
+      - type: run_command
+        name: 检查firewalld已停止并禁用
+        command: bash
+        args: ["-lc", "if systemctl is-active firewalld 2>/dev/null | grep -qx active; then echo 'firewalld 仍在运行' >&2; exit 1; fi; if systemctl is-enabled firewalld 2>/dev/null | grep -qx enabled; then echo 'firewalld 仍开机自启' >&2; exit 1; fi"]
+      - type: run_command
+        name: 检查SELinux运行时已禁用
+        command: bash
+        args: ["-lc", "if command -v getenforce >/dev/null 2>&1; then getenforce | grep -qx Disabled || { echo 'getenforce 非 Disabled' >&2; exit 1; }; fi"]
+      - type: run_command
+        name: 检查SELinux配置文件已永久禁用
+        command: bash
+        args: ["-lc", "grep -Eq '^[[:space:]]*SELINUX=disabled' /etc/selinux/config || { echo '/etc/selinux/config 未设置 SELINUX=disabled(重启后会复活)' >&2; exit 1; }"]
+      - type: run_command
+        name: 检查Swap已关闭
+        command: bash
+        args: ["-lc", "test -z \"$(swapon --noheadings --show || true)\" || { echo 'swap 仍开启' >&2; exit 1; }; if grep -Ev '^\\s*#|^\\s*$' /etc/fstab | awk '$3 == \"swap\"{print}' | grep -q .; then echo 'fstab 仍有未注释的 swap 行' >&2; exit 1; fi"]
+      - type: run_command
+        name: 检查limits.conf文件句柄和进程数限制
+        command: bash
+        args: ["-lc", "for kv in 'soft nofile 100000' 'hard nofile 100000' 'soft nproc 100000' 'hard nproc 100000'; do set -- $kv; grep -Eq \"^\\*[[:space:]]+$1[[:space:]]+$2[[:space:]]+$3([[:space:]]|$)\" /etc/security/limits.conf || { echo \"limits.conf 缺少 * $1 $2 $3\" >&2; exit 1; }; grep -Eq \"^root[[:space:]]+$1[[:space:]]+$2[[:space:]]+$3([[:space:]]|$)\" /etc/security/limits.conf || { echo \"limits.conf 缺少 root $1 $2 $3\" >&2; exit 1; }; done"]
+      - type: run_command
+        name: 检查systemd服务文件句柄限制
+        command: bash
+        args: ["-lc", "v=$(systemctl show -p DefaultLimitNOFILE --value 2>/dev/null); [ -n \"$v\" ] && [ \"$v\" -ge 100000 ] || { echo \"systemd DefaultLimitNOFILE=$v < 100000(systemd 服务不读 limits.conf,必须配 system.conf.d)\" >&2; exit 1; }"]
+      - type: run_command
+        name: 检查本地离线yum源已配置
+        command: bash
+        args: ["-lc", "test -f /etc/yum.repos.d/local.repo && grep -Fq 'baseurl=file:///opt/yum' /etc/yum.repos.d/local.repo && yum -q repolist enabled >/dev/null"]
+      - type: run_command
+        name: 检查时间同步服务chronyd
+        command: bash
+        args: ["-lc", "systemctl is-active chronyd | grep -qx active && systemctl is-enabled chronyd | grep -qx enabled"]
+      - type: run_command
+        name: 检查时钟已同步到时钟源
+        command: bash
+        args: ["-lc", "chronyc -n sources 2>/dev/null | grep -qE '^\\^\\*' || { echo 'chrony 未锁定时钟源(^* 行缺失),请先 chronyc -a makestep 再复查' >&2; exit 1; }"]
+      - type: run_command
+        name: 检查基础工具包已安装
+        command: bash
+        args: ["-lc", "command -v vim >/dev/null && rpm -q wget screen net-tools lrzsz psmisc lsof unzip zip tar jq rsync openssl-devel gcc gcc-c++ make autoconf automake libtool >/dev/null"]
+      - type: run_command
+        name: 检查Python环境
+        command: bash
+        args: ["-lc", "command -v python3 >/dev/null && command -v python >/dev/null"]
+      - type: run_command
+        name: 检查inotify实例数内核参数
+        command: bash
+        args: ["-lc", "v=$(sysctl -n fs.inotify.max_user_instances 2>/dev/null); [ -n \"$v\" ] && [ \"$v\" -ge 8192 ] || { echo \"fs.inotify.max_user_instances=$v < 8192\" >&2; exit 1; }"]
+      - type: run_command
+        name: 检查通用sysctl基线参数
+        command: bash
+        args: ["-lc", "fm=$(sysctl -n fs.file-max 2>/dev/null); [ -n \"$fm\" ] && [ \"$fm\" -ge 6553600 ] || { echo \"fs.file-max=$fm < 6553600\" >&2; exit 1; }; sm=$(sysctl -n net.core.somaxconn 2>/dev/null); [ -n \"$sm\" ] && [ \"$sm\" -ge 32768 ] || { echo \"net.core.somaxconn=$sm < 32768\" >&2; exit 1; }"]
+      - type: run_command
+        name: 检查SCTP内核模块已禁用
+        command: bash
+        args: ["-lc", "grep -rqE '^[[:space:]]*install[[:space:]]+sctp[[:space:]]+/bin/(true|false)' /etc/modprobe.d/ || { echo 'SCTP 模块未在 /etc/modprobe.d/ 禁用(安全加固)' >&2; exit 1; }"]
+      - type: run_command
+        name: 检查持久化journald
+        command: bash
+        args: ["-lc", "systemctl is-active systemd-journald | grep -qx active && test -d /var/log/journal || { echo 'journald 未运行或 /var/log/journal 持久化目录缺失' >&2; exit 1; }"]
+      - type: run_command
+        name: 检查SSH互信已配置
+        command: bash
+        args: ["-lc", "ls /root/.ssh/id_* >/dev/null 2>&1 || { echo '/root/.ssh 下无 SSH 私钥' >&2; exit 1; }; ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 localhost true || { echo 'ssh 免密登录 localhost 失败(SSH 互信未配置)' >&2; exit 1; }"]
+  - id: check.test.001.os-init-acceptance
+    name: 测试check组件-001任务-复用操作系统初始化验收
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查systemd-journald服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "systemd-journald"]
+  - id: check.rollback.001.noop
+    name: 回滚check组件-001任务-验收检查不产生部署资源
+    phase: rollback
+    actions:
+      - type: run_command
+        name: 确认check组件无回滚动作
+        command: bash
+        args: ["-lc", "echo check component has no deployment-owned rollback action"]
+  - id: check.residue.001.noop
+    name: 残留检查check组件-001任务-验收检查不产生部署资源
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认check组件无部署产物
+        command: bash
+        args: ["-lc", "echo check component has no deployment-owned residue"]

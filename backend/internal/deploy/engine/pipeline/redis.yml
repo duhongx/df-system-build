@@ -1,0 +1,239 @@
+display_name: redis
+enabled: true
+order: 15
+target_roles: [redis]
+tasks:
+  - id: redis.preflight.001.check-resources
+    name: 预检查redis组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查Redis离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: redis.deploy.001.install-and-start
+    name: 部署redis组件-001任务-设置内核参数安装文件并启动服务
+    phase: deploy
+    actions:
+      - type: sysctl_set
+        name: 设置vm.overcommit_memory内核参数
+        key: vm.overcommit_memory
+        value: "1"
+        config_file: /etc/sysctl.conf
+      - type: system_group
+        name: 创建redis用户组
+        state: present
+        group: redis
+      - type: system_user
+        name: 创建redis系统用户
+        state: present
+        user: redis
+        group: redis
+        shell: /sbin/nologin
+        create_home: false
+      - type: record_path_state
+        name: 记录Redis数据目录部署前状态
+        target: ${redis.data_dir}
+      - type: record_path_state
+        name: 记录Redis日志目录部署前状态
+        target: ${redis.log_dir}
+      - type: record_path_state
+        name: 记录Redis配置目录部署前状态
+        target: ${redis.config_dir}
+      - type: ensure_dir
+        name: 创建Redis数据目录
+        target: ${redis.data_dir}
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建Redis日志目录
+        target: ${redis.log_dir}
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建Redis配置目录
+        target: ${redis.config_dir}
+        mode: "0755"
+      - type: chown
+        name: 设置Redis数据目录属主
+        target: ${redis.data_dir}
+        owner: redis
+        group: redis
+      - type: chown
+        name: 设置Redis日志目录属主
+        target: ${redis.log_dir}
+        owner: redis
+        group: redis
+      - type: backup_file
+        name: 备份redis-server二进制文件
+        target: /usr/local/bin/redis-server
+      - type: copy_file
+        name: 复制redis-server二进制文件
+        source: redis/redis-server
+        target: /usr/local/bin/redis-server
+        mode: "0755"
+      - type: backup_file
+        name: 备份redis-cli二进制文件
+        target: /usr/local/bin/redis-cli
+      - type: copy_file
+        name: 复制redis-cli二进制文件
+        source: redis/redis-cli
+        target: /usr/local/bin/redis-cli
+        mode: "0755"
+      - type: backup_file
+        name: 备份redis-sentinel二进制文件
+        target: /usr/local/bin/redis-sentinel
+      - type: copy_file
+        name: 复制redis-sentinel二进制文件
+        source: redis/redis-sentinel
+        target: /usr/local/bin/redis-sentinel
+        mode: "0755"
+      - type: backup_file
+        name: 备份redis-benchmark二进制文件
+        target: /usr/local/bin/redis-benchmark
+      - type: copy_file
+        name: 复制redis-benchmark二进制文件
+        source: redis/redis-benchmark
+        target: /usr/local/bin/redis-benchmark
+        mode: "0755"
+      - type: backup_file
+        name: 备份redis-check-aof二进制文件
+        target: /usr/local/bin/redis-check-aof
+      - type: copy_file
+        name: 复制redis-check-aof二进制文件
+        source: redis/redis-check-aof
+        target: /usr/local/bin/redis-check-aof
+        mode: "0755"
+      - type: backup_file
+        name: 备份redis-check-rdb二进制文件
+        target: /usr/local/bin/redis-check-rdb
+      - type: copy_file
+        name: 复制redis-check-rdb二进制文件
+        source: redis/redis-check-rdb
+        target: /usr/local/bin/redis-check-rdb
+        mode: "0755"
+      - type: backup_file
+        name: 备份Redis主配置redis.conf
+        target: ${redis.config_dir}/redis.conf
+      - type: render_template
+        name: 渲染Redis主配置redis.conf
+        source: redis/templates/redis.conf.tmpl
+        target: ${redis.config_dir}/redis.conf
+        mode: "0644"
+        template_vars:
+          data_dir: ${redis.data_dir}
+          log_dir: ${redis.log_dir}
+          password: ${redis.password}
+          maxmemory: ${redis.maxmemory}
+      - type: backup_file
+        name: 备份Redis systemd服务文件
+        target: /etc/systemd/system/redis.service
+      - type: render_template
+        name: 渲染Redis systemd服务文件
+        source: redis/templates/redis.service.tmpl
+        target: /etc/systemd/system/redis.service
+        mode: "0644"
+        template_vars:
+          config_dir: ${redis.config_dir}
+          password: ${redis.password}
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 重置Redis服务失败状态
+        command: systemctl
+        args: ["reset-failed", "redis"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动Redis服务
+        service: redis
+        enabled: true
+        state: started
+  - id: redis.test.001.ping
+    name: 测试redis组件-001任务-检查服务和PING
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查Redis服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "redis"]
+      - type: run_command
+        name: 执行Redis PING连通性测试
+        command: /usr/local/bin/redis-cli
+        args: ["-a", "${redis.password}", "ping"]
+  - id: redis.rollback.001.clean
+    name: 清理redis组件-001任务-停止服务恢复文件并清理数据
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止Redis服务
+        service: redis
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: restore_file
+        name: 恢复Redis systemd服务文件
+        target: /etc/systemd/system/redis.service
+      - type: restore_file
+        name: 恢复Redis主配置redis.conf
+        target: ${redis.config_dir}/redis.conf
+      - type: restore_file
+        name: 恢复redis-server二进制文件
+        target: /usr/local/bin/redis-server
+      - type: restore_file
+        name: 恢复redis-cli二进制文件
+        target: /usr/local/bin/redis-cli
+      - type: restore_file
+        name: 恢复redis-sentinel二进制文件
+        target: /usr/local/bin/redis-sentinel
+      - type: restore_file
+        name: 恢复redis-benchmark二进制文件
+        target: /usr/local/bin/redis-benchmark
+      - type: restore_file
+        name: 恢复redis-check-aof二进制文件
+        target: /usr/local/bin/redis-check-aof
+      - type: restore_file
+        name: 恢复redis-check-rdb二进制文件
+        target: /usr/local/bin/redis-check-rdb
+      - type: remove_path_if_created
+        name: 删除Redis配置目录
+        target: ${redis.config_dir}
+      - type: remove_path_if_created
+        name: 删除Redis数据目录
+        target: ${redis.data_dir}
+      - type: remove_path_if_created
+        name: 删除Redis日志目录
+        target: ${redis.log_dir}
+      - type: system_user
+        name: 删除redis系统用户
+        state: absent
+        user: redis
+        ignore_error: true
+      - type: system_group
+        name: 删除redis用户组
+        state: absent
+        group: redis
+        ignore_error: true
+      - type: sysctl_restore
+        name: 恢复vm.overcommit_memory内核参数
+        key: vm.overcommit_memory
+        config_file: /etc/sysctl.conf
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: redis.residue.001.check-clean
+    name: 残留检查redis组件-001任务-确认Redis数据目录已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认Redis数据目录已删除
+        command: test
+        args: ["!", "-e", "${redis.data_dir}"]
+      - type: run_command
+        name: 确认Redis配置目录已删除
+        command: test
+        args: ["!", "-e", "${redis.config_dir}"]
+      - type: run_command
+        name: 确认redis-server二进制已恢复
+        command: test
+        args: ["!", "-e", "/usr/local/bin/redis-server"]

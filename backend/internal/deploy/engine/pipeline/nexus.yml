@@ -1,0 +1,143 @@
+display_name: nexus
+enabled: true
+order: 0
+target_roles: [nexus]
+tasks:
+  - id: nexus.preflight.001.check-resources
+    name: 预检查nexus组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查Nexus离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: nexus.deploy.001.install-and-start
+    name: 部署nexus组件-001任务-安装Java解压Nexus并启动服务
+    phase: deploy
+    actions:
+      - type: yum_package
+        name: 安装Java运行时依赖
+        state: present
+        packages: [java-1.8.0-openjdk, java-1.8.0-openjdk-devel]
+      - type: extract_archive
+        name: 解压Nexus安装包到/opt
+        source: nexus/nexus.zip
+        target: /opt
+      - type: backup_file
+        name: 备份Nexus systemd服务文件
+        target: /etc/systemd/system/nexus.service
+      - type: render_template
+        name: 渲染Nexus systemd服务文件
+        source: nexus/templates/nexus.service.tmpl
+        target: /etc/systemd/system/nexus.service
+        mode: "0644"
+        template_vars:
+          install_dir: ${nexus.install_dir}
+      - type: backup_file
+        name: 备份Nexus镜像清理脚本
+        target: /usr/bin/del_nexus_images.sh
+      - type: render_template
+        name: 渲染Nexus镜像清理脚本
+        source: nexus/templates/del_nexus_images.sh.tmpl
+        target: /usr/bin/del_nexus_images.sh
+        mode: "0755"
+        template_vars:
+          nexus_address: ${nexus.address}
+          nexus_http_port: ${nexus.http_port}
+          nexus_admin_password: ${nexus.admin_password}
+          env_name: ${env.name}
+      - type: cron_line
+        name: 删除旧版Nexus镜像清理定时任务
+        state: absent
+        marker: cleanup-nexus-images
+        ignore_error: true
+      - type: cron_line
+        name: 安装Nexus镜像清理定时任务
+        state: present
+        marker: 清理nexus过期的镜像
+        line: "30 1 * * * /usr/bin/del_nexus_images.sh # 清理nexus过期的镜像"
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 重置Nexus服务失败状态
+        command: systemctl
+        args: ["reset-failed", "nexus"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动Nexus服务
+        service: nexus
+        enabled: true
+        state: started
+  - id: nexus.test.001.check-service
+    name: 测试nexus组件-001任务-检查服务状态和Web端口
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查Nexus服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "nexus"]
+      - type: http_check
+        name: 检查Nexus Web端口响应
+        url: http://${host.address}:${nexus.http_port}/
+        expected_status: 200
+        timeout: 5s
+        attempts: 90
+        interval: 2s
+  - id: nexus.rollback.001.clean
+    name: 清理nexus组件-001任务-停止服务恢复文件并删除数据目录
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止Nexus服务
+        service: nexus
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: cron_line
+        name: 删除Nexus镜像清理定时任务
+        state: absent
+        marker: 清理nexus过期的镜像
+        ignore_error: true
+      - type: cron_line
+        name: 删除旧版Nexus镜像清理定时任务
+        state: absent
+        marker: cleanup-nexus-images
+        ignore_error: true
+      - type: restore_file
+        name: 恢复Nexus systemd服务文件
+        target: /etc/systemd/system/nexus.service
+      - type: remove_path
+        name: 删除Nexus镜像清理脚本
+        target: /usr/bin/del_nexus_images.sh
+      - type: remove_path
+        name: 删除Nexus安装目录
+        target: ${nexus.install_dir}
+      - type: remove_path
+        name: 删除Nexus数据目录
+        target: ${nexus.data_dir}
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: nexus.residue.001.check-clean
+    name: 残留检查nexus组件-001任务-确认Nexus目录已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认Nexus数据目录已删除
+        command: test
+        args: ["!", "-e", "${nexus.data_dir}"]
+      - type: run_command
+        name: 确认Nexus镜像清理脚本已删除
+        command: test
+        args: ["!", "-e", "/usr/bin/del_nexus_images.sh"]
+      - type: run_command
+        name: 确认Nexus镜像清理定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F '清理nexus过期的镜像')"]
+      - type: run_command
+        name: 确认旧版Nexus镜像清理定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F 'cleanup-nexus-images')"]

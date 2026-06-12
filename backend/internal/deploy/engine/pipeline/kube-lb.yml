@@ -1,0 +1,115 @@
+display_name: kube-lb
+enabled: true
+order: 8
+depends_on: [prepare, slb]
+target_roles: [kube-lb]
+tasks:
+  - id: kube-lb.preflight.001.check-resources
+    name: 预检查kube-lb组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查kube-lb离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+      - type: kubernetes_artifacts_check
+        name: 校验当前主机在K8s节点快照内
+        target: ${cluster.remote_root}/cloudhis/kubernetes
+  - id: kube-lb.render.001.render-config
+    name: 生成kube-lb组件-001任务-生成本地负载均衡配置
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建kube-lb生成配置目录
+        target: ${cluster.remote_root}/cloudhis/kube-lb/${host.address}
+        mode: "0755"
+      - type: render_template
+        name: 渲染kube-lb nginx配置文件
+        source: kube-lb/templates/kube-lb.conf.tmpl
+        target: ${cluster.remote_root}/cloudhis/kube-lb/${host.address}/kube-lb.conf
+        mode: "0644"
+        template_vars:
+          master_servers: ${kube_lb.master_servers}
+  - id: kube-lb.deploy.001.install-and-start
+    name: 部署kube-lb组件-001任务-安装nginx并启动本地负载均衡
+    phase: deploy
+    actions:
+      - type: record_path_state
+        name: 记录kube-lb目录部署前状态
+        target: /etc/kube-lb
+      - type: ensure_dir
+        name: 创建kube-lb可执行文件目录
+        target: /etc/kube-lb/sbin
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建kube-lb日志目录
+        target: /etc/kube-lb/logs
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建kube-lb配置目录
+        target: /etc/kube-lb/conf
+        mode: "0755"
+      - type: copy_file
+        name: 复制kube-lb nginx二进制文件
+        source: kube-lb/nginx
+        target: /etc/kube-lb/sbin/kube-lb
+        mode: "0755"
+      - type: copy_path
+        name: 部署kube-lb nginx配置文件
+        source: ${cluster.remote_root}/cloudhis/kube-lb/${host.address}/kube-lb.conf
+        target: /etc/kube-lb/conf/kube-lb.conf
+        mode: "0644"
+      - type: backup_file
+        name: 备份kube-lb systemd服务文件
+        target: /etc/systemd/system/kube-lb.service
+      - type: render_template
+        name: 渲染kube-lb systemd服务文件
+        source: kube-lb/templates/kube-lb.service.tmpl
+        target: /etc/systemd/system/kube-lb.service
+        mode: "0644"
+        template_vars: {}
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: systemd_service
+        name: 启动kube-lb服务
+        service: kube-lb
+        enabled: true
+        state: started
+  - id: kube-lb.test.001.check-service
+    name: 测试kube-lb组件-001任务-检查本地负载均衡服务
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查kube-lb服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "kube-lb"]
+  - id: kube-lb.rollback.001.clean
+    name: 清理kube-lb组件-001任务-停止服务恢复文件并删除目录
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止kube-lb服务
+        service: kube-lb
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: restore_file
+        name: 恢复kube-lb systemd服务文件
+        target: /etc/systemd/system/kube-lb.service
+      - type: remove_path_if_created_or_untracked
+        name: 删除kube-lb目录
+        target: /etc/kube-lb
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: kube-lb.residue.001.check-clean
+    name: 残留检查kube-lb组件-001任务-确认本地负载均衡目录已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认kube-lb目录已删除
+        command: test
+        args: ["!", "-e", "/etc/kube-lb"]

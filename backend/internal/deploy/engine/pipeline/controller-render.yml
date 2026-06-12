@@ -1,0 +1,120 @@
+display_name: controller-render
+enabled: true
+order: 1
+target_roles: [controller-render]
+tasks:
+  - id: controller-render.preflight.001.check-tools
+    name: 预检查controller-render组件-001任务-检查证书生成工具
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查controller-render离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: controller-render.render.001.render-kubernetes-artifacts
+    name: 生成controller-render组件-001任务-生成Kubernetes证书和kubeconfig
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建Kubernetes SSL证书输出目录
+        target: ${cluster.remote_root}/cloudhis/kubernetes/ssl
+        mode: "0755"
+      - type: run_command
+        name: 检查cfssl证书工具可用
+        command: ${cluster.resource_dir}/controller-render/cfssl
+        args: ["version"]
+      - type: run_command
+        name: 检查kubectl命令可用
+        command: ${cluster.resource_dir}/controller-render/kubectl
+        args: ["version", "--client=true"]
+      - type: kubernetes_artifacts
+        name: 生成Kubernetes证书和kubeconfig文件
+        target: ${cluster.remote_root}/cloudhis/kubernetes
+        url: ${kubernetes.api_server}
+        address: ${slb.address}
+        line: ${master.addresses}
+        key: ${kubernetes.node_addresses}
+        value: ${kubernetes.service_ip}
+        etcd_addresses: ${etcd.addresses}
+  - id: controller-render.deploy.001.persist-generated-artifacts
+    name: 部署controller-render组件-001任务-固化生成产物目录
+    phase: deploy
+    actions:
+      - type: ensure_dir
+        name: 创建Kubernetes产物目录
+        target: ${cluster.remote_root}/cloudhis/kubernetes
+        mode: "0755"
+      - type: backup_file
+        name: 备份deploy机kubeconfig
+        target: /root/.kube/config
+      - type: copy_path
+        name: 安装deploy机kubeconfig
+        source: ${cluster.remote_root}/cloudhis/kubernetes/kubectl.kubeconfig
+        target: /root/.kube/config
+        mode: "0600"
+      - type: backup_file
+        name: 备份deploy机kubectl命令
+        target: /usr/bin/kubectl
+      - type: copy_file
+        name: 安装deploy机kubectl命令
+        source: controller-render/kubectl
+        target: /usr/bin/kubectl
+        mode: "0755"
+      # bash-completion 由 OS 初始化阶段统一安装(参见 docs/
+      # os-initialization-runbook.md),不在组件 deploy 里重复装。
+      # kubectl completion bash 在没有 bash-completion 的环境下会
+      # 静默失败,bashrc 里的 `command -v kubectl >/dev/null` 守卫
+      # 也兜得住。
+      - type: backup_file
+        name: 备份deploy机root bashrc
+        target: /root/.bashrc
+      - type: run_command
+        name: 添加kubectl命令补全到deploy机bashrc
+        command: bash
+        args: ["-lc", "grep -q 'kubectl completion bash' /root/.bashrc || echo 'command -v kubectl >/dev/null 2>&1 && source <(kubectl completion bash)' >> /root/.bashrc"]
+  - id: controller-render.test.001.check-generated-dir
+    name: 测试controller-render组件-001任务-检查生成产物目录
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查kubectl.kubeconfig文件存在
+        command: test
+        args: ["-f", "${cluster.remote_root}/cloudhis/kubernetes/kubectl.kubeconfig"]
+  - id: controller-render.rollback.001.remove-generated-artifacts
+    name: 清理controller-render组件-001任务-删除生成产物
+    phase: rollback
+    actions:
+      - type: restore_file
+        name: 恢复deploy机kubeconfig
+        target: /root/.kube/config
+      - type: restore_file
+        name: 恢复deploy机kubectl命令
+        target: /usr/bin/kubectl
+      - type: restore_file
+        name: 恢复deploy机root bashrc
+        target: /root/.bashrc
+      - type: run_command
+        name: 删除deploy机kubectl命令补全残留
+        command: bash
+        args: ["-lc", "sed -i '/kubectl completion bash/d' /root/.bashrc 2>/dev/null || true"]
+      # Scope cleanup to the cloudhis/kubernetes subtree we own.
+      # Pre-fix this used to remove the entire ${resource_dir}/cloudhis
+      # tree, which silently swept away postgresql's PKI (under
+      # cloudhis/postgresql/) and any future component that nests
+      # under cloudhis/. "Whoever deploys it cleans it" — postgresql
+      # is now responsible for cloudhis/postgresql/, controller-render
+      # for cloudhis/kubernetes/, etc.
+      - type: remove_path
+        name: 删除Kubernetes生成产物目录
+        target: ${cluster.remote_root}/cloudhis/kubernetes
+  - id: controller-render.residue.001.check-clean
+    name: 残留检查controller-render组件-001任务-确认生成产物已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认Kubernetes生成产物目录已删除
+        command: test
+        args: ["!", "-e", "${cluster.remote_root}/cloudhis/kubernetes"]
+      - type: run_command
+        name: 确认deploy机kubectl命令补全已删除
+        command: bash
+        args: ["-lc", "! grep -q 'kubectl completion bash' /root/.bashrc 2>/dev/null"]

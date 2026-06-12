@@ -1,0 +1,357 @@
+display_name: containerd
+enabled: true
+order: 7
+depends_on: [prepare]
+target_roles: [containerd]
+tasks:
+  - id: containerd.preflight.001.check-resources
+    name: 预检查containerd组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查containerd离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+      - type: kubernetes_artifacts_check
+        name: 校验当前主机在K8s节点快照内
+        target: ${cluster.remote_root}/cloudhis/kubernetes
+  - id: containerd.render.001.render-config
+    name: 生成containerd组件-001任务-生成containerd配置
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建containerd生成配置目录
+        target: ${cluster.remote_root}/cloudhis/containerd
+        mode: "0755"
+      - type: render_template
+        name: 渲染containerd主配置config.toml
+        source: containerd/templates/config.toml.tmpl
+        target: ${cluster.remote_root}/cloudhis/containerd/config.toml
+        mode: "0644"
+        template_vars:
+          root_dir: ${containerd.root_dir}
+          nexus_address: ${nexus.address}
+          nexus_admin_password: ${nexus.admin_password}
+      - type: render_template
+        name: 渲染crictl配置crictl.yaml
+        source: containerd/templates/crictl.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/containerd/crictl.yaml
+        mode: "0644"
+        template_vars: {}
+  - id: containerd.deploy.001.install-and-start
+    name: 部署containerd组件-001任务-安装二进制配置并启动服务
+    phase: deploy
+    actions:
+      # K8s host prep moved here from prepare: these kernel modules,
+      # network sysctls and packages are only needed where K8s runs.
+      # containerd is the earliest K8s component (master+node both run
+      # it), so it's the right owner — and rollback cleans them up with
+      # the rest of the K8s runtime instead of leaking onto non-K8s
+      # nodes (postgresql/redis/...). Each component writes its OWN
+      # sysctl file (95-k8s-net.conf here, 95-k8s-sysctl.conf=base in
+      # prepare) so rollback never clobbers a peer's settings.
+      - type: yum_package
+        name: 安装Kubernetes网络系统依赖包
+        state: present
+        packages: [conntrack-tools, ipset, ipvsadm, libseccomp]
+      - type: run_command
+        name: 加载Kubernetes所需内核模块
+        command: bash
+        args: ["-lc", "for module in br_netfilter ip_vs ip_vs_rr ip_vs_wrr ip_vs_sh nf_conntrack; do modprobe \"$module\" || true; done; modprobe nf_conntrack_ipv4 || echo NoFound"]
+      - type: systemd_service
+        name: 启用systemd-modules-load服务
+        service: systemd-modules-load
+        enabled: true
+        state: started
+        ignore_error: true
+      - type: backup_file
+        name: 备份内核模块加载配置
+        target: /etc/modules-load.d/10-k8s-modules.conf
+      - type: write_file
+        name: 写入Kubernetes内核模块加载配置
+        target: /etc/modules-load.d/10-k8s-modules.conf
+        mode: "0644"
+        content: |
+          br_netfilter
+          ip_vs
+          ip_vs_rr
+          ip_vs_wrr
+          ip_vs_sh
+          nf_conntrack
+      - type: backup_file
+        name: 备份Kubernetes网络sysctl配置
+        target: /etc/sysctl.d/95-k8s-net.conf
+      - type: write_file
+        name: 写入Kubernetes网络sysctl配置
+        target: /etc/sysctl.d/95-k8s-net.conf
+        mode: "0644"
+        content: |
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.bridge.bridge-nf-call-arptables = 1
+          net.netfilter.nf_conntrack_max=1000000
+      - type: run_command
+        name: 应用Kubernetes网络sysctl参数
+        command: sysctl
+        args: ["-p", "/etc/sysctl.d/95-k8s-net.conf"]
+      - type: systemd_service
+        name: 停止containerd避免覆盖二进制失败
+        service: containerd
+        state: stopped
+        ignore_error: true
+      - type: run_command
+        name: 加载containerd依赖overlay内核模块
+        command: modprobe
+        args: ["overlay"]
+        ignore_error: true
+      - type: backup_file
+        name: 备份containerd二进制文件
+        target: /usr/bin/containerd
+      - type: copy_file
+        name: 复制containerd二进制文件
+        source: containerd/containerd
+        target: /usr/bin/containerd
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/containerd二进制文件
+        target: /usr/local/bin/containerd
+      - type: copy_file
+        name: 复制/usr/local/bin/containerd二进制文件
+        source: containerd/containerd
+        target: /usr/local/bin/containerd
+        mode: "0755"
+      - type: backup_file
+        name: 备份containerd-shim二进制文件
+        target: /usr/bin/containerd-shim
+      - type: copy_file
+        name: 复制containerd-shim二进制文件
+        source: containerd/containerd-shim
+        target: /usr/bin/containerd-shim
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/containerd-shim二进制文件
+        target: /usr/local/bin/containerd-shim
+      - type: copy_file
+        name: 复制/usr/local/bin/containerd-shim二进制文件
+        source: containerd/containerd-shim
+        target: /usr/local/bin/containerd-shim
+        mode: "0755"
+      - type: backup_file
+        name: 备份containerd-shim-runc-v1二进制文件
+        target: /usr/bin/containerd-shim-runc-v1
+      - type: copy_file
+        name: 复制containerd-shim-runc-v1二进制文件
+        source: containerd/containerd-shim-runc-v1
+        target: /usr/bin/containerd-shim-runc-v1
+        mode: "0755"
+      - type: backup_file
+        name: 备份containerd-shim-runc-v2二进制文件
+        target: /usr/bin/containerd-shim-runc-v2
+      - type: copy_file
+        name: 复制containerd-shim-runc-v2二进制文件
+        source: containerd/containerd-shim-runc-v2
+        target: /usr/bin/containerd-shim-runc-v2
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/containerd-shim-runc-v2二进制文件
+        target: /usr/local/bin/containerd-shim-runc-v2
+      - type: copy_file
+        name: 复制/usr/local/bin/containerd-shim-runc-v2二进制文件
+        source: containerd/containerd-shim-runc-v2
+        target: /usr/local/bin/containerd-shim-runc-v2
+        mode: "0755"
+      - type: backup_file
+        name: 备份ctr二进制文件
+        target: /usr/bin/ctr
+      - type: copy_file
+        name: 复制ctr二进制文件
+        source: containerd/ctr
+        target: /usr/bin/ctr
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/ctr二进制文件
+        target: /usr/local/bin/ctr
+      - type: copy_file
+        name: 复制/usr/local/bin/ctr二进制文件
+        source: containerd/ctr
+        target: /usr/local/bin/ctr
+        mode: "0755"
+      - type: backup_file
+        name: 备份runc二进制文件
+        target: /usr/bin/runc
+      - type: copy_file
+        name: 复制runc二进制文件
+        source: containerd/runc
+        target: /usr/bin/runc
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/runc二进制文件
+        target: /usr/local/bin/runc
+      - type: copy_file
+        name: 复制/usr/local/bin/runc二进制文件
+        source: containerd/runc
+        target: /usr/local/bin/runc
+        mode: "0755"
+      - type: backup_file
+        name: 备份crictl二进制文件
+        target: /usr/local/bin/crictl
+      - type: copy_file
+        name: 复制crictl二进制文件
+        source: containerd/crictl
+        target: /usr/local/bin/crictl
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建containerd配置目录
+        target: /etc/containerd
+        mode: "0755"
+      - type: backup_file
+        name: 备份containerd主配置config.toml
+        target: /etc/containerd/config.toml
+      - type: copy_path
+        name: 部署containerd主配置config.toml
+        source: ${cluster.remote_root}/cloudhis/containerd/config.toml
+        target: /etc/containerd/config.toml
+        mode: "0644"
+      - type: backup_file
+        name: 备份crictl配置
+        target: /etc/crictl.yaml
+      - type: copy_path
+        name: 部署crictl配置
+        source: ${cluster.remote_root}/cloudhis/containerd/crictl.yaml
+        target: /etc/crictl.yaml
+        mode: "0644"
+      - type: backup_file
+        name: 备份containerd systemd服务文件
+        target: /etc/systemd/system/containerd.service
+      - type: render_template
+        name: 渲染containerd systemd服务文件
+        source: containerd/templates/containerd.service.tmpl
+        target: /etc/systemd/system/containerd.service
+        mode: "0644"
+        template_vars: {}
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: systemd_service
+        name: 启动containerd服务
+        service: containerd
+        enabled: true
+        state: restarted
+      - type: run_command
+        name: 轮询等待containerd服务运行
+        command: bash
+        args: ["-lc", "for i in $(seq 1 8); do systemctl is-active containerd.service | grep -qx active && exit 0; sleep 2; done; systemctl is-active containerd.service"]
+      - type: backup_file
+        name: 备份root bashrc
+        target: /root/.bashrc
+      - type: run_command
+        name: 添加crictl命令自动补全
+        command: bash
+        args: ["-lc", "grep -q 'crictl completion' /root/.bashrc || echo 'source <(crictl completion)' >> /root/.bashrc"]
+  - id: containerd.test.001.check-service
+    name: 测试containerd组件-001任务-检查容器运行时
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查containerd服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "containerd"]
+  - id: containerd.rollback.001.clean
+    name: 清理containerd组件-001任务-停止服务恢复文件并删除数据
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止containerd服务
+        service: containerd
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: restore_file
+        name: 恢复containerd systemd服务文件
+        target: /etc/systemd/system/containerd.service
+      - type: restore_file
+        name: 恢复containerd主配置config.toml
+        target: /etc/containerd/config.toml
+      - type: restore_file
+        name: 恢复crictl配置
+        target: /etc/crictl.yaml
+      - type: restore_file
+        name: 恢复containerd二进制文件
+        target: /usr/bin/containerd
+      - type: restore_file
+        name: 恢复/usr/local/bin/containerd二进制文件
+        target: /usr/local/bin/containerd
+      - type: restore_file
+        name: 恢复containerd-shim二进制文件
+        target: /usr/bin/containerd-shim
+      - type: restore_file
+        name: 恢复/usr/local/bin/containerd-shim二进制文件
+        target: /usr/local/bin/containerd-shim
+      - type: restore_file
+        name: 恢复containerd-shim-runc-v1二进制文件
+        target: /usr/bin/containerd-shim-runc-v1
+      - type: restore_file
+        name: 恢复containerd-shim-runc-v2二进制文件
+        target: /usr/bin/containerd-shim-runc-v2
+      - type: restore_file
+        name: 恢复/usr/local/bin/containerd-shim-runc-v2二进制文件
+        target: /usr/local/bin/containerd-shim-runc-v2
+      - type: restore_file
+        name: 恢复ctr二进制文件
+        target: /usr/bin/ctr
+      - type: restore_file
+        name: 恢复/usr/local/bin/ctr二进制文件
+        target: /usr/local/bin/ctr
+      - type: restore_file
+        name: 恢复runc二进制文件
+        target: /usr/bin/runc
+      - type: restore_file
+        name: 恢复/usr/local/bin/runc二进制文件
+        target: /usr/local/bin/runc
+      - type: restore_file
+        name: 恢复crictl二进制文件
+        target: /usr/local/bin/crictl
+      - type: restore_file
+        name: 恢复root bashrc
+        target: /root/.bashrc
+      - type: restore_file
+        name: 恢复内核模块加载配置
+        target: /etc/modules-load.d/10-k8s-modules.conf
+      - type: remove_path_if_untracked
+        name: 删除内核模块加载配置残留
+        target: /etc/modules-load.d/10-k8s-modules.conf
+      - type: restore_file
+        name: 恢复Kubernetes网络sysctl配置
+        target: /etc/sysctl.d/95-k8s-net.conf
+      - type: remove_path_if_untracked
+        name: 删除Kubernetes网络sysctl配置残留
+        target: /etc/sysctl.d/95-k8s-net.conf
+      - type: remove_path
+        name: 删除containerd数据目录
+        target: ${containerd.root_dir}
+      - type: remove_path_if_created_or_untracked
+        name: 删除containerd配置目录残留
+        target: /etc/containerd
+      # /opt/containerd is the runtime opt-plugin directory: containerd
+      # daemon auto-creates it on startup based on
+      # config.toml [plugins."io.containerd.internal.v1.opt"] path.
+      # It's not declared by any dfctl ensure_dir, so it has no
+      # record_path_state marker; we still own it because we deployed
+      # the containerd that created it.
+      - type: remove_path
+        name: 删除containerd opt插件目录
+        target: /opt/containerd
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: containerd.residue.001.check-clean
+    name: 残留检查containerd组件-001任务-确认containerd数据已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认containerd数据目录已删除
+        command: test
+        args: ["!", "-e", "${containerd.root_dir}"]

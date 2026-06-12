@@ -1,0 +1,150 @@
+display_name: minio
+enabled: true
+order: 17
+target_roles: [minio]
+tasks:
+  - id: minio.preflight.001.check-resources
+    name: 预检查minio组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查MinIO离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: minio.render.001.render-service
+    name: 生成minio组件-001任务-生成启动脚本和systemd服务
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建MinIO生成配置目录
+        target: ${cluster.remote_root}/cloudhis/minio
+        mode: "0755"
+      - type: render_template
+        name: 渲染MinIO启动脚本run.sh
+        source: minio/templates/run.sh.tmpl
+        target: ${cluster.remote_root}/cloudhis/minio/run.sh
+        mode: "0755"
+        template_vars:
+          install_dir: ${minio.install_dir}
+          api_port: ${minio.api_port}
+          console_port: ${minio.console_port}
+          data_dir: ${minio.data_dir}
+          access_key: ${minio.access_key}
+          secret_key: ${minio.secret_key}
+          cluster_volumes: ${minio.cluster_volumes}
+          mode: ${minio.mode}
+      - type: render_template
+        name: 渲染MinIO systemd服务文件
+        source: minio/templates/minio.service.tmpl
+        target: ${cluster.remote_root}/cloudhis/minio/minio.service
+        mode: "0644"
+        template_vars:
+          install_dir: ${minio.install_dir}
+  - id: minio.deploy.001.install-and-start
+    name: 部署minio组件-001任务-安装二进制配置服务并启动
+    phase: deploy
+    actions:
+      - type: record_path_state
+        name: 记录MinIO安装目录部署前状态
+        target: ${minio.install_dir}
+      - type: ensure_dir
+        name: 创建MinIO运行目录
+        target: ${minio.install_dir}/run
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建MinIO数据目录
+        target: ${minio.data_dir}
+        mode: "0755"
+      - type: copy_file
+        name: 复制minio二进制文件
+        source: minio/minio
+        target: ${minio.install_dir}/run/minio
+        mode: "0755"
+      - type: backup_file
+        name: 备份mc客户端二进制文件
+        target: /usr/bin/mc
+      - type: copy_file
+        name: 复制mc客户端二进制文件
+        source: minio/mc
+        target: /usr/bin/mc
+        mode: "0755"
+      - type: copy_path
+        name: 部署MinIO启动脚本run.sh
+        source: ${cluster.remote_root}/cloudhis/minio/run.sh
+        target: ${minio.install_dir}/run/run.sh
+        mode: "0755"
+      - type: backup_file
+        name: 备份MinIO systemd服务文件
+        target: /etc/systemd/system/minio.service
+      - type: copy_path
+        name: 部署MinIO systemd服务文件
+        source: ${cluster.remote_root}/cloudhis/minio/minio.service
+        target: /etc/systemd/system/minio.service
+        mode: "0644"
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 重置MinIO服务失败状态
+        command: systemctl
+        args: ["reset-failed", "minio"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动MinIO服务
+        service: minio
+        enabled: true
+        state: started
+  - id: minio.test.001.check-service
+    name: 测试minio组件-001任务-检查服务状态
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查MinIO服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "minio"]
+      - type: http_check
+        name: 检查MinIO健康接口响应
+        url: http://${host.address}:${minio.api_port}/minio/health/live
+        expected_status: 200
+        timeout: 3s
+        attempts: 20
+        interval: 2s
+  - id: minio.rollback.001.clean
+    name: 清理minio组件-001任务-停止服务恢复二进制并删除数据目录
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止MinIO服务
+        service: minio
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: restore_file
+        name: 恢复MinIO systemd服务文件
+        target: /etc/systemd/system/minio.service
+      - type: restore_file
+        name: 恢复mc客户端二进制文件
+        target: /usr/bin/mc
+      - type: remove_path
+        name: 删除MinIO安装目录
+        target: ${minio.install_dir}
+      - type: remove_path
+        name: 删除MinIO数据目录
+        target: ${minio.data_dir}
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: minio.residue.001.check-clean
+    name: 残留检查minio组件-001任务-确认MinIO目录已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认MinIO安装目录已删除
+        command: test
+        args: ["!", "-e", "${minio.install_dir}"]
+      - type: run_command
+        name: 确认MinIO数据目录已删除
+        command: test
+        args: ["!", "-e", "${minio.data_dir}"]

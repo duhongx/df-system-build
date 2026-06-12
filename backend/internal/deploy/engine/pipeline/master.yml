@@ -1,0 +1,322 @@
+display_name: master
+enabled: true
+order: 9
+depends_on: [controller-render, prepare, etcd, slb, containerd, kube-lb]
+target_roles: [master]
+tasks:
+  - id: master.preflight.001.check-resources
+    name: 预检查master组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查master离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+      - type: kubernetes_artifacts_check
+        name: 校验当前主机在K8s节点快照内
+        target: ${cluster.remote_root}/cloudhis/kubernetes
+  - id: master.render.001.render-certs-and-units
+    name: 生成master组件-001任务-生成控制面证书和服务文件
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建master生成配置目录
+        # Per-host subdir keeps render output for each control-plane
+        # peer separated. See etcd.yml for the same rationale —
+        # host-specific fields like --bind-address would otherwise
+        # let later renders overwrite earlier ones on the shared
+        # control-side path.
+        target: ${cluster.remote_root}/cloudhis/master/${host.address}
+        mode: "0755"
+      - type: render_template
+        name: 渲染kube-apiserver systemd服务文件
+        source: master/templates/kube-apiserver.service.tmpl
+        target: ${cluster.remote_root}/cloudhis/master/${host.address}/kube-apiserver.service
+        mode: "0644"
+        template_vars:
+          host_address: ${host.address}
+          etcd_endpoints: ${etcd.endpoints}
+          service_cidr: ${network.service_cidr}
+      - type: render_template
+        name: 渲染kube-controller-manager systemd服务文件
+        source: master/templates/kube-controller-manager.service.tmpl
+        target: ${cluster.remote_root}/cloudhis/master/${host.address}/kube-controller-manager.service
+        mode: "0644"
+        template_vars:
+          cluster_cidr: ${network.cluster_cidr}
+          service_cidr: ${network.service_cidr}
+          node_cidr_len: ${kubernetes.node_cidr_len}
+      - type: render_template
+        name: 渲染kube-scheduler systemd服务文件
+        source: master/templates/kube-scheduler.service.tmpl
+        target: ${cluster.remote_root}/cloudhis/master/${host.address}/kube-scheduler.service
+        mode: "0644"
+        template_vars: {}
+      - type: render_template
+        name: 渲染machine systemd服务文件
+        source: master/templates/machine.service.tmpl
+        target: ${cluster.remote_root}/cloudhis/master/${host.address}/machine.service
+        mode: "0644"
+        template_vars: {}
+  - id: master.deploy.001.install-binaries-and-start
+    name: 部署master组件-001任务-安装控制面二进制和启动服务
+    phase: deploy
+    actions:
+      - type: backup_file
+        name: 备份kube-apiserver二进制文件
+        target: /usr/local/bin/kube-apiserver
+      - type: copy_file
+        name: 复制kube-apiserver二进制文件
+        source: master/kube-apiserver
+        target: /usr/local/bin/kube-apiserver
+        mode: "0755"
+      - type: backup_file
+        name: 备份kube-controller-manager二进制文件
+        target: /usr/local/bin/kube-controller-manager
+      - type: copy_file
+        name: 复制kube-controller-manager二进制文件
+        source: master/kube-controller-manager
+        target: /usr/local/bin/kube-controller-manager
+        mode: "0755"
+      - type: backup_file
+        name: 备份kube-scheduler二进制文件
+        target: /usr/local/bin/kube-scheduler
+      - type: copy_file
+        name: 复制kube-scheduler二进制文件
+        source: master/kube-scheduler
+        target: /usr/local/bin/kube-scheduler
+        mode: "0755"
+      - type: backup_file
+        name: 备份kubectl二进制文件
+        target: /usr/local/bin/kubectl
+      - type: copy_file
+        name: 复制kubectl二进制文件
+        source: master/kubectl
+        target: /usr/local/bin/kubectl
+        mode: "0755"
+      - type: backup_file
+        name: 备份machine二进制文件
+        target: /usr/local/bin/machine
+      - type: copy_file
+        name: 复制machine二进制文件
+        source: master/machine
+        target: /usr/local/bin/machine
+        mode: "0755"
+      - type: backup_file
+        name: 备份kube-apiserver systemd服务文件
+        target: /etc/systemd/system/kube-apiserver.service
+      - type: record_path_state
+        name: 记录Kubernetes SSL证书目录部署前状态
+        target: /etc/kubernetes/ssl
+      - type: copy_dir
+        name: 复制Kubernetes SSL证书目录
+        source: ${cluster.remote_root}/cloudhis/kubernetes/ssl
+        target: /etc/kubernetes/ssl
+        mode: "0600"
+      - type: copy_path
+        name: 部署master节点admin kubeconfig
+        source: ${cluster.remote_root}/cloudhis/kubernetes/kubectl.kubeconfig
+        target: /root/.kube/config
+        mode: "0600"
+      - type: copy_path
+        name: 部署kube-controller-manager kubeconfig
+        source: ${cluster.remote_root}/cloudhis/kubernetes/kube-controller-manager.kubeconfig
+        target: /etc/kubernetes/kube-controller-manager.kubeconfig
+        mode: "0600"
+      - type: copy_path
+        name: 部署kube-scheduler kubeconfig
+        source: ${cluster.remote_root}/cloudhis/kubernetes/kube-scheduler.kubeconfig
+        target: /etc/kubernetes/kube-scheduler.kubeconfig
+        mode: "0600"
+      - type: run_command
+        name: 替换master本地kubeconfig的apiserver地址
+        command: bash
+        args:
+          - -lc
+          - |
+            for file in /root/.kube/config /etc/kubernetes/kube-controller-manager.kubeconfig /etc/kubernetes/kube-scheduler.kubeconfig; do
+              if [ -f "$file" ]; then
+                sed -i 's#^    server:.*#    server: https://127.0.0.1:6443#' "$file"
+              fi
+            done
+      - type: copy_path
+        name: 部署kube-apiserver systemd服务文件
+        source: ${cluster.remote_root}/cloudhis/master/${host.address}/kube-apiserver.service
+        target: /etc/systemd/system/kube-apiserver.service
+        mode: "0644"
+      - type: backup_file
+        name: 备份kube-controller-manager systemd服务文件
+        target: /etc/systemd/system/kube-controller-manager.service
+      - type: copy_path
+        name: 部署kube-controller-manager systemd服务文件
+        source: ${cluster.remote_root}/cloudhis/master/${host.address}/kube-controller-manager.service
+        target: /etc/systemd/system/kube-controller-manager.service
+        mode: "0644"
+      - type: backup_file
+        name: 备份kube-scheduler systemd服务文件
+        target: /etc/systemd/system/kube-scheduler.service
+      - type: copy_path
+        name: 部署kube-scheduler systemd服务文件
+        source: ${cluster.remote_root}/cloudhis/master/${host.address}/kube-scheduler.service
+        target: /etc/systemd/system/kube-scheduler.service
+        mode: "0644"
+      - type: backup_file
+        name: 备份machine systemd服务文件
+        target: /etc/systemd/system/machine.service
+      - type: copy_path
+        name: 部署machine systemd服务文件
+        source: ${cluster.remote_root}/cloudhis/master/${host.address}/machine.service
+        target: /etc/systemd/system/machine.service
+        mode: "0644"
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: systemd_service
+        name: 启动kube-apiserver服务
+        service: kube-apiserver
+        enabled: true
+        state: restarted
+      - type: systemd_service
+        name: 启动kube-controller-manager服务
+        service: kube-controller-manager
+        enabled: true
+        state: restarted
+      - type: systemd_service
+        name: 启动kube-scheduler服务
+        service: kube-scheduler
+        enabled: true
+        state: restarted
+      - type: systemd_service
+        name: 启动machine服务
+        service: machine
+        enabled: true
+        state: restarted
+      - type: run_command
+        name: 轮询等待kube-apiserver启动
+        command: bash
+        args: ["-lc", "for i in $(seq 1 30); do systemctl is-active kube-apiserver.service | grep -qx active && exit 0; sleep 3; done; systemctl is-active kube-apiserver.service"]
+      - type: run_command
+        name: 轮询等待kube-controller-manager启动
+        command: bash
+        args: ["-lc", "for i in $(seq 1 30); do systemctl is-active kube-controller-manager.service | grep -qx active && exit 0; sleep 3; done; systemctl is-active kube-controller-manager.service"]
+      - type: run_command
+        name: 轮询等待kube-scheduler启动
+        command: bash
+        args: ["-lc", "for i in $(seq 1 30); do systemctl is-active kube-scheduler.service | grep -qx active && exit 0; sleep 3; done; systemctl is-active kube-scheduler.service"]
+      - type: run_command
+        name: 以轮询方式等待master服务可访问
+        command: bash
+        args: ["-lc", "for i in $(seq 1 30); do kubectl get node >/dev/null 2>&1 && exit 0; sleep 6; done; kubectl get node"]
+      - type: run_command
+        name: 创建kubernetes用户集群管理员绑定
+        command: bash
+        args: ["-lc", "kubectl get clusterrolebinding kubernetes-crb >/dev/null 2>&1 || kubectl create clusterrolebinding kubernetes-crb --clusterrole=cluster-admin --user=kubernetes"]
+        only_host_address: ${master.address}
+  - id: master.test.001.check-api
+    name: 测试master组件-001任务-检查控制面服务
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查kube-apiserver服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "kube-apiserver"]
+  - id: master.rollback.001.clean
+    name: 清理master组件-001任务-停止控制面服务并恢复文件
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止kube-apiserver服务
+        service: kube-apiserver
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止kube-controller-manager服务
+        service: kube-controller-manager
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止kube-scheduler服务
+        service: kube-scheduler
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止machine服务
+        service: machine
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: restore_file
+        name: 恢复kube-apiserver systemd服务文件
+        target: /etc/systemd/system/kube-apiserver.service
+      - type: restore_file
+        name: 恢复kube-controller-manager systemd服务文件
+        target: /etc/systemd/system/kube-controller-manager.service
+      - type: restore_file
+        name: 恢复kube-scheduler systemd服务文件
+        target: /etc/systemd/system/kube-scheduler.service
+      - type: restore_file
+        name: 恢复machine systemd服务文件
+        target: /etc/systemd/system/machine.service
+      - type: remove_path_if_untracked
+        name: 删除kube-apiserver服务文件残留
+        target: /etc/systemd/system/kube-apiserver.service
+      - type: remove_path_if_untracked
+        name: 删除kube-controller-manager服务文件残留
+        target: /etc/systemd/system/kube-controller-manager.service
+      - type: remove_path_if_untracked
+        name: 删除kube-scheduler服务文件残留
+        target: /etc/systemd/system/kube-scheduler.service
+      - type: remove_path_if_untracked
+        name: 删除machine服务文件残留
+        target: /etc/systemd/system/machine.service
+      - type: restore_file
+        name: 恢复kube-apiserver二进制文件
+        target: /usr/local/bin/kube-apiserver
+      - type: restore_file
+        name: 恢复kube-controller-manager二进制文件
+        target: /usr/local/bin/kube-controller-manager
+      - type: restore_file
+        name: 恢复kube-scheduler二进制文件
+        target: /usr/local/bin/kube-scheduler
+      - type: restore_file
+        name: 恢复kubectl二进制文件
+        target: /usr/local/bin/kubectl
+      - type: restore_file
+        name: 恢复machine二进制文件
+        target: /usr/local/bin/machine
+      - type: remove_path_if_created
+        name: 删除Kubernetes SSL证书目录
+        target: /etc/kubernetes/ssl
+      - type: remove_path_if_created_or_untracked
+        name: 删除Kubernetes SSL证书目录残留
+        target: /etc/kubernetes/ssl
+      - type: remove_path_if_created_or_untracked
+        name: 删除Kubernetes配置目录残留
+        target: /etc/kubernetes
+      # 之前这里有一条 `kubectl label node ${host.address} kubernetes.io/role-`
+      # 操作,试图清理 K8s 集群里的节点角色标签。但这个操作有 3 个
+      # 问题让它在所有路径都做不到正确效果:
+      #   1. 它在 stop kube-apiserver 之后跑 — 本机 apiserver 已停,
+      #      kubectl 连不上 K8s API
+      #   2. 它在 restore_file /usr/local/bin/kubectl 之后跑 — 本地
+      #      kubectl 已被还原(deploy 前不存在 = 删除)
+      #   3. ${cluster.resource_dir}/controller-render/kubectl 是
+      #      控制端路径,master 节点上不存在
+      # cleanup-all 场景下 K8s 集群整个被销毁,role 标签的清理本来
+      # 就无意义(集群都没了)。直接删除这一步,避免误导运维。
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: master.residue.001.check-clean
+    name: 残留检查master组件-001任务-确认控制面服务文件已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认kube-apiserver服务文件已删除
+        command: test
+        args: ["!", "-e", "/etc/systemd/system/kube-apiserver.service"]

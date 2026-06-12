@@ -1,0 +1,469 @@
+display_name: docker
+enabled: true
+order: 2
+depends_on: [nexus]
+target_roles: [docker]
+tasks:
+  - id: docker.preflight.001.check-resources
+    name: 预检查docker组件-001任务-检查二进制和镜像资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查Docker离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: docker.deploy.001.install-and-start
+    name: 部署docker组件-001任务-安装Docker二进制并启动服务
+    phase: deploy
+    actions:
+      - type: systemd_service
+        name: 停止Docker避免覆盖二进制失败
+        service: docker
+        state: stopped
+        ignore_error: true
+      - type: ensure_dir
+        name: 创建/usr/local/bin目录
+        target: /usr/local/bin
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建Docker命令补全目录
+        target: /etc/bash_completion.d
+        mode: "0755"
+      - type: backup_file
+        name: 备份docker二进制文件
+        target: /usr/bin/docker
+      - type: copy_file
+        name: 复制docker二进制文件
+        source: docker/docker
+        target: /usr/bin/docker
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/docker二进制文件
+        target: /usr/local/bin/docker
+      - type: copy_file
+        name: 复制/usr/local/bin/docker二进制文件
+        source: docker/docker
+        target: /usr/local/bin/docker
+        mode: "0755"
+      - type: backup_file
+        name: 备份dockerd二进制文件
+        target: /usr/bin/dockerd
+      - type: copy_file
+        name: 复制dockerd二进制文件
+        source: docker/dockerd
+        target: /usr/bin/dockerd
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/dockerd二进制文件
+        target: /usr/local/bin/dockerd
+      - type: copy_file
+        name: 复制/usr/local/bin/dockerd二进制文件
+        source: docker/dockerd
+        target: /usr/local/bin/dockerd
+        mode: "0755"
+      - type: backup_file
+        name: 备份docker-init二进制文件
+        target: /usr/local/bin/docker-init
+      - type: copy_file
+        name: 复制docker-init二进制文件
+        source: docker/docker-init
+        target: /usr/local/bin/docker-init
+        mode: "0755"
+      - type: backup_file
+        name: 备份docker-proxy二进制文件
+        target: /usr/local/bin/docker-proxy
+      - type: copy_file
+        name: 复制docker-proxy二进制文件
+        source: docker/docker-proxy
+        target: /usr/local/bin/docker-proxy
+        mode: "0755"
+      - type: backup_file
+        name: 备份Docker依赖containerd二进制文件
+        target: /usr/bin/containerd
+      - type: copy_file
+        name: 复制Docker依赖containerd二进制文件
+        source: containerd/containerd
+        target: /usr/bin/containerd
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/containerd二进制文件
+        target: /usr/local/bin/containerd
+      - type: copy_file
+        name: 复制/usr/local/bin/containerd二进制文件
+        source: containerd/containerd
+        target: /usr/local/bin/containerd
+        mode: "0755"
+      - type: backup_file
+        name: 备份Docker依赖containerd-shim二进制文件
+        target: /usr/bin/containerd-shim
+      - type: copy_file
+        name: 复制Docker依赖containerd-shim二进制文件
+        source: containerd/containerd-shim
+        target: /usr/bin/containerd-shim
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/containerd-shim二进制文件
+        target: /usr/local/bin/containerd-shim
+      - type: copy_file
+        name: 复制/usr/local/bin/containerd-shim二进制文件
+        source: containerd/containerd-shim
+        target: /usr/local/bin/containerd-shim
+        mode: "0755"
+      - type: backup_file
+        name: 备份Docker依赖containerd-shim-runc-v1二进制文件
+        target: /usr/bin/containerd-shim-runc-v1
+      - type: copy_file
+        name: 复制Docker依赖containerd-shim-runc-v1二进制文件
+        source: containerd/containerd-shim-runc-v1
+        target: /usr/bin/containerd-shim-runc-v1
+        mode: "0755"
+      - type: backup_file
+        name: 备份Docker依赖containerd-shim-runc-v2二进制文件
+        target: /usr/bin/containerd-shim-runc-v2
+      - type: copy_file
+        name: 复制Docker依赖containerd-shim-runc-v2二进制文件
+        source: containerd/containerd-shim-runc-v2
+        target: /usr/bin/containerd-shim-runc-v2
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/containerd-shim-runc-v2二进制文件
+        target: /usr/local/bin/containerd-shim-runc-v2
+      - type: copy_file
+        name: 复制/usr/local/bin/containerd-shim-runc-v2二进制文件
+        source: containerd/containerd-shim-runc-v2
+        target: /usr/local/bin/containerd-shim-runc-v2
+        mode: "0755"
+      - type: backup_file
+        name: 备份Docker依赖ctr二进制文件
+        target: /usr/bin/ctr
+      - type: copy_file
+        name: 复制Docker依赖ctr二进制文件
+        source: containerd/ctr
+        target: /usr/bin/ctr
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/ctr二进制文件
+        target: /usr/local/bin/ctr
+      - type: copy_file
+        name: 复制/usr/local/bin/ctr二进制文件
+        source: containerd/ctr
+        target: /usr/local/bin/ctr
+        mode: "0755"
+      - type: backup_file
+        name: 备份Docker依赖runc二进制文件
+        target: /usr/bin/runc
+      - type: copy_file
+        name: 复制Docker依赖runc二进制文件
+        source: containerd/runc
+        target: /usr/bin/runc
+        mode: "0755"
+      - type: backup_file
+        name: 备份/usr/local/bin/runc二进制文件
+        target: /usr/local/bin/runc
+      - type: copy_file
+        name: 复制/usr/local/bin/runc二进制文件
+        source: containerd/runc
+        target: /usr/local/bin/runc
+        mode: "0755"
+      - type: backup_file
+        name: 备份docker-tag二进制文件
+        target: /usr/local/bin/docker-tag
+      - type: copy_file
+        name: 复制docker-tag二进制文件
+        source: docker/docker-tag
+        target: /usr/local/bin/docker-tag
+        mode: "0755"
+      - type: backup_file
+        name: 备份Docker命令补全文件
+        target: /etc/bash_completion.d/docker
+      - type: copy_file
+        name: 复制Docker命令补全文件
+        source: docker/bash_completion/docker
+        target: /etc/bash_completion.d/docker
+        mode: "0644"
+      - type: record_path_state
+        name: 记录Docker配置目录部署前状态
+        target: /etc/docker
+      - type: record_path_state
+        name: 记录Docker数据目录部署前状态
+        target: ${docker.data_root}
+      - type: ensure_dir
+        name: 创建Docker配置目录
+        target: /etc/docker
+        mode: "0755"
+      - type: backup_file
+        name: 备份Docker守护进程配置daemon.json
+        target: /etc/docker/daemon.json
+      - type: render_template
+        name: 渲染Docker守护进程配置daemon.json
+        source: docker/templates/daemon.json.tmpl
+        target: /etc/docker/daemon.json
+        mode: "0644"
+        template_vars:
+          nexus_address: ${nexus.address}
+          data_root: ${docker.data_root}
+      - type: backup_file
+        name: 备份Docker systemd服务文件
+        target: /etc/systemd/system/docker.service
+      - type: run_command
+        name: 清空iptables规则
+        command: bash
+        args:
+          - -lc
+          - |
+            iptables -P INPUT ACCEPT \
+              && iptables -P FORWARD ACCEPT \
+              && iptables -P OUTPUT ACCEPT \
+              && iptables -F && iptables -X \
+              && iptables -F -t nat && iptables -X -t nat \
+              && iptables -F -t raw && iptables -X -t raw \
+              && iptables -F -t mangle && iptables -X -t mangle
+        ignore_error: true
+      - type: render_template
+        name: 渲染Docker systemd服务文件
+        source: docker/templates/docker.service.tmpl
+        target: /etc/systemd/system/docker.service
+        mode: "0644"
+        template_vars: {}
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 重置Docker失败状态
+        command: systemctl
+        args: ["reset-failed", "docker"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动Docker服务
+        service: docker
+        enabled: true
+        state: started
+      - type: run_command
+        name: 轮询等待Docker服务运行
+        command: bash
+        args: ["-lc", "for i in $(seq 1 10); do systemctl is-active docker.service | grep -qx active && sleep 30 && exit 0; sleep 30; done; systemctl is-active docker.service"]
+      - type: run_command
+        name: 检查Docker已信任Nexus非安全仓库
+        command: bash
+        args: ["-lc", "docker info 2>/dev/null | sed -n '/Insecure Registries:/,/Registry Mirrors:/p' | grep -F '${nexus.address}:8888'"]
+      - type: run_command
+        name: 登录Nexus镜像仓库
+        command: bash
+        args: ["-lc", "echo '${nexus.admin_password}' | docker login --username admin --password-stdin http://${nexus.address}:8888"]
+      - type: run_command
+        name: 按离线镜像hash导入并推送到Nexus仓库
+        command: bash
+        args:
+          - -lc
+          - |
+            state_file="${cluster.state_dir}/docker-images.sha256"
+            mkdir -p "$(dirname "$state_file")"
+            if find ${cluster.resource_dir}/docker/images -maxdepth 1 -type f -name "*.tar" | grep -q .; then
+              docker_images_hash="$(find ${cluster.resource_dir}/docker/images -maxdepth 1 -type f -name "*.tar" -printf "%f:%s:%T@\n" | sort | sha256sum | awk '{print $1}')"
+            else
+              docker_images_hash="no-images"
+            fi
+            docker_images_uploaded_hash="$(cat "$state_file" 2>/dev/null || true)"
+            docker_images_need_upload=false
+            if [ "$docker_images_hash" != "$docker_images_uploaded_hash" ]; then
+              docker_images_need_upload=true
+            fi
+            if [ "$docker_images_need_upload" != "true" ]; then
+              nexus_pause_tags="$(curl -fsS -u "admin:${nexus.admin_password}" "http://${nexus.address}:8888/v2/base/pause/tags/list" 2>/dev/null || true)"
+              if ! printf '%s\n' "$nexus_pause_tags" | grep -q '"3.8"'; then
+                echo "Nexus pause image missing, re-upload offline docker images"
+                docker_images_need_upload=true
+              fi
+            fi
+            if [ "$docker_images_need_upload" != "true" ]; then
+              echo "offline docker images hash unchanged, skip docker load/tag/push"
+              exit 0
+            fi
+            shopt -s nullglob
+            for image_tar in ${cluster.resource_dir}/docker/images/*.tar; do
+              docker load -i "$image_tar"
+            done
+            tag_file=/tmp/dfctl-docker-tagged-images.txt
+            > "$tag_file"
+            docker images --filter "dangling=false" --format '{{.Repository}}:{{.Tag}}' | while read -r image; do
+              [ -z "$image" ] && continue
+              [ "$image" = "<none>:<none>" ] && continue
+              # Multi-segment names (harbor.his.com/calico/cni:vX) drop
+              # their first segment and gain nexus as the new registry.
+              # Single-segment names (e.g. seata-pg:v1.4.2 from a tar
+              # that wasn't pre-namespaced) get prefixed with base/ so
+              # they land alongside the rest under nexus/<group>/<image>
+              # — keeps plugin yaml templates consistent.
+              if [[ "$image" == */* ]]; then
+                new_image=$(echo "$image" | sed "s|^[^/]\+|${nexus.address}:8888|")
+              else
+                new_image="${nexus.address}:8888/base/$image"
+              fi
+              if docker image inspect "$new_image" >/dev/null 2>&1; then
+                echo "镜像 $new_image 已存在，跳过 tag 操作."
+                continue
+              fi
+              docker tag "$image" "$new_image"
+              echo "$image $new_image" >> "$tag_file"
+            done
+            sort -u "$tag_file" | while read original new_image; do
+              [ -n "$new_image" ] && docker push "$new_image"
+            done
+            sort -u "$tag_file" | while read original new_image; do
+              [ -n "$new_image" ] && docker rmi "$new_image" || true
+              [ -n "$original" ] && docker rmi "$original" || true
+            done
+            rm -f "$tag_file"
+            printf '%s\n' "$docker_images_hash" > "$state_file"
+      - type: backup_file
+        name: 备份Docker镜像清理脚本
+        target: /usr/bin/del_docker_images.sh
+      - type: render_template
+        name: 渲染Docker镜像清理脚本
+        source: docker/templates/del_docker_images.sh.tmpl
+        target: /usr/bin/del_docker_images.sh
+        mode: "0755"
+        template_vars:
+          env_name: ${env.name}
+      - type: cron_line
+        name: 删除旧版Docker镜像清理定时任务
+        state: absent
+        marker: cleanup-docker-images
+        ignore_error: true
+      - type: cron_line
+        name: 安装Docker镜像清理定时任务
+        state: present
+        marker: 清理docker过期的镜像
+        line: "30 1 * * * /usr/bin/del_docker_images.sh # 清理docker过期的镜像"
+  - id: docker.test.001.check-service
+    name: 测试docker组件-001任务-检查Docker服务
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查Docker服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "docker"]
+  - id: docker.rollback.001.clean
+    name: 清理docker组件-001任务-停止服务恢复二进制并清理数据
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止Docker服务
+        service: docker
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: cron_line
+        name: 删除Docker镜像清理定时任务
+        state: absent
+        marker: 清理docker过期的镜像
+        ignore_error: true
+      - type: cron_line
+        name: 删除旧版Docker镜像清理定时任务
+        state: absent
+        marker: cleanup-docker-images
+        ignore_error: true
+      - type: restore_file
+        name: 恢复Docker systemd服务文件
+        target: /etc/systemd/system/docker.service
+      - type: restore_file
+        name: 恢复Docker守护进程配置daemon.json
+        target: /etc/docker/daemon.json
+      - type: restore_file
+        name: 恢复docker二进制文件
+        target: /usr/bin/docker
+      - type: restore_file
+        name: 恢复/usr/local/bin/docker二进制文件
+        target: /usr/local/bin/docker
+      - type: restore_file
+        name: 恢复dockerd二进制文件
+        target: /usr/bin/dockerd
+      - type: restore_file
+        name: 恢复/usr/local/bin/dockerd二进制文件
+        target: /usr/local/bin/dockerd
+      - type: restore_file
+        name: 恢复docker-init二进制文件
+        target: /usr/local/bin/docker-init
+      - type: restore_file
+        name: 恢复docker-proxy二进制文件
+        target: /usr/local/bin/docker-proxy
+      - type: restore_file
+        name: 恢复Docker依赖containerd二进制文件
+        target: /usr/bin/containerd
+      - type: restore_file
+        name: 恢复/usr/local/bin/containerd二进制文件
+        target: /usr/local/bin/containerd
+      - type: restore_file
+        name: 恢复Docker依赖containerd-shim二进制文件
+        target: /usr/bin/containerd-shim
+      - type: restore_file
+        name: 恢复/usr/local/bin/containerd-shim二进制文件
+        target: /usr/local/bin/containerd-shim
+      - type: restore_file
+        name: 恢复Docker依赖containerd-shim-runc-v1二进制文件
+        target: /usr/bin/containerd-shim-runc-v1
+      - type: restore_file
+        name: 恢复Docker依赖containerd-shim-runc-v2二进制文件
+        target: /usr/bin/containerd-shim-runc-v2
+      - type: restore_file
+        name: 恢复/usr/local/bin/containerd-shim-runc-v2二进制文件
+        target: /usr/local/bin/containerd-shim-runc-v2
+      - type: restore_file
+        name: 恢复Docker依赖ctr二进制文件
+        target: /usr/bin/ctr
+      - type: restore_file
+        name: 恢复/usr/local/bin/ctr二进制文件
+        target: /usr/local/bin/ctr
+      - type: restore_file
+        name: 恢复Docker依赖runc二进制文件
+        target: /usr/bin/runc
+      - type: restore_file
+        name: 恢复/usr/local/bin/runc二进制文件
+        target: /usr/local/bin/runc
+      - type: restore_file
+        name: 恢复docker-tag二进制文件
+        target: /usr/local/bin/docker-tag
+      - type: restore_file
+        name: 恢复Docker命令补全文件
+        target: /etc/bash_completion.d/docker
+      - type: remove_path
+        name: 删除Docker镜像清理脚本
+        target: /usr/bin/del_docker_images.sh
+      - type: remove_path_if_created
+        name: 删除Docker配置目录
+        target: /etc/docker
+      - type: remove_path
+        name: 删除Docker数据目录
+        target: ${docker.data_root}
+      - type: remove_path
+        name: 删除Docker镜像上传状态
+        target: ${cluster.state_dir}/docker-images.sha256
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: docker.residue.001.check-clean
+    name: 残留检查docker组件-001任务-确认Docker数据已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认Docker数据目录已删除
+        command: test
+        args: ["!", "-e", "${docker.data_root}"]
+      - type: run_command
+        name: 确认Docker镜像清理脚本已删除
+        command: test
+        args: ["!", "-e", "/usr/bin/del_docker_images.sh"]
+      - type: run_command
+        name: 确认Docker镜像上传状态已删除
+        command: test
+        args: ["!", "-e", "${cluster.state_dir}/docker-images.sha256"]
+      - type: run_command
+        name: 确认Docker镜像清理定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F '清理docker过期的镜像')"]
+      - type: run_command
+        name: 确认旧版Docker镜像清理定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F 'cleanup-docker-images')"]

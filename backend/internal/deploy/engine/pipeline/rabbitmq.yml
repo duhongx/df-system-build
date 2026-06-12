@@ -1,0 +1,150 @@
+display_name: rabbitmq
+enabled: true
+order: 16
+target_roles: [rabbitmq]
+tasks:
+  - id: rabbitmq.preflight.001.check-yum
+    name: 预检查rabbitmq组件-001任务-检查离线yum源
+    phase: preflight
+    actions:
+      - type: run_command
+        name: 检查yum缓存可用
+        command: yum
+        args: ["makecache"]
+  - id: rabbitmq.deploy.001.install-and-start
+    name: 部署rabbitmq组件-001任务-安装主程序包启动服务并配置对象
+    phase: deploy
+    actions:
+      - type: yum_package
+        name: 安装Erlang和RabbitMQ软件包
+        state: present
+        packages: [bash-completion, socat, erlang, rabbitmq-server]
+      - type: run_command
+        name: 写入RabbitMQ本机hostname解析
+        command: bash
+        args: ["-lc", "hn=$(hostname -s); sed -i '/ # dfctl-rabbitmq-hostname$/d' /etc/hosts; echo \"${host.address} ${hn} # dfctl-rabbitmq-hostname\" >> /etc/hosts"]
+      - type: systemd_service
+        name: 启动RabbitMQ服务
+        service: rabbitmq-server
+        enabled: true
+        state: started
+      - type: run_command
+        name: 等待RabbitMQ节点可连接
+        command: bash
+        args: ["-lc", "for i in $(seq 1 30); do rabbitmq-diagnostics -q ping && exit 0 || sleep 2; done; exit 1"]
+      - type: run_command
+        name: 启用RabbitMQ管理插件
+        command: rabbitmq-plugins
+        args: ["enable", "rabbitmq_management"]
+      - type: run_command
+        name: 添加RabbitMQ管理员用户
+        command: bash
+        args: ["-lc", "rabbitmqctl list_users | awk '{print $1}' | grep -qx '${rabbitmq.admin_user}' || rabbitmqctl add_user '${rabbitmq.admin_user}' '${rabbitmq.admin_password}'"]
+      - type: run_command
+        name: 设置RabbitMQ管理员权限标签
+        command: rabbitmqctl
+        args: ["set_user_tags", "${rabbitmq.admin_user}", "administrator"]
+      - type: run_command
+        name: 设置RabbitMQ管理员vhost权限
+        command: bash
+        args: ["-lc", "rabbitmqctl set_permissions -p / ${rabbitmq.admin_user} \".*\" \".*\" \".*\""]
+      - type: run_command
+        name: 删除RabbitMQ默认guest用户
+        command: bash
+        args: ["-lc", "rabbitmqctl delete_user guest || true"]
+      - type: run_command
+        name: 设置RabbitMQ ha-all策略
+        command: bash
+        args: ["-lc", "rabbitmqctl set_policy ha-all '^' '{\"ha-mode\":\"all\"}' --priority 0 --apply-to all"]
+  - id: rabbitmq.test.001.check-status
+    name: 测试rabbitmq组件-001任务-检查服务和集群状态
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查RabbitMQ服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "rabbitmq-server"]
+      - type: run_command
+        name: 检查RabbitMQ集群状态
+        command: rabbitmqctl
+        args: ["-q", "status"]
+  - id: rabbitmq.rollback.001.clean
+    name: 清理rabbitmq组件-001任务-停止服务删除数据并卸载主程序包
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止RabbitMQ服务
+        service: rabbitmq-server
+        enabled: false
+        state: stopped
+        ignore_error: true
+      # epmd ships with the erlang yum package as an independent
+      # socket-activated unit. Stopping rabbitmq-server alone leaves
+      # epmd holding port 4369 and prevents the next deploy from
+      # registering the rabbit node. Stop both the .service and the
+      # .socket so socket-activation does not bring epmd back up.
+      - type: systemd_service
+        name: 停止epmd服务
+        service: epmd.service
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止epmd socket
+        service: epmd.socket
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: run_command
+        name: 终止epmd残留进程
+        command: bash
+        args: ["-lc", "pkill -9 -x epmd 2>/dev/null || true"]
+        ignore_error: true
+      # Uninstall rabbitmq-server before deleting its directories.
+      # Order matters: deleting /var/lib/rabbitmq, /var/log/rabbitmq,
+      # /etc/rabbitmq while the rpm is still installed leaves the host
+      # in a broken middle state where the next deploy sees `yum
+      # install rabbitmq-server` as a no-op (rpm already installed)
+      # and skips %post that would have re-created the directories,
+      # causing systemd to fail with `status=200/CHDIR` because
+      # WorkingDirectory=/var/lib/rabbitmq does not exist.
+      #
+      # `erlang` is intentionally NOT removed: it's a shared runtime,
+      # rpm uninstall is slow, and reinstalling drags in a long
+      # dependency chain. rabbit's redeploy will reuse the existing
+      # erlang.
+      - type: rpm_package
+        name: 卸载RabbitMQ主程序包
+        state: removed
+        package: rabbitmq-server
+        ignore_error: true
+      - type: remove_path
+        name: 删除RabbitMQ数据目录
+        target: ${rabbitmq.data_dir}
+      - type: remove_path
+        name: 删除RabbitMQ日志目录
+        target: ${rabbitmq.log_dir}
+      - type: remove_path
+        name: 删除RabbitMQ配置目录
+        target: ${rabbitmq.config_dir}
+      - type: run_command
+        name: 删除RabbitMQ本机hostname解析
+        command: bash
+        args: ["-lc", "sed -i '/ # dfctl-rabbitmq-hostname$/d' /etc/hosts"]
+        ignore_error: true
+  - id: rabbitmq.residue.001.check-clean
+    name: 残留检查rabbitmq组件-001任务-确认RabbitMQ目录已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认RabbitMQ日志目录已删除
+        command: test
+        args: ["!", "-e", "${rabbitmq.log_dir}"]
+      - type: run_command
+        name: 确认epmd进程已停止
+        command: bash
+        args: ["-lc", "! pgrep -x epmd >/dev/null"]
+      - type: run_command
+        name: 确认rabbitmq-server主程序包已卸载
+        command: bash
+        args: ["-lc", "! rpm -q rabbitmq-server >/dev/null 2>&1"]

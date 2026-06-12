@@ -1,0 +1,144 @@
+display_name: nacos
+enabled: true
+order: 22
+depends_on: [master, postgresql]
+target_roles: [nacos]
+tasks:
+  - id: nacos.preflight.001.check-resources
+    name: 预检查nacos组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查Nacos离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: nacos.render.001.render-config
+    name: 生成nacos组件-001任务-生成应用和K8s服务配置
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建Nacos生成配置目录
+        target: ${cluster.remote_root}/cloudhis/nacos
+        mode: "0755"
+      - type: render_template
+        name: 渲染Nacos应用配置application.properties
+        source: nacos/templates/application.properties.tmpl
+        target: ${cluster.remote_root}/cloudhis/nacos/application.properties
+        mode: "0644"
+        template_vars:
+          postgresql_host: ${postgresql.nacos_host}
+          postgresql_port: ${postgresql.nacos_port}
+          db_name: ${nacos.db_name}
+          db_user: ${nacos.db_user}
+          db_password: ${nacos.db_password}
+      - type: write_file
+        name: 写入Nacos集群节点配置cluster.conf
+        target: ${cluster.remote_root}/cloudhis/nacos/cluster.conf
+        mode: "0644"
+        content: |
+          ${nacos.cluster_lines}
+      - type: render_template
+        name: 渲染Nacos K8s Service资源清单
+        source: nacos/templates/nacos.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/nacos/nacos.yaml
+        mode: "0644"
+        template_vars: {}
+  - id: nacos.deploy.001.install-and-start
+    name: 部署nacos组件-001任务-解压配置启动服务并创建K8s服务
+    phase: deploy
+    actions:
+      - type: yum_package
+        name: 安装Java和解压工具依赖
+        state: present
+        packages: [java-1.8.0-openjdk, java-1.8.0-openjdk-devel, unzip]
+      - type: extract_archive
+        name: 解压Nacos安装包到/opt
+        source: nacos/nacos.zip
+        target: /opt
+      - type: copy_path
+        name: 部署Nacos应用配置application.properties
+        source: ${cluster.remote_root}/cloudhis/nacos/application.properties
+        target: /opt/nacos/conf/application.properties
+        mode: "0644"
+      - type: copy_path
+        name: 部署Nacos集群配置cluster.conf
+        source: ${cluster.remote_root}/cloudhis/nacos/cluster.conf
+        target: /opt/nacos/conf/cluster.conf
+        mode: "0644"
+      - type: backup_file
+        name: 备份Nacos systemd服务文件
+        target: /etc/systemd/system/nacos.service
+      - type: render_template
+        name: 渲染Nacos systemd服务文件
+        source: nacos/templates/nacos.service.tmpl
+        target: /etc/systemd/system/nacos.service
+        mode: "0644"
+        template_vars: {}
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 重置Nacos systemd失败状态
+        command: systemctl
+        args: ["reset-failed", "nacos"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动Nacos服务
+        service: nacos
+        enabled: true
+        state: started
+      - type: kubectl_apply
+        name: 应用Nacos K8s Service资源
+        file: ${cluster.remote_root}/cloudhis/nacos/nacos.yaml
+        kubeconfig: /root/.kube/config
+        ignore_error: true
+  - id: nacos.test.001.check-service
+    name: 测试nacos组件-001任务-检查Nacos端口
+    phase: test
+    actions:
+      - type: tcp_check
+        name: 检查Nacos 8848端口连通性
+        address: ${host.address}:8848
+        timeout: 3s
+        attempts: 60
+        interval: 2s
+      - type: run_command
+        name: 观察Nacos K8s endpoints状态
+        command: bash
+        args: ["-lc", "kubectl --kubeconfig /root/.kube/config get endpoints nacos -n default -o wide"]
+        ignore_error: true
+  - id: nacos.rollback.001.clean
+    name: 清理nacos组件-001任务-停止服务删除目录和K8s资源
+    phase: rollback
+    actions:
+      - type: kubectl_delete
+        name: 删除Nacos K8s Service资源
+        file: ${cluster.remote_root}/cloudhis/nacos/nacos.yaml
+        kubeconfig: /root/.kube/config
+        ignore_not_found: true
+        ignore_error: true
+      - type: systemd_service
+        name: 停止Nacos服务
+        service: nacos
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: restore_file
+        name: 恢复Nacos systemd服务文件
+        target: /etc/systemd/system/nacos.service
+      - type: remove_path
+        name: 删除Nacos安装目录
+        target: /opt/nacos
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: nacos.residue.001.check-clean
+    name: 残留检查nacos组件-001任务-确认Nacos目录已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认Nacos安装目录已删除
+        command: test
+        args: ["!", "-e", "/opt/nacos"]

@@ -1,0 +1,127 @@
+display_name: skywalking
+enabled: true
+order: 20
+target_roles: [skywalking]
+tasks:
+  - id: skywalking.preflight.001.check-resources
+    name: 预检查skywalking组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查SkyWalking离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: skywalking.deploy.001.install-and-start
+    name: 部署skywalking组件-001任务-安装Java解压并启动进程
+    phase: deploy
+    actions:
+      - type: yum_package
+        name: 安装Java运行时依赖
+        state: present
+        packages: [java-1.8.0-openjdk, java-1.8.0-openjdk-devel]
+      - type: extract_archive
+        name: 解压SkyWalking安装包到/opt
+        source: skywalking/skywalking.zip
+        target: /opt
+      - type: render_template
+        name: 渲染SkyWalking OAP配置application.yml
+        source: skywalking/templates/application.yml.tmpl
+        target: ${skywalking.install_dir}/config/application.yml
+        mode: "0644"
+        template_vars:
+          env_name: ${env.name}
+          elasticsearch_address: ${elasticsearch.address}
+          elasticsearch_http_port: ${elasticsearch.http_port}
+          elasticsearch_password: ${elasticsearch.password}
+      - type: render_template
+        name: 渲染SkyWalking Web配置webapp.yml
+        source: skywalking/templates/webapp.yml.tmpl
+        target: ${skywalking.install_dir}/webapp/webapp.yml
+        mode: "0644"
+        template_vars:
+          web_port: ${skywalking.web_port}
+      - type: backup_file
+        name: 备份SkyWalking自检脚本
+        target: /usr/bin/check_skywalking.sh
+      - type: render_template
+        name: 渲染SkyWalking自检脚本
+        source: skywalking/templates/check_skywalking.sh.tmpl
+        target: /usr/bin/check_skywalking.sh
+        mode: "0755"
+        template_vars:
+          install_dir: ${skywalking.install_dir}
+      - type: cron_line
+        name: 删除旧版SkyWalking自检定时任务
+        state: absent
+        marker: restart-skywalking
+        ignore_error: true
+      - type: cron_line
+        name: 安装SkyWalking自检定时任务
+        state: present
+        marker: 定期重启skywalking
+        line: "0 */2 * * * /usr/bin/check_skywalking.sh # 定期重启skywalking"
+      - type: run_command
+        name: 启动进程
+        command: bash
+        args: ["-lc", "${skywalking.install_dir}/bin/startup.sh"]
+  - id: skywalking.test.001.check-process
+    name: 测试skywalking组件-001任务-检查进程
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查SkyWalking进程存在
+        command: pgrep
+        args: ["-f", "skywalking"]
+  - id: skywalking.rollback.001.clean
+    name: 清理skywalking组件-001任务-停止进程恢复脚本并删除目录
+    phase: rollback
+    actions:
+      - type: run_command
+        name: 停止进程
+        command: bash
+        args: ["-lc", "${skywalking.install_dir}/bin/shutdown.sh"]
+        ignore_error: true
+      - type: run_command
+        name: 强制清理残留进程
+        command: bash
+        args: ["-lc", "pkill -f 'oap-lib[s]|skywalking-webap[p]|skywalkin[g]' || true"]
+        ignore_error: true
+      - type: cron_line
+        name: 删除SkyWalking自检定时任务
+        state: absent
+        marker: 定期重启skywalking
+        ignore_error: true
+      - type: cron_line
+        name: 删除旧版SkyWalking自检定时任务
+        state: absent
+        marker: restart-skywalking
+        ignore_error: true
+      - type: remove_path
+        name: 删除SkyWalking自检脚本
+        target: /usr/bin/check_skywalking.sh
+      - type: remove_path
+        name: 删除SkyWalking安装目录
+        target: ${skywalking.install_dir}
+  - id: skywalking.residue.001.check-clean
+    name: 残留检查skywalking组件-001任务-确认SkyWalking目录已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认SkyWalking安装目录已删除
+        command: test
+        args: ["!", "-e", "${skywalking.install_dir}"]
+      - type: run_command
+        name: 确认SkyWalking自检脚本已删除
+        command: test
+        args: ["!", "-e", "/usr/bin/check_skywalking.sh"]
+      - type: run_command
+        name: 确认SkyWalking自检定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F '定期重启skywalking')"]
+      - type: run_command
+        name: 确认旧版SkyWalking自检定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F 'restart-skywalking')"]
+      - type: run_command
+        name: 检查进程不存在
+        command: bash
+        args: ["-lc", "! pgrep -f 'oap-lib[s]|skywalking-webap[p]|skywalkin[g]'"]

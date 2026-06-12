@@ -1,0 +1,45 @@
+cluster:
+  name: dfhis
+  resource_dir: /opt/his-deploy/resources/offline
+  state_dir: /opt/his-deploy/state
+  remote_root: /opt/his-deploy
+
+
+hosts:
+  - name: deploy-1
+    address: 172.16.100.150
+    roles: [controller-render, docker, dns, df-ops, ftp, nfs, skywalking]
+  - name: slb-1
+    address: 172.16.100.152
+    roles: [slb]
+  - name: master-1
+    address: 172.16.100.154
+    roles: [prepare, containerd, kube-lb, etcd, master, nacos, calico]
+  - name: master-2
+    address: 172.16.100.155
+    roles: [prepare, containerd, kube-lb, etcd, master, nacos, calico]
+  - name: master-3
+    address: 172.16.100.156
+    roles: [prepare, containerd, kube-lb, etcd, master, nacos, calico]
+  - name: node-1
+    address: 172.16.100.157
+    roles: [prepare, containerd, kube-lb, node, plugin, calico]
+  - name: node-2
+    address: 172.16.100.158
+    roles: [prepare, containerd, kube-lb, node, plugin, calico]
+  - name: node-3
+    address: 172.16.100.159
+    roles: [prepare, containerd, kube-lb, node, plugin, calico]
+  - name: mid-1
+    address: 172.16.100.160
+    roles: [nexus, rabbitmq, redis, minio]
+  - name: soft-1
+    address: 172.16.100.161
+    roles: [postgresql, elasticsearch, minio]
+  - name: soft-2
+    address: 172.16.100.162
+    roles: [postgresql, elasticsearch, minio]
+  - name: soft-3
+    address: 172.16.100.163
+    roles: [postgresql, elasticsearch, minio]
+

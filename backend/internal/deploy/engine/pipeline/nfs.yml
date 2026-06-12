@@ -1,0 +1,96 @@
+display_name: nfs
+enabled: true
+order: 4
+target_roles: [nfs]
+tasks:
+  - id: nfs.preflight.001.check-system
+    name: 预检查nfs组件-001任务-检查系统命令
+    phase: preflight
+    actions:
+      - type: run_command
+        name: 检查systemctl命令可用
+        command: systemctl
+        args: ["--version"]
+  - id: nfs.deploy.001.install-and-start
+    name: 部署nfs组件-001任务-安装软件包创建共享目录并启动服务
+    phase: deploy
+    actions:
+      - type: yum_package
+        name: 安装NFS和rpcbind软件包
+        state: present
+        packages: [nfs-utils, rpcbind]
+      - type: record_path_state
+        name: 记录NFS共享目录部署前状态
+        target: ${nfs.share_dir}
+      - type: ensure_dir
+        name: 创建NFS共享目录
+        target: ${nfs.share_dir}
+        mode: "0755"
+      - type: backup_file
+        name: 备份NFS导出配置exports
+        target: /etc/exports
+      - type: write_file
+        name: 写入NFS导出配置exports
+        target: /etc/exports
+        mode: "0644"
+        content: |
+          ${nfs.share_dir} *(rw,sync,no_root_squash)
+      - type: run_command
+        name: 刷新NFS导出列表
+        command: exportfs
+        args: ["-ra"]
+      - type: systemd_service
+        name: 启动rpcbind服务
+        service: rpcbind
+        enabled: true
+        state: started
+      - type: systemd_service
+        name: 启动NFS服务
+        service: nfs
+        enabled: true
+        state: started
+  - id: nfs.test.001.check-services
+    name: 测试nfs组件-001任务-检查服务和导出目录
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查NFS服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "nfs"]
+      - type: run_command
+        name: 检查NFS导出目录列表
+        command: exportfs
+        args: ["-v"]
+  - id: nfs.rollback.001.clean
+    name: 清理nfs组件-001任务-停止服务恢复exports并清理新增目录
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止NFS服务
+        service: nfs
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: restore_file
+        name: 恢复NFS导出配置exports
+        target: /etc/exports
+      - type: run_command
+        name: 刷新NFS导出列表
+        command: exportfs
+        args: ["-ra"]
+        ignore_error: true
+      - type: remove_path_if_created
+        name: 删除NFS共享目录
+        target: ${nfs.share_dir}
+      # 不再删 /data 父目录: /data 是常用的公共顶层目录, 运维可能
+      # 在 deploy 之间在 /data 下放别的脚本/数据, remove_path_if_created
+      # 的"deploy 前 absent → rollback 删"语义会误伤共用根。空 /data
+      # 目录占空间几乎为零, 留着无害。
+  - id: nfs.residue.001.check-clean
+    name: 残留检查nfs组件-001任务-确认新增共享目录已按状态清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认NFS共享目录已删除
+        command: test
+        args: ["!", "-e", "${nfs.share_dir}"]

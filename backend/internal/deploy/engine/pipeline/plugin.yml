@@ -1,0 +1,349 @@
+display_name: plugin
+enabled: true
+order: 12
+depends_on: [calico, docker, nfs, nexus]
+target_roles: [controller-render]
+tasks:
+  - id: plugin.preflight.001.check-kubectl
+    name: 预检查plugin组件-001任务-检查kubectl和模板资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查plugin离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: plugin.render.001.render-manifests
+    name: 生成plugin组件-001任务-生成平台K8s资源
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建plugin生成配置目录
+        target: ${cluster.remote_root}/cloudhis/plugin
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建nfs-provisioner生成目录
+        target: ${cluster.remote_root}/cloudhis/plugin/nfs-provisioner
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建his configmap生成目录
+        target: ${cluster.remote_root}/cloudhis/plugin/his/configmap
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建his ingress生成目录
+        target: ${cluster.remote_root}/cloudhis/plugin/his/ingress
+        mode: "0755"
+      - type: render_template
+        name: 渲染CoreDNS清单
+        source: plugin/templates/dns/coredns.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/coredns.yaml
+        mode: "0644"
+        template_vars: &plugin_template_vars
+          env_name: ${env.name}
+          nexus_address: ${nexus.address}
+          nfs_address: ${nfs.address}
+          node_address: ${node.address}
+          skywalking_address: ${skywalking.address}
+          etcd_endpoints: ${etcd.endpoints}
+          cluster_dns_svc_ip: ${plugin.cluster_dns_svc_ip}
+          local_dns_cache: ${plugin.local_dns_cache}
+          kubernetes_node_count: ${kubernetes.node_count}
+      - type: render_template
+        name: 渲染NodeLocalDNS清单
+        source: plugin/templates/dns/nodelocaldns.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/nodelocaldns.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染Metrics Server清单
+        source: plugin/templates/metrics-server/components.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/metrics-server.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染Ingress Nginx清单
+        source: plugin/templates/ingress/ingress.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/ingress.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染NFS Provisioner清单
+        source: plugin/templates/nfs-provisioner/nfs-provisioner.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/nfs-provisioner/nfs-provisioner.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染Loki ConfigMap清单
+        source: plugin/templates/loki/loki-configmap.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/loki-configmap.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染Promtail ConfigMap清单
+        source: plugin/templates/loki/loki-protail-configmap.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/loki-protail-configmap.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染Loki RBAC清单
+        source: plugin/templates/loki/loki-rbac.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/loki-rbac.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染Promtail RBAC清单
+        source: plugin/templates/loki/loki-protail-rbac.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/loki-protail-rbac.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染Loki Deployment清单
+        source: plugin/templates/loki/loki.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/loki.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染Promtail DaemonSet清单
+        source: plugin/templates/loki/loki-protail.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/loki-protail.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染Seata Deployment清单
+        source: plugin/templates/seata/seata.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/seata.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染Seata Service清单
+        source: plugin/templates/seata/seata-service.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/seata-service.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染web-cdr ConfigMap
+        source: plugin/templates/his/configmap/web-cdr.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/his/configmap/web-cdr.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染web-opm ConfigMap
+        source: plugin/templates/his/configmap/web-opm.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/his/configmap/web-opm.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染web-main ConfigMap
+        source: plugin/templates/his/configmap/web-main.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/his/configmap/web-main.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染cdr Ingress
+        source: plugin/templates/his/ingress/cdr.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/his/ingress/cdr.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染opm Ingress
+        source: plugin/templates/his/ingress/opm.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/his/ingress/opm.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染main Ingress
+        source: plugin/templates/his/ingress/main.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/his/ingress/main.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染api Ingress
+        source: plugin/templates/his/ingress/api.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/his/ingress/api.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+      - type: render_template
+        name: 渲染oapi Ingress
+        source: plugin/templates/his/ingress/oapi.yaml.tmpl
+        target: ${cluster.remote_root}/cloudhis/plugin/his/ingress/oapi.yaml
+        mode: "0644"
+        template_vars: *plugin_template_vars
+  - id: plugin.deploy.001.apply-resources
+    name: 部署plugin组件-001任务-应用平台插件和业务资源
+    phase: deploy
+    actions:
+      - type: run_command
+        name: 创建业务命名空间
+        command: bash
+        args:
+          - -lc
+          - |
+            kubectl --kubeconfig /root/.kube/config get namespace ${env.name} >/dev/null 2>&1 || kubectl --kubeconfig /root/.kube/config create namespace ${env.name}
+      - type: run_command
+        name: 应用CoreDNS/NodeLocalDNS/Metrics/Ingress/NFS/Loki/Seata/HIS K8s资源
+        command: bash
+        args:
+          - -lc
+          - |
+            set -euo pipefail
+            base=${cluster.remote_root}/cloudhis/plugin
+            nodelocaldns_changed=0
+            ingress_changed=0
+            loki_changed=0
+            apply_if_changed() {
+              file="$1"
+              changed_var="${2:-}"
+              diff_file="/tmp/dfctl-plugin-$(basename "$file").diff"
+              set +e
+              kubectl --kubeconfig /root/.kube/config diff -f "$base/$file" > "$diff_file" 2>&1
+              rc=$?
+              set -e
+              cat "$diff_file"
+              if [ "$rc" -eq 0 ]; then
+                return 0
+              fi
+              if [ "$rc" -eq 1 ]; then
+                kubectl --kubeconfig /root/.kube/config apply -f "$base/$file"
+                case "$changed_var" in
+                  nodelocaldns_changed) nodelocaldns_changed=1 ;;
+                  loki_changed) loki_changed=1 ;;
+                esac
+                return 0
+              fi
+              return "$rc"
+            }
+            apply_ingress_if_changed() {
+              diff_file=/tmp/ingress-nginx.diff
+              set +e
+              kubectl --kubeconfig /root/.kube/config diff -f "$base/ingress.yaml" > "$diff_file" 2>&1
+              rc=$?
+              set -e
+              cat "$diff_file"
+              if [ "$rc" -eq 0 ]; then
+                return 0
+              fi
+              if [ "$rc" -eq 1 ]; then
+                if grep '^diff ' "$diff_file" | grep -vqE 'batch\.v1\.Job\.kube-system\.ingress-nginx-admission-(create|patch)$'; then
+                  kubectl --kubeconfig /root/.kube/config apply -f "$base/ingress.yaml"
+                  ingress_changed=1
+                fi
+                return 0
+              fi
+              return "$rc"
+            }
+            apply_if_changed coredns.yaml
+            apply_if_changed nodelocaldns.yaml nodelocaldns_changed
+            if [ "$nodelocaldns_changed" -eq 1 ]; then
+              sleep 20
+            fi
+            apply_if_changed metrics-server.yaml
+            apply_ingress_if_changed
+            if [ "$ingress_changed" -eq 1 ]; then
+              sleep 30
+            fi
+            apply_if_changed nfs-provisioner/nfs-provisioner.yaml
+            apply_if_changed loki-rbac.yaml
+            apply_if_changed loki-protail-rbac.yaml
+            apply_if_changed loki-configmap.yaml
+            apply_if_changed loki-protail-configmap.yaml
+            apply_if_changed loki-protail.yaml loki_changed
+            apply_if_changed loki.yaml loki_changed
+            if [ "$loki_changed" -eq 1 ]; then
+              sleep 30
+            fi
+            kubectl --kubeconfig /root/.kube/config apply -f "$base/his/configmap/web-cdr.yaml"
+            kubectl --kubeconfig /root/.kube/config apply -f "$base/his/configmap/web-opm.yaml"
+            kubectl --kubeconfig /root/.kube/config apply -f "$base/his/configmap/web-main.yaml"
+            kubectl --kubeconfig /root/.kube/config apply -f "$base/his/ingress/cdr.yaml"
+            kubectl --kubeconfig /root/.kube/config apply -f "$base/his/ingress/opm.yaml"
+            kubectl --kubeconfig /root/.kube/config apply -f "$base/his/ingress/main.yaml"
+            kubectl --kubeconfig /root/.kube/config apply -f "$base/his/ingress/api.yaml"
+            kubectl --kubeconfig /root/.kube/config apply -f "$base/his/ingress/oapi.yaml"
+            apply_if_changed seata.yaml
+            apply_if_changed seata-service.yaml
+      - type: run_command
+        name: 将CoreDNS副本数扩到节点数量
+        command: bash
+        args: ["-lc", "kubectl --kubeconfig /root/.kube/config scale deployment coredns -n kube-system --replicas=${kubernetes.node_count}"]
+        ignore_error: true
+      - type: run_command
+        name: 清理Ingress admission一次性Job
+        command: bash
+        args:
+          - -lc
+          - |
+            kubectl --kubeconfig /root/.kube/config delete job ingress-nginx-admission-create -n kube-system --ignore-not-found=true || true
+            kubectl --kubeconfig /root/.kube/config delete pod -n kube-system -l job-name=ingress-nginx-admission-create --ignore-not-found=true || true
+            kubectl --kubeconfig /root/.kube/config delete job ingress-nginx-admission-patch -n kube-system --ignore-not-found=true || true
+            kubectl --kubeconfig /root/.kube/config delete pod -n kube-system -l job-name=ingress-nginx-admission-patch --ignore-not-found=true || true
+        ignore_error: true
+  - id: plugin.test.001.check-resources
+    name: 测试plugin组件-001任务-检查业务命名空间
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查业务命名空间存在
+        command: kubectl
+        args: ["--kubeconfig", "/root/.kube/config", "get", "ns", "${env.name}"]
+  - id: plugin.rollback.001.clean
+    name: 清理plugin组件-001任务-删除平台插件和业务资源
+    phase: rollback
+    actions:
+      - type: run_command
+        name: 删除CoreDNS/NodeLocalDNS/Metrics/Ingress/NFS/Loki/Seata/HIS K8s资源
+        command: bash
+        args:
+          - -lc
+          - |
+            base=${cluster.remote_root}/cloudhis/plugin
+            kubectl_bin=${cluster.resource_dir}/controller-render/kubectl
+            files="his/ingress/oapi.yaml his/ingress/api.yaml his/ingress/main.yaml his/ingress/opm.yaml his/ingress/cdr.yaml his/configmap/web-main.yaml his/configmap/web-opm.yaml his/configmap/web-cdr.yaml seata-service.yaml seata.yaml loki.yaml loki-protail.yaml loki-protail-configmap.yaml loki-configmap.yaml loki-protail-rbac.yaml loki-rbac.yaml nfs-provisioner/nfs-provisioner.yaml ingress.yaml metrics-server.yaml nodelocaldns.yaml coredns.yaml"
+            for file in $files; do
+              [ -f "$base/$file" ] && "$kubectl_bin" --kubeconfig /root/.kube/config delete -f "$base/$file" --ignore-not-found=true || true
+            done
+        ignore_error: true
+      # Use absolute path to the offline-bundle kubectl, NOT bare `kubectl`
+      # which depends on /usr/bin/kubectl that controller-render rollback
+      # has already removed at this point in cleanup-all. Plus
+      # ignore_error so a half-collapsed K8s cluster does not block the
+      # rest of the rollback chain (master / etcd are about to be torn
+      # down anyway, dangling resources are fine).
+      - type: run_command
+        name: 删除业务命名空间
+        command: ${cluster.resource_dir}/controller-render/kubectl
+        args: ["--kubeconfig", "/root/.kube/config", "delete", "namespace", "${env.name}", "--ignore-not-found=true"]
+        ignore_error: true
+      - type: remove_path
+        name: 删除plugin生成目录
+        target: ${cluster.remote_root}/cloudhis/plugin
+  - id: plugin.residue.001.check-clean
+    name: 残留检查plugin组件-001任务-确认业务命名空间已清理
+    phase: residue
+    actions:
+      # `kubectl delete namespace` is asynchronous: when there are PVCs
+      # / CRDs in the namespace it can take 1-2 minutes to finalize.
+      # Without the retry loop residue runs immediately after rollback
+      # and almost always sees the namespace still in Terminating state,
+      # which surfaces in the UI as a (false-positive) failure. We
+      # accept either fully-gone or Terminating as "clean enough" — the
+      # latter means deletion has been ordered and finalizers are
+      # working, so it's safe to move on.
+      - type: run_command
+        name: 检查业务命名空间不存在或正在终止
+        command: bash
+        args:
+          - -lc
+          - |
+            kubectl_bin=${cluster.resource_dir}/controller-render/kubectl
+            for i in $(seq 1 12); do
+              status=$("$kubectl_bin" --kubeconfig /root/.kube/config get ns ${env.name} -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              if [ -z "$status" ]; then
+                exit 0
+              fi
+              if [ "$status" = "Terminating" ]; then
+                # namespace is on its way out; deletion has been ordered,
+                # finalizers will catch up. Don't block residue.
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "命名空间 ${env.name} 60 秒后仍未进入 Terminating/已删除状态" >&2
+            exit 1

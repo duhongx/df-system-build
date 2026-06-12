@@ -1,0 +1,54 @@
+display_name: preflight
+enabled: true
+order: -1
+target_roles: [controller-render]
+tasks:
+  - id: preflight.preflight.001.inventory-and-offline-resources
+    name: 预检查preflight组件-001任务-检查部署配置和离线资源
+    phase: preflight
+    actions:
+      - type: run_command
+        name: 检查CIDR网段和环境名及关键离线文件
+        scope: control
+        command: bash
+        args:
+          - -lc
+          - |
+            set -euo pipefail
+            [[ "${network.service_cidr}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]
+            [[ "${network.cluster_cidr}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]
+            [[ -n "${env.name}" ]]
+            test -x ${cluster.resource_dir}/controller-render/kubectl
+            test -x ${cluster.resource_dir}/node/kubelet
+            test -x ${cluster.resource_dir}/node/kube-proxy
+            test -x ${cluster.resource_dir}/containerd/containerd
+            test -x ${cluster.resource_dir}/containerd/containerd-shim-runc-v2
+            test -x ${cluster.resource_dir}/containerd/ctr
+            test -x ${cluster.resource_dir}/etcd/etcd
+            test -x ${cluster.resource_dir}/controller-render/cfssl
+            test -x ${cluster.resource_dir}/controller-render/cfssljson
+            test -f ${cluster.resource_dir}/docker/images/pause.tar
+            test -f ${cluster.resource_dir}/nexus/nexus.zip
+  - id: preflight.test.001.resource-manifest
+    name: 测试preflight组件-001任务-检查资源清单
+    phase: test
+    actions:
+      - type: resource_preflight
+        name: 检查离线资源清单完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: preflight.rollback.001.noop
+    name: 回滚preflight组件-001任务-部署预检查不产生部署资源
+    phase: rollback
+    actions:
+      - type: run_command
+        name: 确认preflight组件无回滚动作
+        command: bash
+        args: ["-lc", "echo preflight component has no deployment-owned rollback action"]
+  - id: preflight.residue.001.noop
+    name: 残留检查preflight组件-001任务-部署预检查不产生部署资源
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认preflight组件无部署产物
+        command: bash
+        args: ["-lc", "echo preflight component has no deployment-owned residue"]

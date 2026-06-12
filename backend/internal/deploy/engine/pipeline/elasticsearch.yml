@@ -1,0 +1,370 @@
+display_name: elasticsearch
+enabled: true
+order: 14
+target_roles: [elasticsearch]
+tasks:
+  - id: elasticsearch.preflight.001.check-resources
+    name: 预检查elasticsearch组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查Elasticsearch离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: elasticsearch.render.001.render-config
+    name: 生成elasticsearch组件-001任务-生成配置文件
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建Elasticsearch生成配置目录
+        # Per-host subdir keeps render output for each ES node
+        # separated. elasticsearch.yml.tmpl uses ${host.address} for
+        # node.name; without scoping, three soft hosts all overwrite
+        # the same control-side path and every node ends up with the
+        # third host's IP as node.name. cluster bootstrap then fails
+        # because the three "members" share the same node name.
+        target: ${cluster.remote_root}/cloudhis/elasticsearch/${host.address}
+        mode: "0755"
+      - type: render_template
+        name: 渲染Elasticsearch主配置elasticsearch.yml
+        source: elasticsearch/templates/elasticsearch.yml.tmpl
+        target: ${cluster.remote_root}/cloudhis/elasticsearch/${host.address}/elasticsearch.yml
+        mode: "0644"
+        template_vars:
+          env_name: ${env.name}
+          host_address: ${host.address}
+          http_port: ${elasticsearch.http_port}
+          data_dir: ${elasticsearch.data_dir}
+          log_dir: ${elasticsearch.log_dir}
+          seed_hosts: ${elasticsearch.seed_hosts}
+          initial_master_nodes: ${elasticsearch.initial_master_nodes}
+          seed_hosts_yaml: ${elasticsearch.seed_hosts_yaml}
+          initial_master_nodes_yaml: ${elasticsearch.initial_master_nodes_yaml}
+          node_count: ${elasticsearch.node_count}
+          mode: ${elasticsearch.mode}
+      - type: render_template
+        name: 渲染Elasticsearch JVM配置jvm.options
+        source: elasticsearch/templates/jvm.options.tmpl
+        target: ${cluster.remote_root}/cloudhis/elasticsearch/${host.address}/jvm.options
+        mode: "0644"
+        template_vars: {}
+  - id: elasticsearch.deploy.001.install-config-and-start
+    name: 部署elasticsearch组件-001任务-设置内核参数安装RPM并启动服务
+    phase: deploy
+    actions:
+      - type: sysctl_set
+        name: 设置vm.max_map_count内核参数
+        key: vm.max_map_count
+        value: "262144"
+        config_file: /etc/sysctl.conf
+      - type: rpm_package
+        name: 安装Elasticsearch RPM主程序包
+        state: installed
+        source: elasticsearch/elasticsearch-7.17.29-x86_64.rpm
+      - type: ensure_dir
+        name: 创建Elasticsearch数据目录
+        target: ${elasticsearch.data_dir}
+        mode: "0750"
+      - type: ensure_dir
+        name: 创建Elasticsearch日志目录
+        target: ${elasticsearch.log_dir}
+        mode: "0750"
+      - type: chown
+        name: 设置Elasticsearch数据目录属主
+        target: ${elasticsearch.data_dir}
+        owner: elasticsearch
+        group: elasticsearch
+      - type: chown
+        name: 设置Elasticsearch日志目录属主
+        target: ${elasticsearch.log_dir}
+        owner: elasticsearch
+        group: elasticsearch
+      - type: backup_file
+        name: 备份Elasticsearch主配置elasticsearch.yml
+        target: /etc/elasticsearch/elasticsearch.yml
+      - type: copy_path
+        name: 部署Elasticsearch主配置elasticsearch.yml
+        source: ${cluster.remote_root}/cloudhis/elasticsearch/${host.address}/elasticsearch.yml
+        target: /etc/elasticsearch/elasticsearch.yml
+        mode: "0644"
+      - type: backup_file
+        name: 备份Elasticsearch JVM配置jvm.options
+        target: /etc/elasticsearch/jvm.options
+      - type: copy_path
+        name: 部署Elasticsearch JVM配置jvm.options
+        source: ${cluster.remote_root}/cloudhis/elasticsearch/${host.address}/jvm.options
+        target: /etc/elasticsearch/jvm.options
+        mode: "0644"
+      - type: ensure_dir
+        name: 创建Elasticsearch证书目录
+        target: /etc/elasticsearch/certs
+        mode: "0700"
+      - type: run_command
+        name: 首节点生成Elasticsearch CA和集群通用证书
+        command: bash
+        args:
+          - -lc
+          - |
+            set -euo pipefail
+            if [ ! -f /etc/elasticsearch/certs/elastic-stack-ca.p12 ]; then
+              /usr/share/elasticsearch/bin/elasticsearch-certutil ca --silent --out /etc/elasticsearch/certs/elastic-stack-ca.p12 --pass '${elasticsearch.password}'
+            fi
+            if [ ! -f /etc/elasticsearch/certs/elastic-certificates.p12 ]; then
+              /usr/share/elasticsearch/bin/elasticsearch-certutil cert --silent --ca /etc/elasticsearch/certs/elastic-stack-ca.p12 --ca-pass '${elasticsearch.password}' --name prod --out /etc/elasticsearch/certs/elastic-certificates.p12 --pass '${elasticsearch.password}'
+            fi
+            keytool=/usr/share/elasticsearch/jdk/bin/keytool
+            if ! "$keytool" -list -storetype PKCS12 -keystore /etc/elasticsearch/certs/elastic-certificates.p12 -storepass '${elasticsearch.password}' 2>/dev/null | grep -qE '^ca,'; then
+              "$keytool" -exportcert -rfc -alias ca -keystore /etc/elasticsearch/certs/elastic-stack-ca.p12 -storetype PKCS12 -storepass '${elasticsearch.password}' -file /etc/elasticsearch/certs/ca.crt
+              "$keytool" -importcert -noprompt -alias ca -file /etc/elasticsearch/certs/ca.crt -keystore /etc/elasticsearch/certs/elastic-certificates.p12 -storetype PKCS12 -storepass '${elasticsearch.password}'
+            fi
+            chown -R elasticsearch:elasticsearch /etc/elasticsearch/certs
+            chmod 0600 /etc/elasticsearch/certs/elastic-stack-ca.p12 /etc/elasticsearch/certs/elastic-certificates.p12
+        only_host_address: ${elasticsearch.address}
+      # Pull the freshly-generated keystore back to the control side so
+      # the rest of the cluster can grab it. Source path is the seed
+      # node's local /etc/elasticsearch/certs/...; target is the
+      # control-side cloudhis cache. only_host_address keeps fetch on
+      # the seed only — fan-out fires fetch_file on every ES host but
+      # the gate skips non-seed hops.
+      - type: fetch_file
+        name: 拉取首节点Elasticsearch集群证书到控制端
+        source: /etc/elasticsearch/certs/elastic-certificates.p12
+        target: ${cluster.remote_root}/cloudhis/elasticsearch/certs/elastic-certificates.p12
+        mode: "0600"
+        only_host_address: ${elasticsearch.address}
+      # Push the keystore from the control side onto every ES node.
+      # On the seed this is a no-op (file already exists with same
+      # content); on non-seed nodes it's the actual distribution step.
+      - type: copy_path
+        name: 分发Elasticsearch集群证书到当前节点
+        source: ${cluster.remote_root}/cloudhis/elasticsearch/certs/elastic-certificates.p12
+        target: /etc/elasticsearch/certs/elastic-certificates.p12
+        mode: "0600"
+      - type: run_command
+        name: 修正Elasticsearch集群证书属主
+        command: bash
+        args:
+          - -lc
+          - |
+            chown elasticsearch:elasticsearch /etc/elasticsearch/certs/elastic-certificates.p12
+      - type: run_command
+        name: 清理keystore并写入transport TLS密码
+        command: bash
+        args:
+          - -lc
+          - |
+            set -euo pipefail
+            ks=/usr/share/elasticsearch/bin/elasticsearch-keystore
+            [ -f /etc/elasticsearch/elasticsearch.keystore ] || "$ks" create
+            for key in autoconfiguration.password_hash bootstrap.password xpack.security.http.ssl.keystore.secure_password xpack.security.http.ssl.truststore.secure_password; do
+              "$ks" list 2>/dev/null | grep -qx "$key" && "$ks" remove "$key" || true
+            done
+            if ! "$ks" list 2>/dev/null | grep -qx xpack.security.transport.ssl.keystore.secure_password; then
+              printf '%s' '${elasticsearch.password}' | "$ks" add --stdin -f xpack.security.transport.ssl.keystore.secure_password
+            fi
+            if ! "$ks" list 2>/dev/null | grep -qx xpack.security.transport.ssl.truststore.secure_password; then
+              printf '%s' '${elasticsearch.password}' | "$ks" add --stdin -f xpack.security.transport.ssl.truststore.secure_password
+            fi
+            chown root:elasticsearch /etc/elasticsearch/elasticsearch.keystore
+            chmod 0660 /etc/elasticsearch/elasticsearch.keystore
+      - type: run_command
+        name: 设置Elasticsearch配置目录属主
+        command: chown
+        args: ["-R", "elasticsearch:elasticsearch", "/etc/elasticsearch"]
+      - type: backup_file
+        name: 备份Elasticsearch索引清理脚本
+        target: /usr/bin/del_es_index.sh
+      - type: render_template
+        name: 渲染Elasticsearch索引清理脚本
+        source: elasticsearch/templates/del_es_index.sh.tmpl
+        target: /usr/bin/del_es_index.sh
+        mode: "0755"
+        template_vars:
+          elasticsearch_address: ${elasticsearch.address}
+          elasticsearch_http_port: ${elasticsearch.http_port}
+          elasticsearch_password: ${elasticsearch.password}
+      - type: cron_line
+        name: 删除旧版Elasticsearch索引清理定时任务
+        state: absent
+        marker: cleanup-es-index
+        ignore_error: true
+        only_host_address: ${elasticsearch.address}
+      - type: cron_line
+        name: 安装Elasticsearch索引清理定时任务
+        state: present
+        marker: 清理过期的索引
+        line: "30 1 * * * /usr/bin/del_es_index.sh # 清理过期的索引"
+        only_host_address: ${elasticsearch.address}
+  - id: elasticsearch.deploy.002.start-cluster
+    name: 部署elasticsearch组件-002任务-非阻塞启动集群服务
+    phase: deploy
+    actions:
+      - type: run_command
+        name: 设置Elasticsearch服务开机自启
+        command: systemctl
+        args: ["enable", "elasticsearch"]
+      - type: run_command
+        name: 非阻塞启动Elasticsearch服务
+        command: systemctl
+        args: ["start", "--no-block", "elasticsearch"]
+  - id: elasticsearch.deploy.003.bootstrap-password
+    name: 部署elasticsearch组件-003任务-首节点校正elastic密码
+    phase: deploy
+    actions:
+      - type: run_command
+        name: 首节点写入bootstrap密码并校正elastic最终密码
+        command: bash
+        args:
+          - -lc
+          - |
+            set -euo pipefail
+            es_url='http://${elasticsearch.address}:${elasticsearch.http_port}'
+            es_creds='elastic:${elasticsearch.password}'
+            # Already-correct credentials → nothing to do.
+            if curl --max-time 5 -fsu "$es_creds" "$es_url/_security/_authenticate" >/dev/null 2>&1; then
+              exit 0
+            fi
+            ks=/usr/share/elasticsearch/bin/elasticsearch-keystore
+            "$ks" list 2>/dev/null | grep -qx bootstrap.password || printf '%s' '${elasticsearch.password}' | "$ks" add --stdin -f bootstrap.password
+            chown root:elasticsearch /etc/elasticsearch/elasticsearch.keystore
+            chmod 0660 /etc/elasticsearch/elasticsearch.keystore
+            systemctl restart elasticsearch
+            # Wait for Elasticsearch to be ready in two phases:
+            # 1) HTTP responds with auth challenge (port open),
+            # 2) Cluster health is at least yellow (Security index
+            #    initialised) — without this the next POST hits a
+            #    Security module that's still starting and gets 401/503,
+            #    failing curl with -f and exiting 22.
+            for i in $(seq 1 60); do
+              curl -sk --max-time 3 -o /dev/null "$es_url/" >/dev/null 2>&1 && break
+              sleep 2
+            done
+            curl --max-time 30 -fsu "$es_creds" \
+              "$es_url/_cluster/health?wait_for_status=yellow&timeout=60s" >/dev/null
+            # Re-assert the password through the API (no-op when bootstrap
+            # already set it to the target). Wrap in a retry: the
+            # Security module sometimes lags a few seconds behind cluster
+            # health on the very first start.
+            for i in $(seq 1 15); do
+              if curl --max-time 5 -fsu "$es_creds" -H 'Content-Type: application/json' \
+                  -X POST "$es_url/_security/user/elastic/_password" \
+                  -d '{"password":"${elasticsearch.password}"}' >/dev/null 2>&1; then
+                break
+              fi
+              [ "$i" = "15" ] && {
+                echo "POST _security/user/elastic/_password failed after 15 retries" >&2
+                exit 22
+              }
+              sleep 2
+            done
+            "$ks" remove bootstrap.password || true
+        only_host_address: ${elasticsearch.address}
+  - id: elasticsearch.test.001.check-health
+    name: 测试elasticsearch组件-001任务-检查HTTP健康状态
+    phase: test
+    actions:
+      - type: http_check
+        name: 检查Elasticsearch HTTP端口需要认证
+        url: http://${host.address}:${elasticsearch.http_port}/
+        expected_status: 401
+        timeout: 3s
+        attempts: 30
+        interval: 2s
+      - type: run_command
+        name: 等待Elasticsearch集群健康接口可用
+        command: bash
+        args: ["-lc", "for i in $(seq 1 30); do curl --max-time 5 -fsu 'elastic:${elasticsearch.password}' 'http://127.0.0.1:${elasticsearch.http_port}/_cluster/health' && exit 0 || sleep 2; done; exit 1"]
+      - type: run_command
+        name: 检查Elasticsearch集群状态为green或yellow
+        command: bash
+        args: ["-lc", "curl --max-time 5 -fsu 'elastic:${elasticsearch.password}' 'http://127.0.0.1:${elasticsearch.http_port}/_cluster/health' | grep -E '\"status\":\"(green|yellow)\"'"]
+      - type: run_command
+        name: 检查Elasticsearch集群节点数量
+        command: bash
+        args: ["-lc", "number_of_nodes=$(curl --max-time 5 -fsu 'elastic:${elasticsearch.password}' 'http://127.0.0.1:${elasticsearch.http_port}/_cluster/health' | sed -n 's/.*\"number_of_nodes\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p'); [ \"$number_of_nodes\" == \"${elasticsearch.node_count}\" ]"]
+  - id: elasticsearch.rollback.001.clean
+    name: 清理elasticsearch组件-001任务-停止服务卸载主包并删除数据
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止Elasticsearch服务
+        service: elasticsearch
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: cron_line
+        name: 删除Elasticsearch索引清理定时任务
+        state: absent
+        marker: 清理过期的索引
+        ignore_error: true
+      - type: cron_line
+        name: 删除旧版Elasticsearch索引清理定时任务
+        state: absent
+        marker: cleanup-es-index
+        ignore_error: true
+      - type: restore_file
+        name: 恢复Elasticsearch主配置elasticsearch.yml
+        target: /etc/elasticsearch/elasticsearch.yml
+      - type: restore_file
+        name: 恢复Elasticsearch JVM配置jvm.options
+        target: /etc/elasticsearch/jvm.options
+      - type: rpm_package
+        name: 卸载Elasticsearch RPM主程序包
+        state: removed
+        package: elasticsearch
+        ignore_error: true
+      - type: remove_path
+        name: 删除Elasticsearch数据目录
+        target: ${elasticsearch.data_dir}
+      - type: remove_path
+        name: 删除Elasticsearch日志目录
+        target: ${elasticsearch.log_dir}
+      - type: remove_path
+        name: 删除Elasticsearch配置目录
+        target: /etc/elasticsearch
+      - type: remove_path
+        name: 删除Elasticsearch索引清理脚本
+        target: /usr/bin/del_es_index.sh
+      - type: sysctl_restore
+        name: 恢复vm.max_map_count内核参数
+        key: vm.max_map_count
+        config_file: /etc/sysctl.conf
+      # Control-side cache populated by fetch_file at deploy time.
+      # "Whoever deploys it cleans it" — without this, the next
+      # deploy reuses the stale keystore and silently skips the
+      # certutil step (the elastic-certificates.p12 already exists
+      # on the seed node from the previous run).
+      - type: run_command
+        name: 删除Elasticsearch控制端证书缓存
+        scope: control
+        command: bash
+        args:
+          - -lc
+          - rm -rf "${cluster.remote_root}/cloudhis/elasticsearch"
+        ignore_error: true
+  - id: elasticsearch.residue.001.check-clean
+    name: 残留检查elasticsearch组件-001任务-确认数据目录已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认Elasticsearch数据目录已删除
+        command: test
+        args: ["!", "-e", "${elasticsearch.data_dir}"]
+      - type: run_command
+        name: 确认Elasticsearch索引清理脚本已删除
+        command: test
+        args: ["!", "-e", "/usr/bin/del_es_index.sh"]
+      - type: run_command
+        name: 确认Elasticsearch索引清理定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F '清理过期的索引')"]
+      - type: run_command
+        name: 确认旧版Elasticsearch索引清理定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F 'cleanup-es-index')"]
+      - type: run_command
+        name: 确认控制端Elasticsearch证书缓存已删除
+        scope: control
+        command: bash
+        args:
+          - -lc
+          - test ! -e "${cluster.remote_root}/cloudhis/elasticsearch"

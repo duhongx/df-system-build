@@ -1,0 +1,203 @@
+display_name: slb
+enabled: true
+order: 6
+target_roles: [slb]
+tasks:
+  - id: slb.preflight.001.check-system
+    name: 预检查slb组件-001任务-检查系统环境
+    phase: preflight
+    actions:
+      - type: run_command
+        name: 检查ip命令可用
+        command: ip
+        args: ["addr"]
+  - id: slb.render.001.render-config
+    name: 生成slb组件-001任务-生成haproxy配置
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建SLB生成配置目录
+        target: ${cluster.remote_root}/cloudhis/slb
+        mode: "0755"
+      - type: slb_config
+        name: 生成HAProxy配置文件
+        target: ${cluster.remote_root}/cloudhis/slb
+        content: |
+          global
+                  log /dev/log    local1 warning
+                  chroot /var/lib/haproxy
+                  user haproxy
+                  group haproxy
+                  daemon
+                  maxconn 50000
+
+          defaults
+                  log     global
+                  timeout connect 5s
+                  timeout client  10m
+                  timeout server  10m
+
+          listen stats
+                  bind 0.0.0.0:10080
+                  mode http
+                  log global
+                  maxconn 10
+                  stats enable
+                  stats hide-version
+                  stats refresh 30s
+                  stats show-node
+                  stats auth admin:cloudhis2123
+                  stats uri /haproxy?stats
+
+          listen master
+                  bind 0.0.0.0:6443
+                  mode tcp
+                  option tcplog
+                  option dontlognull
+                  option dontlog-normal
+                  balance roundrobin
+          ${haproxy.master_servers}
+
+          listen ingress-node
+          	bind 0.0.0.0:80
+          	mode tcp
+                  option tcplog
+                  option dontlognull
+                  option dontlog-normal
+                  balance roundrobin
+          ${haproxy.node_http_servers}
+
+
+          listen ingress-node-tls
+          	bind 0.0.0.0:443
+          	mode tcp
+                  option tcplog
+                  option dontlognull
+                  option dontlog-normal
+                  balance roundrobin
+          ${haproxy.node_https_servers}
+
+          listen minio-console
+                  bind 0.0.0.0:8000
+                  mode tcp
+                  option tcplog
+                  option dontlognull
+                  option dontlog-normal
+                  balance roundrobin
+          ${haproxy.minio_console_servers}
+
+          listen minio-api
+                  bind 0.0.0.0:9000
+                  mode tcp
+                  option tcplog
+                  option dontlognull
+                  option dontlog-normal
+                  balance roundrobin
+          ${haproxy.minio_api_servers}
+
+          listen pg-rw
+                  bind 0.0.0.0:5000
+                  mode tcp
+                  option tcplog
+                  option dontlognull
+                  option dontlog-normal
+                  balance roundrobin
+                  option httpchk OPTIONS /master
+                  http-check expect status 200
+                  default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+          ${haproxy.postgresql_servers}
+
+
+          listen pg-repl
+                  bind 0.0.0.0:6000
+                  mode tcp
+                  option tcplog
+                  option dontlognull
+                  option dontlog-normal
+                  balance roundrobin
+                  option httpchk OPTIONS /replica
+                  http-check expect status 200
+                  default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+          ${haproxy.postgresql_servers}
+
+          listen rabbitmq
+                  bind 0.0.0.0:5672
+                  mode tcp
+                  option tcplog
+                  option dontlognull
+                  option dontlog-normal
+                  balance roundrobin
+          ${haproxy.rabbitmq_servers}
+
+          listen rabbitmq-management
+                  bind 0.0.0.0:15672
+                  mode tcp
+                  option tcplog
+                  option dontlognull
+                  option dontlog-normal
+                  balance roundrobin
+          ${haproxy.rabbitmq_management_servers}
+  - id: slb.deploy.001.install-and-start
+    name: 部署slb组件-001任务-安装haproxy并启动负载均衡服务
+    phase: deploy
+    actions:
+      - type: yum_package
+        name: 安装HAProxy软件包
+        state: present
+        packages: [haproxy]
+      - type: backup_file
+        name: 备份HAProxy主配置haproxy.cfg
+        target: /etc/haproxy/haproxy.cfg
+      - type: copy_path
+        name: 部署HAProxy主配置haproxy.cfg
+        source: ${cluster.remote_root}/cloudhis/slb/haproxy.cfg
+        target: /etc/haproxy/haproxy.cfg
+        mode: "0644"
+      - type: systemd_service
+        name: 启动HAProxy服务
+        service: haproxy
+        enabled: true
+        state: started
+  - id: slb.test.001.check-services
+    name: 测试slb组件-001任务-检查负载均衡服务
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查HAProxy服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "haproxy"]
+  - id: slb.rollback.001.clean
+    name: 清理slb组件-001任务-停止服务恢复配置并卸载haproxy
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止HAProxy服务
+        service: haproxy
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: restore_file
+        name: 恢复HAProxy主配置haproxy.cfg
+        target: /etc/haproxy/haproxy.cfg
+      # haproxy 是 SLB 部署专属包,按"装+卸"对称原则必须卸载;不卸
+      # 会让 /usr/sbin/haproxy 永远留在系统上,且下次部署再装也会
+      # 跳过(rpm 已装则 yum install no-op)无法吃到新版本。卸载顺
+      # 序在 systemd_service stopped + restore_file 之后,跟 rabbitmq
+      # 修复模式一致。
+      - type: rpm_package
+        name: 卸载HAProxy主程序包
+        state: removed
+        package: haproxy
+        ignore_error: true
+  - id: slb.residue.001.check-clean
+    name: 残留检查slb组件-001任务-确认SLB配置已恢复且haproxy已卸载
+    phase: residue
+    actions:
+      - type: run_command
+        name: 检查HAProxy服务已停止
+        command: bash
+        args: ["-lc", "! systemctl is-active --quiet haproxy"]
+      - type: run_command
+        name: 确认haproxy主程序包已卸载
+        command: bash
+        args: ["-lc", "! rpm -q haproxy >/dev/null 2>&1"]

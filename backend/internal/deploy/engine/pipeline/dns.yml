@@ -1,0 +1,308 @@
+display_name: dns
+enabled: true
+order: 19
+target_roles: [dns]
+tasks:
+  - id: dns.preflight.001.check-resources
+    name: 预检查dns组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查DNS离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: dns.render.001.render-config
+    name: 生成dns组件-001任务-生成CoreDNS配置
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建DNS生成配置目录
+        target: ${cluster.remote_root}/cloudhis/dns
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建DNS证书生成目录
+        target: ${cluster.remote_root}/cloudhis/dns/ssl
+        mode: "0755"
+      - type: render_template
+        name: 渲染DNS CA配置文件
+        source: dns/templates/ca-config.json.tmpl
+        target: ${cluster.remote_root}/cloudhis/dns/ssl/ca-config.json
+        mode: "0644"
+        template_vars: {}
+      - type: render_template
+        name: 渲染DNS CA CSR文件
+        source: dns/templates/ca-csr.json.tmpl
+        target: ${cluster.remote_root}/cloudhis/dns/ssl/ca-csr.json
+        mode: "0644"
+        template_vars: {}
+      - type: render_template
+        name: 渲染DNS etcd CSR文件
+        source: dns/templates/etcd-csr.json.tmpl
+        target: ${cluster.remote_root}/cloudhis/dns/ssl/etcd-csr.json
+        mode: "0644"
+        template_vars:
+          host_address: ${host.address}
+      - type: run_command
+        name: 生成DNS etcd CA证书
+        scope: control
+        command: bash
+        args: ["-lc", "cd ${cluster.remote_root}/cloudhis/dns/ssl && ${cluster.resource_dir}/controller-render/cfssl gencert -initca ca-csr.json | ${cluster.resource_dir}/controller-render/cfssljson -bare ca"]
+        creates: ${cluster.remote_root}/cloudhis/dns/ssl/ca.pem
+      - type: run_command
+        name: 生成DNS etcd服务证书
+        scope: control
+        command: bash
+        args: ["-lc", "cd ${cluster.remote_root}/cloudhis/dns/ssl && ${cluster.resource_dir}/controller-render/cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=server etcd-csr.json | ${cluster.resource_dir}/controller-render/cfssljson -bare etcd"]
+        creates: ${cluster.remote_root}/cloudhis/dns/ssl/etcd.pem
+      - type: render_template
+        name: 渲染CoreDNS主配置Corefile
+        source: dns/templates/Corefile.tmpl
+        target: ${cluster.remote_root}/cloudhis/dns/Corefile
+        mode: "0644"
+        template_vars:
+          host_address: ${host.address}
+  - id: dns.deploy.001.install-and-start
+    name: 部署dns组件-001任务-安装etcd和CoreDNS并启动服务
+    phase: deploy
+    actions:
+      - type: ensure_dir
+        name: 创建DNS专用etcd数据目录
+        target: /var/lib/etcd
+        mode: "0700"
+      - type: ensure_dir
+        name: 创建DNS etcd证书目录
+        target: /etc/etcd/ssl
+        mode: "0700"
+      - type: ensure_dir
+        name: 创建CoreDNS工作目录
+        target: /opt/coredns
+        mode: "0700"
+      - type: ensure_dir
+        name: 创建CoreDNS配置目录
+        target: /etc/coredns
+        mode: "0700"
+      - type: run_command
+        name: 写入DNS ETCDCTL_API环境变量
+        command: bash
+        args: ["-lc", "for f in /root/.bashrc /etc/profile; do touch \"$f\"; grep -qxF 'export ETCDCTL_API=3' \"$f\" || printf '%s\\n' 'export ETCDCTL_API=3' >> \"$f\"; done"]
+      - type: backup_file
+        name: 备份etcd二进制文件
+        target: /usr/local/bin/etcd
+      - type: copy_file
+        name: 安装etcd二进制文件
+        source: dns/etcd
+        target: /usr/local/bin/etcd
+        mode: "0755"
+      - type: backup_file
+        name: 备份etcdctl二进制文件
+        target: /usr/local/bin/etcdctl
+      - type: copy_file
+        name: 安装etcdctl二进制文件
+        source: dns/etcdctl
+        target: /usr/local/bin/etcdctl
+        mode: "0755"
+      - type: copy_path
+        name: 分发DNS etcd CA证书
+        source: ${cluster.remote_root}/cloudhis/dns/ssl/ca.pem
+        target: /etc/etcd/ssl/ca.pem
+        mode: "0644"
+      - type: copy_path
+        name: 分发DNS etcd服务证书
+        source: ${cluster.remote_root}/cloudhis/dns/ssl/etcd.pem
+        target: /etc/etcd/ssl/etcd.pem
+        mode: "0644"
+      - type: copy_path
+        name: 分发DNS etcd服务私钥
+        source: ${cluster.remote_root}/cloudhis/dns/ssl/etcd-key.pem
+        target: /etc/etcd/ssl/etcd-key.pem
+        mode: "0644"
+      - type: backup_file
+        name: 备份DNS etcd systemd服务文件
+        target: /etc/systemd/system/etcd.service
+      - type: render_template
+        name: 渲染DNS etcd systemd服务文件
+        source: dns/templates/etcd.service.tmpl
+        target: /etc/systemd/system/etcd.service
+        mode: "0644"
+        template_vars:
+          host_address: ${host.address}
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 重置DNS etcd服务失败状态
+        command: systemctl
+        args: ["reset-failed", "etcd"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动DNS etcd服务
+        service: etcd
+        enabled: true
+        state: started
+      - type: backup_file
+        name: 备份coredns二进制文件
+        target: /usr/local/bin/coredns
+      - type: copy_file
+        name: 安装coredns二进制文件
+        source: dns/coredns
+        target: /usr/local/bin/coredns
+        mode: "0755"
+      - type: copy_path
+        name: 部署CoreDNS主配置Corefile
+        source: ${cluster.remote_root}/cloudhis/dns/Corefile
+        target: /etc/coredns/Corefile
+        mode: "0644"
+      - type: backup_file
+        name: 备份CoreDNS systemd服务文件
+        target: /etc/systemd/system/coredns.service
+      - type: render_template
+        name: 渲染CoreDNS systemd服务文件
+        source: dns/templates/coredns.service.tmpl
+        target: /etc/systemd/system/coredns.service
+        mode: "0644"
+        template_vars: {}
+      - type: backup_file
+        name: 备份messages日志清理脚本
+        target: /usr/bin/del_message.sh
+      - type: write_file
+        name: 写入messages日志清理脚本
+        target: /usr/bin/del_message.sh
+        mode: "0755"
+        content: |
+          #!/usr/bin/env sh
+          find /var/log/ -mtime +1 -name "messages-*" -exec rm -rf {} \;
+      - type: cron_line
+        name: 安装messages日志清理定时任务
+        state: present
+        marker: 清理过期的 messages 日志
+        line: "0 1 * * * /usr/bin/del_message.sh # 清理过期的 messages 日志"
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 重置CoreDNS服务失败状态
+        command: systemctl
+        args: ["reset-failed", "coredns"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动CoreDNS服务
+        service: coredns
+        enabled: true
+        state: started
+      - type: run_command
+        name: 写入api域名到CoreDNS
+        command: bash
+        args: ["-lc", "export ETCDCTL_API=3; value='{host: ${slb.address}, ttl: 10}'; current=$(/usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem get /coredns/com/his/api --print-value-only 2>/dev/null || true); if [ \"$current\" != \"$value\" ]; then /usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem put /coredns/com/his/api \"$value\"; fi"]
+      - type: run_command
+        name: 写入oapi域名到CoreDNS
+        command: bash
+        args: ["-lc", "export ETCDCTL_API=3; value='{host: ${slb.address}, ttl: 10}'; current=$(/usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem get /coredns/com/his/oapi --print-value-only 2>/dev/null || true); if [ \"$current\" != \"$value\" ]; then /usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem put /coredns/com/his/oapi \"$value\"; fi"]
+      - type: run_command
+        name: 写入opm域名到CoreDNS
+        command: bash
+        args: ["-lc", "export ETCDCTL_API=3; value='{host: ${slb.address}, ttl: 10}'; current=$(/usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem get /coredns/com/his/opm --print-value-only 2>/dev/null || true); if [ \"$current\" != \"$value\" ]; then /usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem put /coredns/com/his/opm \"$value\"; fi"]
+      - type: run_command
+        name: 写入cdr域名到CoreDNS
+        command: bash
+        args: ["-lc", "export ETCDCTL_API=3; value='{host: ${slb.address}, ttl: 10}'; current=$(/usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem get /coredns/com/his/cdr --print-value-only 2>/dev/null || true); if [ \"$current\" != \"$value\" ]; then /usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem put /coredns/com/his/cdr \"$value\"; fi"]
+      - type: run_command
+        name: 写入main域名到CoreDNS
+        command: bash
+        args: ["-lc", "export ETCDCTL_API=3; value='{host: ${slb.address}, ttl: 10}'; current=$(/usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem get /coredns/com/his/main --print-value-only 2>/dev/null || true); if [ \"$current\" != \"$value\" ]; then /usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem put /coredns/com/his/main \"$value\"; fi"]
+      - type: run_command
+        name: 写入cdn域名到CoreDNS
+        command: bash
+        args: ["-lc", "export ETCDCTL_API=3; value='{host: ${slb.address}, ttl: 10}'; current=$(/usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem get /coredns/com/his/cdn --print-value-only 2>/dev/null || true); if [ \"$current\" != \"$value\" ]; then /usr/local/bin/etcdctl --endpoints=https://${dns.address}:2379 --cacert=/etc/etcd/ssl/ca.pem --cert=/etc/etcd/ssl/etcd.pem --key=/etc/etcd/ssl/etcd-key.pem put /coredns/com/his/cdn \"$value\"; fi"]
+  - id: dns.test.001.check-service
+    name: 测试dns组件-001任务-检查DNS服务
+    phase: test
+    actions:
+      - type: tcp_check
+        name: 检查DNS 53端口连通性
+        address: ${host.address}:53
+        timeout: 2s
+  - id: dns.rollback.001.clean
+    name: 清理dns组件-001任务-停止服务恢复配置并删除文件
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止CoreDNS服务
+        service: coredns
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止DNS etcd服务
+        service: etcd
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: cron_line
+        name: 删除messages日志清理定时任务
+        state: absent
+        marker: 清理过期的 messages 日志
+        ignore_error: true
+      - type: restore_file
+        name: 恢复CoreDNS systemd服务文件
+        target: /etc/systemd/system/coredns.service
+      - type: restore_file
+        name: 恢复DNS etcd systemd服务文件
+        target: /etc/systemd/system/etcd.service
+      - type: remove_path
+        name: 删除CoreDNS配置目录
+        target: /etc/coredns
+      - type: remove_path
+        name: 删除DNS etcd数据目录
+        target: /var/lib/etcd
+      - type: remove_path
+        name: 删除DNS etcd证书目录
+        target: /etc/etcd/ssl
+      - type: run_command
+        name: 删除空DNS etcd配置目录
+        command: rmdir
+        args: ["/etc/etcd"]
+        ignore_error: true
+      - type: remove_path
+        name: 删除CoreDNS工作目录
+        target: /opt/coredns
+      - type: restore_file
+        name: 恢复etcd二进制文件
+        target: /usr/local/bin/etcd
+      - type: restore_file
+        name: 恢复etcdctl二进制文件
+        target: /usr/local/bin/etcdctl
+      - type: restore_file
+        name: 恢复coredns二进制文件
+        target: /usr/local/bin/coredns
+      - type: remove_path
+        name: 删除messages日志清理脚本
+        target: /usr/bin/del_message.sh
+      - type: remove_path
+        name: 删除DNS生成证书目录
+        target: ${cluster.remote_root}/cloudhis/dns
+      - type: run_command
+        name: 删除DNS ETCDCTL_API环境变量
+        command: bash
+        args: ["-lc", "for f in /root/.bashrc /etc/profile; do [ -f \"$f\" ] && sed -i '/^export ETCDCTL_API=3$/d' \"$f\" || true; done"]
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+        ignore_error: true
+  - id: dns.residue.001.check-clean
+    name: 残留检查dns组件-001任务-确认CoreDNS配置已清理
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认CoreDNS配置目录已删除
+        command: test
+        args: ["!", "-e", "/etc/coredns"]
+      - type: run_command
+        name: 确认messages日志清理脚本已删除
+        command: test
+        args: ["!", "-e", "/usr/bin/del_message.sh"]
+      - type: run_command
+        name: 确认messages日志清理定时任务已删除
+        command: bash
+        args: ["-lc", "! (crontab -l 2>/dev/null | grep -F '清理过期的 messages 日志')"]

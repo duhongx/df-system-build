@@ -1,0 +1,63 @@
+display_name: prepare
+enabled: true
+order: 3
+# prepare used to do host bootstrap (firewalld / packages / sysctl /
+# ulimit / kernel modules / kubectl completion ...). That has all
+# been re-homed:
+#   - OS-level baseline (firewalld, packages, ulimit, generic sysctl,
+#     sctp hardening, rsyslog, python symlink) → the manual
+#     OS-initialization stage, verified by the `check` component.
+#   - K8s host prep (kernel modules, network sysctl, ipvs packages)
+#     → containerd (K8s-only).
+#   - kubectl completion → node; crictl completion → containerd.
+#
+# dfctl no longer performs ANY operating-system configuration — that
+# is the OS-initialization stage's job. prepare is now a thin
+# per-host readiness gate kept (a) so the `init` virtual component and
+# the prepare→containerd dependency chain stay stable, and (b) as an
+# extension point for future deploy-specific (not OS-level) host prep.
+target_roles: [prepare]
+tasks:
+  - id: prepare.preflight.001.check-host-baseline
+    name: 预检查prepare组件-001任务-检查主机基础环境
+    phase: preflight
+    actions:
+      - type: run_command
+        name: 检查systemctl命令可用
+        command: systemctl
+        args: ["--version"]
+      - type: run_command
+        name: 检查sysctl内核参数可读
+        command: sysctl
+        args: ["-a"]
+  - id: prepare.deploy.001.confirm-offline-resources
+    name: 部署prepare组件-001任务-确认本机离线资源就绪
+    phase: deploy
+    actions:
+      - type: resource_preflight
+        name: 检查离线资源清单完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: prepare.test.001.noop
+    name: 测试prepare组件-001任务-无部署产物
+    phase: test
+    actions:
+      - type: run_command
+        name: 确认prepare无服务产物
+        command: bash
+        args: ["-lc", "echo prepare is a thin readiness gate with no service to test"]
+  - id: prepare.rollback.001.noop
+    name: 清理prepare组件-001任务-无部署产物
+    phase: rollback
+    actions:
+      - type: run_command
+        name: 确认prepare无回滚动作
+        command: bash
+        args: ["-lc", "echo prepare has no deployment-owned rollback action"]
+  - id: prepare.residue.001.noop
+    name: 残留检查prepare组件-001任务-无部署产物
+    phase: residue
+    actions:
+      - type: run_command
+        name: 确认prepare无部署产物
+        command: bash
+        args: ["-lc", "echo prepare has no deployment-owned residue"]

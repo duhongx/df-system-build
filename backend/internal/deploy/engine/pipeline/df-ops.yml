@@ -1,0 +1,406 @@
+display_name: df-ops
+enabled: true
+order: 21
+depends_on: [postgresql, redis]
+target_roles: [df-ops]
+tasks:
+  - id: df-ops.preflight.001.check-resources
+    name: 预检查df-ops组件-001任务-检查离线资源
+    phase: preflight
+    actions:
+      - type: resource_preflight
+        name: 检查df-ops离线资源完整性
+        manifest: ${cluster.remote_root}/resources/manifest.yml
+  - id: df-ops.render.001.render-config
+    name: 生成df-ops组件-001任务-生成应用配置
+    phase: render
+    actions:
+      - type: ensure_dir
+        name: 创建df-ops生成配置目录
+        target: ${cluster.remote_root}/cloudhis/df-ops
+        mode: "0755"
+      - type: write_file
+        name: 写入df-ops应用配置application.yml
+        target: ${cluster.remote_root}/cloudhis/df-ops/application.yml
+        mode: "0644"
+        content: |
+          server:
+            port: ${df-ops.server_port}
+  - id: df-ops.deploy.001.install-and-start
+    name: 部署df-ops组件-001任务-安装运行时应用包并启动服务
+    phase: deploy
+    actions:
+      - type: yum_package
+        name: 安装df-ops编译和运行时系统依赖
+        state: present
+        packages: [gcc, wget, curl, readline-devel, zlib, zlib-devel, bzip2, make, bzip2-devel, gcc-c++, openssl-devel, python-psycopg2, lrzsz, jq, libxml2, libxml2-devel, e2fsprogs-devel, uuid-devel, libuuid-devel, libffi, libffi-devel, ncurses, ncurses-devel, python3-devel, automake, redis6]
+      - type: ensure_dir
+        name: 创建df-ops部署状态目录
+        target: ${cluster.state_dir}/df-ops
+        mode: "0755"
+      - type: run_command
+        name: 记录postgres账号和sudoers部署前状态
+        command: bash
+        args:
+          - -lc
+          - |
+            mkdir -p ${cluster.state_dir}/df-ops
+            id -u postgres >/dev/null 2>&1 && printf 'present\n' > ${cluster.state_dir}/df-ops/postgres-user.state || printf 'absent\n' > ${cluster.state_dir}/df-ops/postgres-user.state
+            getent group postgres >/dev/null 2>&1 && printf 'present\n' > ${cluster.state_dir}/df-ops/postgres-group.state || printf 'absent\n' > ${cluster.state_dir}/df-ops/postgres-group.state
+            grep -Eq '^postgres[[:space:]]+ALL=\(root\)[[:space:]]+NOPASSWD:[[:space:]]+ALL$' /etc/sudoers && printf 'present\n' > ${cluster.state_dir}/df-ops/postgres-sudoers.state || printf 'absent\n' > ${cluster.state_dir}/df-ops/postgres-sudoers.state
+      - type: system_group
+        name: 创建postgres用户组
+        state: present
+        group: postgres
+      - type: system_user
+        name: 创建postgres系统用户
+        state: present
+        user: postgres
+        group: postgres
+      - type: run_command
+        name: 设置postgres用户密码
+        # 跟 postgresql 组件用同一个 ${postgresql.os_user_password}
+        # 配置, 保证两个组件创建的 postgres OS 用户密码一致 — 运维
+        # ssh postgres@host 不需要记两套密码。改密码改 postgresql
+        # 组件配置即可。
+        command: bash
+        args: ["-lc", "echo \"postgres:${postgresql.os_user_password}\" | chpasswd"]
+      - type: run_command
+        name: 将postgres用户加入sudoers
+        command: bash
+        args: ["-lc", "grep -Eq '^postgres[[:space:]]+ALL=\\(root\\)[[:space:]]+NOPASSWD:[[:space:]]+ALL$' /etc/sudoers || { cp /etc/sudoers /tmp/dfctl-sudoers && echo 'postgres        ALL=(root)        NOPASSWD: ALL' >> /tmp/dfctl-sudoers && visudo -cf /tmp/dfctl-sudoers && cp /tmp/dfctl-sudoers /etc/sudoers; }"]
+      - type: record_path_state
+        name: 记录df-ops安装目录部署前状态
+        target: ${df-ops.install_dir}
+      - type: record_path_state
+        name: 记录私有Java运行时目录部署前状态
+        target: ${df-ops.java_home}
+      - type: record_path_state
+        name: 记录内置PostgreSQL目录部署前状态
+        target: /opt/PostgreSQL
+      - type: record_path_state
+        name: 记录PostgreSQL源码目录部署前状态
+        target: /opt/postgresql-14.19
+      - type: record_path_state
+        name: 记录内置Redis配置目录部署前状态
+        target: /etc/redis
+      - type: record_path_state
+        name: 记录内置Redis数据目录部署前状态
+        target: /var/lib/redis
+      - type: record_path_state
+        name: 记录内置Redis日志目录部署前状态
+        target: /var/log/redis
+      - type: ensure_dir
+        name: 创建df-ops安装目录
+        target: ${df-ops.install_dir}
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建df-ops日志目录
+        target: ${df-ops.install_dir}/logs
+        mode: "0755"
+      - type: extract_archive
+        name: 解压私有Java运行时JDK-21
+        source: df-ops/java-21-jdk.tar.gz
+        target: /usr/local/src
+      - type: ensure_dir
+        name: 创建内置PostgreSQL数据目录
+        target: /opt/PostgreSQL/14/data
+        mode: "0700"
+      - type: ensure_dir
+        name: 创建内置PostgreSQL归档目录
+        target: /opt/PostgreSQL/14/archive
+        mode: "0700"
+      - type: run_command
+        name: 写入PostgreSQL环境变量
+        command: bash
+        args: ["-lc", "for f in /root/.bashrc /etc/profile; do touch \"$f\"; for line in 'export PGHOME=/opt/PostgreSQL/14' 'export PGDATA=/opt/PostgreSQL/14/data' 'export LD_LIBRARY_PATH=/opt/PostgreSQL/14/lib' 'export PATH=$PATH:$HOME/bin:/opt/PostgreSQL/14/bin'; do grep -qxF \"$line\" \"$f\" || printf '%s\\n' \"$line\" >> \"$f\"; done; done"]
+      - type: chown
+        name: 设置内置PostgreSQL目录属主为postgres
+        target: /opt/PostgreSQL
+        owner: postgres
+        group: postgres
+      - type: extract_archive
+        name: 解压PostgreSQL源码包
+        source: df-ops/postgresql-14.19.tar.gz
+        target: /opt
+      - type: run_command
+        name: 编译安装内置PostgreSQL
+        command: bash
+        args: ["-lc", "./configure --prefix=/opt/PostgreSQL/14 --with-pgport=5432 --with-python --with-openssl --with-uuid=ossp --with-libxml && gmake -j 8 world && make install && make install-docs && make install-world"]
+        work_dir: /opt/postgresql-14.19
+        creates: /opt/PostgreSQL/14/bin/postgres
+      - type: chown
+        name: 设置PostgreSQL安装目录属主
+        target: /opt/PostgreSQL
+        owner: postgres
+        group: postgres
+      - type: run_command
+        name: 递归设置PostgreSQL安装目录属主
+        command: chown
+        args: ["-R", "postgres:postgres", "/opt/PostgreSQL"]
+      - type: backup_file
+        name: 备份内置PostgreSQL systemd服务文件
+        target: /etc/systemd/system/postgresql.service
+      - type: render_template
+        name: 渲染内置PostgreSQL systemd服务文件
+        source: df-ops/templates/postgresql.service.tmpl
+        target: /etc/systemd/system/postgresql.service
+        mode: "0644"
+        template_vars: {}
+      - type: run_command
+        name: 初始化内置PostgreSQL
+        command: bash
+        args: ["-lc", "su - postgres -c '/opt/PostgreSQL/14/bin/initdb -D /opt/PostgreSQL/14/data'"]
+        creates: /opt/PostgreSQL/14/data/PG_VERSION
+      - type: render_template
+        name: 渲染内置PostgreSQL访问控制pg_hba.conf
+        source: df-ops/templates/pg_hba.conf.tmpl
+        target: /opt/PostgreSQL/14/data/pg_hba.conf
+        mode: "0600"
+        template_vars: {}
+      - type: render_template
+        name: 渲染内置PostgreSQL主配置postgresql.conf
+        source: df-ops/templates/postgresql.conf.tmpl
+        target: /opt/PostgreSQL/14/data/postgresql.conf
+        mode: "0600"
+        template_vars: {}
+      - type: run_command
+        name: 设置内置PostgreSQL数据目录属主为postgres
+        command: chown
+        args: ["-R", "postgres:postgres", "/opt/PostgreSQL"]
+      - type: chmod
+        name: 收紧内置PostgreSQL数据目录权限至0700
+        target: /opt/PostgreSQL/14/data
+        mode: "0700"
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 重置内置PostgreSQL服务失败状态
+        command: systemctl
+        args: ["reset-failed", "postgresql"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动内置PostgreSQL服务
+        service: postgresql
+        enabled: true
+        state: started
+      - type: run_command
+        name: 等待内置PostgreSQL socket就绪
+        command: bash
+        args: ["-lc", "for i in $(seq 1 30); do [ -S /tmp/.s.PGSQL.5432 ] && exit 0; sleep 1; done; test -S /tmp/.s.PGSQL.5432"]
+      - type: run_command
+        name: 创建df-ops数据库用户
+        command: bash
+        args: ["-lc", "su - postgres -c \"/opt/PostgreSQL/14/bin/psql -tAc \\\"SELECT 1 FROM pg_roles WHERE rolname='${df-ops.db_user}'\\\"\" | grep -q 1 || su - postgres -c \"/opt/PostgreSQL/14/bin/psql -c \\\"CREATE ROLE ${df-ops.db_user} LOGIN PASSWORD '${df-ops.db_password}';\\\"\""]
+      - type: run_command
+        name: 创建df_his数据库
+        command: bash
+        args: ["-lc", "su - postgres -c \"/opt/PostgreSQL/14/bin/psql -tAc \\\"SELECT 1 FROM pg_database WHERE datname='${df-ops.db_name}'\\\"\" | grep -q 1 || su - postgres -c \"/opt/PostgreSQL/14/bin/createdb -O ${df-ops.db_user} ${df-ops.db_name}\""]
+      - type: run_command
+        name: 回收public schema CREATE权限
+        command: bash
+        args: ["-lc", "su - postgres -c \"/opt/PostgreSQL/14/bin/psql -d ${df-ops.db_name} -c 'REVOKE CREATE ON SCHEMA public FROM PUBLIC;'\""]
+      - type: ensure_dir
+        name: 创建df-ops内置Redis配置目录
+        target: /etc/redis
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建df-ops内置Redis数据目录
+        target: /var/lib/redis
+        mode: "0755"
+      - type: ensure_dir
+        name: 创建df-ops内置Redis日志目录
+        target: /var/log/redis
+        mode: "0755"
+      - type: chown
+        name: 设置df-ops内置Redis数据目录属主
+        target: /var/lib/redis
+        owner: redis
+        group: redis
+      - type: chown
+        name: 设置df-ops内置Redis日志目录属主
+        target: /var/log/redis
+        owner: redis
+        group: redis
+      - type: render_template
+        name: 渲染df-ops内置Redis配置redis.conf
+        source: df-ops/templates/redis.conf.tmpl
+        target: /etc/redis/redis.conf
+        mode: "0644"
+        template_vars:
+          redis_password: ${df-ops.redis_password}
+      - type: run_command
+        name: 重置内置Redis服务失败状态
+        command: systemctl
+        args: ["reset-failed", "redis"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动df-ops内置Redis服务
+        service: redis
+        enabled: true
+        state: started
+      - type: run_command
+        name: 写入本地主机名映射
+        command: bash
+        args: ["-lc", "local_ip=$(hostname -I | awk '{print $1}'); sed -i '/ # df-ops$/d' /etc/hosts; echo \"$local_ip postgresql # df-ops\" >> /etc/hosts; echo \"$local_ip redis # df-ops\" >> /etc/hosts"]
+      - type: copy_file
+        name: 复制df-ops应用JAR包
+        source: df-ops/df-ops.jar
+        target: ${df-ops.install_dir}/df-ops.jar
+        mode: "0644"
+      - type: copy_path
+        name: 部署df-ops应用配置application.yml
+        source: ${cluster.remote_root}/cloudhis/df-ops/application.yml
+        target: ${df-ops.install_dir}/application.yml
+        mode: "0644"
+      - type: backup_file
+        name: 备份df-ops systemd服务文件
+        target: /etc/systemd/system/df-ops.service
+      - type: render_template
+        name: 渲染df-ops systemd服务文件
+        source: df-ops/templates/df-ops.service.tmpl
+        target: /etc/systemd/system/df-ops.service
+        mode: "0644"
+        template_vars:
+          java_home: ${df-ops.java_home}
+          install_dir: ${df-ops.install_dir}
+          server_port: ${df-ops.server_port}
+      - type: run_command
+        name: 重载systemd
+        command: systemctl
+        args: ["daemon-reload"]
+      - type: run_command
+        name: 重置df-ops服务失败状态
+        command: systemctl
+        args: ["reset-failed", "df-ops"]
+        ignore_error: true
+      - type: systemd_service
+        name: 启动df-ops应用服务
+        service: df-ops
+        enabled: true
+        state: started
+      - type: run_command
+        name: 等待df-ops服务启动并输出失败日志
+        command: bash
+        args: ["-lc", "for i in $(seq 1 5); do systemctl is-active df-ops | grep -qx active && exit 0; sleep 10; done; journalctl -u df-ops --no-pager | tail -n 20; systemctl is-active df-ops"]
+  - id: df-ops.test.001.check-service
+    name: 测试df-ops组件-001任务-检查服务状态
+    phase: test
+    actions:
+      - type: run_command
+        name: 检查df-ops服务运行状态
+        command: systemctl
+        args: ["is-active", "--quiet", "df-ops"]
+  - id: df-ops.rollback.001.clean
+    name: 清理df-ops组件-001任务-停止服务恢复文件并清理目录
+    phase: rollback
+    actions:
+      - type: systemd_service
+        name: 停止df-ops应用服务
+        service: df-ops
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止内置PostgreSQL服务
+        service: postgresql
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: systemd_service
+        name: 停止内置Redis服务
+        service: redis
+        enabled: false
+        state: stopped
+        ignore_error: true
+      - type: restore_file
+        name: 恢复df-ops systemd服务文件
+        target: /etc/systemd/system/df-ops.service
+      - type: restore_file
+        name: 恢复内置PostgreSQL systemd服务文件
+        target: /etc/systemd/system/postgresql.service
+      # redis6 是 df-ops 部署专属包, 按"装+卸"对称原则必须卸载。
+      # 不卸会让 /usr/bin/redis-server 和 yum 装的 redis.service
+      # 残留, 下次 redeploy 跳过 yum install 拿不到新版本。卸载放
+      # 在 systemd_service stopped 之后, 跟 ftp/slb/rabbitmq 同模式。
+      - type: rpm_package
+        name: 卸载redis6主程序包
+        state: removed
+        package: redis6
+        ignore_error: true
+      - type: run_command
+        name: 删除本地主机名映射
+        command: bash
+        args: ["-lc", "sed -i '/ # df-ops$/d' /etc/hosts"]
+        ignore_error: true
+      - type: remove_path_if_created_or_untracked
+        name: 删除df-ops安装目录
+        target: ${df-ops.install_dir}
+      - type: remove_path_if_created_or_untracked
+        name: 删除内置PostgreSQL目录
+        target: /opt/PostgreSQL
+      - type: remove_path_if_created_or_untracked
+        name: 删除私有Java运行时目录
+        target: ${df-ops.java_home}
+      - type: remove_path_if_created_or_untracked
+        name: 删除PostgreSQL源码目录
+        target: /opt/postgresql-14.19
+      - type: remove_path_if_created_or_untracked
+        name: 删除内置Redis配置目录
+        target: /etc/redis
+      - type: remove_path_if_created_or_untracked
+        name: 删除内置Redis数据目录
+        target: /var/lib/redis
+      - type: remove_path_if_created_or_untracked
+        name: 删除内置Redis日志目录
+        target: /var/log/redis
+      - type: run_command
+        name: 删除PostgreSQL环境变量
+        # sed pattern 跟具体 install_dir 解耦, 用 `^export VAR=`
+        # 起始锚定 + 路径段中含 `PostgreSQL` 的宽松匹配, 避免
+        # /opt/PostgreSQL/14 硬编码 — 改 install_dir 后仍能正确清理。
+        command: bash
+        args: ["-lc", "for f in /root/.bashrc /etc/profile; do [ -f \"$f\" ] && sed -i '/^export PGHOME=/d;/^export PGDATA=/d;/^export LD_LIBRARY_PATH=.*PostgreSQL/d;/^export PATH=.*PostgreSQL/d' \"$f\" || true; done"]
+        ignore_error: true
+      - type: run_command
+        name: 删除postgres sudoers授权
+        command: bash
+        args: ["-lc", "state=$(cat ${cluster.state_dir}/df-ops/postgres-sudoers.state 2>/dev/null || echo present); if [ \"$state\" = absent ]; then sed -i '/^postgres[[:space:]]\\+ALL=(root)[[:space:]]\\+NOPASSWD:[[:space:]]\\+ALL$/d' /etc/sudoers; fi"]
+        ignore_error: true
+      - type: run_command
+        name: 删除postgres系统用户
+        command: bash
+        args: ["-lc", "state=$(cat ${cluster.state_dir}/df-ops/postgres-user.state 2>/dev/null || echo present); if [ \"$state\" = absent ]; then userdel postgres 2>/dev/null || true; fi"]
+        ignore_error: true
+      - type: run_command
+        name: 删除postgres用户组
+        command: bash
+        args: ["-lc", "state=$(cat ${cluster.state_dir}/df-ops/postgres-group.state 2>/dev/null || echo present); if [ \"$state\" = absent ]; then groupdel postgres 2>/dev/null || true; fi"]
+        ignore_error: true
+  - id: df-ops.residue.001.check-clean
+    name: 残留检查df-ops组件-001任务-确认应用目录已清理
+    phase: residue
+    actions:
+      - type: assert_path_absent_if_created
+        name: 确认df-ops安装目录已删除
+        target: ${df-ops.install_dir}
+      - type: assert_path_absent_if_created
+        name: 确认私有Java运行时目录已删除
+        target: ${df-ops.java_home}
+      - type: assert_path_absent_if_created
+        name: 确认内置PostgreSQL目录已删除
+        target: /opt/PostgreSQL
+      - type: assert_path_absent_if_created
+        name: 确认PostgreSQL源码目录已删除
+        target: /opt/postgresql-14.19
+      - type: assert_path_absent_if_created
+        name: 确认内置Redis配置目录已删除
+        target: /etc/redis
+      - type: assert_path_absent_if_created
+        name: 确认内置Redis数据目录已删除
+        target: /var/lib/redis
+      - type: assert_path_absent_if_created
+        name: 确认内置Redis日志目录已删除
+        target: /var/log/redis
