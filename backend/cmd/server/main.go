@@ -11,6 +11,7 @@ import (
 
 	"df-build-server/internal/handler"
 	"df-build-server/internal/middleware"
+	deployrepo "df-build-server/internal/deploy/repository"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/scheduler"
 	"df-build-server/internal/web"
@@ -56,6 +57,13 @@ func main() {
 	}
 	repository.RunMigrations()
 	repository.SeedCoreData()
+
+	// Finalize any deployment runs left "in flight" by a previous crash.
+	if n, err := deployrepo.FinalizeOrphanedRuns(repository.DB); err != nil {
+		logger.Log.Warnf("failed to finalize orphaned deployment runs: %v", err)
+	} else if n > 0 {
+		logger.Log.Infof("finalized %d orphaned deployment run(s) as FAILED", n)
+	}
 
 	// Setup Gin
 	if cfg.Server.Mode == "release" {

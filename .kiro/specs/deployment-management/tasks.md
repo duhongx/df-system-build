@@ -93,16 +93,16 @@ graph TD
   - [x] 3.10 Verify `go build ./...` and AutoMigrate run against PostgreSQL cleanly.
   - _Requirements: 1.2, 7.1, 10.2_
 
-- [ ] 4. Repositories (Phase 2)
-  - [ ] 4.1 `repository/run.go` — RunRepo (Create, Get, List paged, UpdateStatus, AppendComponent).
-  - [ ] 4.2 `repository/state.go` — StateRepo with atomic transition enforcing CP-1 in one transaction.
-  - [ ] 4.3 `repository/target.go` — TargetRepo (Get/Put/List/byServer); reads join `model.Server` for SSH credentials.
-  - [ ] 4.4 `repository/override.go` — OverrideRepo (Get/Put/Delete by component_code).
-  - [ ] 4.5 `repository/globalconfig.go` — GlobalConfigRepo (Get/Put single-row upsert).
-  - [ ] 4.6 `repository/log.go` — LogRepo (Append, ListPaged, ListAll, ListSince(seq)).
-  - [ ] 4.7 `repository/offline.go` — OfflineRepo (UpsertCurrent, GetCurrent).
-  - [ ] 4.8 Add startup hook in `cmd/server/main.go` finalizing orphaned `status=RUNNING` runs as FAILED.
-  - [ ] 4.9 Unit tests: state transition atomicity (CP-1), target unique constraint, log append/list-since.
+- [x] 4. Repositories (Phase 2)
+  - [x] 4.1 `repository/run.go` — RunRepo (Create, Get, List paged, UpdateStatus, AppendComponent).
+  - [x] 4.2 `repository/state.go` — StateRepo with atomic transition enforcing CP-1 in one transaction.
+  - [x] 4.3 `repository/target.go` — TargetRepo (Get/Put/List/byServer); reads join `model.Server` for SSH credentials.
+  - [x] 4.4 `repository/override.go` — OverrideRepo (Get/Put/Delete by component_code).
+  - [x] 4.5 `repository/globalconfig.go` — GlobalConfigRepo (Get/Put single-row upsert).
+  - [x] 4.6 `repository/log.go` — LogRepo (Append, ListPaged, ListAll, ListSince(seq)).
+  - [x] 4.7 `repository/offline.go` — OfflineRepo (UpsertCurrent, GetCurrent).
+  - [x] 4.8 Add startup hook in `cmd/server/main.go` finalizing orphaned `status=RUNNING` runs as FAILED.
+  - [x] 4.9 Unit tests: state transition atomicity (CP-1), target unique constraint, log append/list-since.
   - _Requirements: 7.1, 7.2, 7.6, 7.8, 10.2_
 
 - [ ] 5. Action Library Adapter (Phase 1+2)
