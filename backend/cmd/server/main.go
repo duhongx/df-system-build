@@ -72,6 +72,11 @@ func main() {
 	} else if n > 0 {
 		logger.Log.Infof("finalized %d orphaned deployment run(s) as FAILED", n)
 	}
+	// Seed deployment-management defaults (settings, enabled components, and
+	// component default parameters) so rendering produces complete config.
+	if err := deployrepo.SeedDeploymentDefaults(repository.DB); err != nil {
+		logger.Log.Warnf("failed to seed deployment defaults: %v", err)
+	}
 
 	// Setup Gin
 	if cfg.Server.Mode == "release" {

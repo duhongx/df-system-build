@@ -52,18 +52,18 @@ export interface ConflictReport {
 
 export interface DeploymentRun {
   id: number
-  taskType: string
-  targetComponent: string
-  targetHost: string
-  dryRun: boolean
+  task_type: string
+  target_component: string
+  target_host: string
+  dry_run: boolean
   status: string
-  startedAt?: string
-  endedAt?: string
-  errorSummary: string
-  scopeKind: string
+  started_at?: string
+  ended_at?: string
+  error_summary: string
+  scope_kind: string
   phase: string
-  durationMs: number
-  createdAt: string
+  duration_ms: number
+  created_at: string
 }
 
 export interface DeploymentLog {

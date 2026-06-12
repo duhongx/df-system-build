@@ -67,9 +67,9 @@ async function handleCancel() {
 
 async function handleRollback() {
   if (!run.value) return
-  const body = run.value.scopeKind === 'all'
+  const body = run.value.scope_kind === 'all'
     ? { all: true }
-    : { component: run.value.targetComponent }
+    : { component: run.value.target_component }
   const res = await rollbackRun(body)
   ElMessage.success(`已发起回滚，运行 #${res.runId}`)
 }
@@ -84,19 +84,19 @@ onBeforeUnmount(() => es?.close())
 
 <template>
   <div class="page">
-    <h4 class="page-title">运行 #{{ runId }} {{ run ? `(${run.targetComponent})` : '' }}</h4>
+    <h4 class="page-title">运行 #{{ runId }} {{ run ? `(${run.target_component})` : '' }}</h4>
 
     <div class="content-card" v-if="run">
       <div class="overview">
         <span>状态 <el-tag :type="statusTag(run.status)" size="small">{{ run.status }}</el-tag></span>
-        <span>类型 <strong>{{ run.taskType }}</strong></span>
-        <span>范围 <strong>{{ run.scopeKind }}</strong></span>
-        <span>开始 <strong>{{ formatTime(run.startedAt) }}</strong></span>
+        <span>类型 <strong>{{ run.task_type }}</strong></span>
+        <span>范围 <strong>{{ run.scope_kind }}</strong></span>
+        <span>开始 <strong>{{ formatTime(run.started_at) }}</strong></span>
         <div class="spacer" />
         <el-button v-if="isRunning()" size="small" type="danger" @click="handleCancel">取消</el-button>
         <el-button v-else size="small" type="warning" @click="handleRollback">回滚</el-button>
       </div>
-      <p v-if="run.errorSummary" class="err">{{ run.errorSummary }}</p>
+      <p v-if="run.error_summary" class="err">{{ run.error_summary }}</p>
     </div>
 
     <div class="content-card log-card">

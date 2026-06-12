@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"fmt"
 	"strconv"
 
 	"df-build-server/internal/deploy"
@@ -213,9 +214,12 @@ func (h *Handler) ListOverrides(c *gin.Context) {
 }
 
 func (h *Handler) GetOverride(c *gin.Context) {
-	o, err := h.svc.Store().GetOverride(c.Request.Context(), c.Param("component"))
+	component := c.Param("component")
+	o, err := h.svc.Store().GetOverride(c.Request.Context(), component)
 	if err != nil {
-		response.Fail(c, 4040, "override 不存在")
+		// No override yet is a normal state — return an empty one so the editor
+		// opens cleanly instead of surfacing a 404 error toast.
+		response.OK(c, gin.H{"component_name": component, "params": gin.H{}})
 		return
 	}
 	response.OK(c, o)
@@ -357,6 +361,12 @@ func (h *Handler) PreviewRun(c *gin.Context) {
 		All       bool   `json:"all"`
 	}
 	_ = c.ShouldBindJSON(&body)
+	if !body.All {
+		if msg, ok := h.checkHasTargets(c, body.Component); !ok {
+			response.Fail(c, 4001, msg)
+			return
+		}
+	}
 	opts := runtime.RunOptions{Mode: runtime.ModeDeploy, DryRun: true}
 	if body.All {
 		opts.Scope = runtime.ScopeAll
@@ -386,6 +396,12 @@ func (h *Handler) submit(c *gin.Context, mode runtime.Mode) {
 		response.Fail(c, 4001, "请求体格式错误")
 		return
 	}
+	if !body.All {
+		if msg, ok := h.checkHasTargets(c, body.Component); !ok {
+			response.Fail(c, 4001, msg)
+			return
+		}
+	}
 	// Conflict pre-check before any deploy run.
 	if mode == runtime.ModeDeploy {
 		all, err := h.svc.Store().ListAllTargets(c.Request.Context())
@@ -413,6 +429,26 @@ func (h *Handler) submit(c *gin.Context, mode runtime.Mode) {
 		return
 	}
 	response.OK(c, gin.H{"runId": dep.ID})
+}
+
+// checkHasTargets returns ok=false with a friendly message when a non-virtual
+// component has no bound target hosts. Virtual components are not checked here
+// (their expansion is validated by the engine).
+func (h *Handler) checkHasTargets(c *gin.Context, component string) (string, bool) {
+	if component == "" {
+		return "请选择要部署的组件", false
+	}
+	if _, isVirtual := virtualcomponents.Find(component); isVirtual {
+		return "", true
+	}
+	t, err := h.svc.Store().GetTargets(c.Request.Context(), component)
+	if err != nil {
+		return "", true // let the engine surface any real error
+	}
+	if len(t.HostIDs) == 0 {
+		return fmt.Sprintf("组件 %s 未绑定目标主机，请先在「主机绑定」页面选择主机", component), false
+	}
+	return "", true
 }
 
 func (h *Handler) ListRuns(c *gin.Context) {

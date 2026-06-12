@@ -48,20 +48,20 @@ onMounted(load)
       <el-table :data="runs" v-loading="loading" size="small" border stripe
         @row-click="(row: DeploymentRun) => router.push(`/deployment/runs/${row.id}`)" style="cursor: pointer;">
         <el-table-column prop="id" label="#" width="70" />
-        <el-table-column prop="targetComponent" label="组件/范围" min-width="160" />
-        <el-table-column prop="taskType" label="类型" width="100" />
+        <el-table-column prop="target_component" label="组件/范围" min-width="160" />
+        <el-table-column prop="task_type" label="类型" width="100" />
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
             <el-tag :type="statusTag(row.status)" size="small">{{ row.status }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="用时" width="90">
-          <template #default="{ row }">{{ duration(row.durationMs) }}</template>
+          <template #default="{ row }">{{ duration(row.duration_ms) }}</template>
         </el-table-column>
         <el-table-column label="开始时间" width="170">
-          <template #default="{ row }">{{ formatTime(row.startedAt) }}</template>
+          <template #default="{ row }">{{ formatTime(row.started_at) }}</template>
         </el-table-column>
-        <el-table-column prop="errorSummary" label="错误" min-width="200" show-overflow-tooltip />
+        <el-table-column prop="error_summary" label="错误" min-width="200" show-overflow-tooltip />
       </el-table>
       <el-pagination v-if="total > pageSize" v-model:current-page="page" small
         layout="prev, pager, next" :page-size="pageSize" :total="total" @current-change="load"
