@@ -9,19 +9,19 @@ export interface DeploymentComponent {
 }
 
 export interface DeploymentSettings {
-  sshUser: string
-  sshPrivateKeyPath: string
-  sshPort: number
-  remoteRoot: string
-  retainDeployments: number
-  defaultTimeoutSeconds: number
+  ssh_user: string
+  ssh_private_key_path: string
+  ssh_port: number
+  remote_root: string
+  retain_deployments: number
+  default_timeout_seconds: number
 }
 
 export interface NetworkSettings {
   vip: string
-  serviceCidr: string
-  clusterCidr: string
-  nodeCidrMaskSize: number
+  service_cidr: string
+  cluster_cidr: string
+  node_cidr_mask_size: number
 }
 
 export interface EnvEntry {

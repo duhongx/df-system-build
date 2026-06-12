@@ -9,9 +9,21 @@ import { formatTime } from '../utils/time'
 
 const loading = ref(false)
 const saving = ref(false)
+
+// Defaults applied for any field the server returns empty, so every item always
+// shows a sensible value.
+const DEFAULTS = {
+  remote_root: '/opt/his-deploy',
+  retain_deployments: 100,
+  default_timeout_seconds: 1800,
+  service_cidr: '10.96.0.0/12',
+  cluster_cidr: '10.244.0.0/16',
+  node_cidr_mask_size: 24,
+}
+
 const cfg = ref<GlobalConfig>({
-  deployment: { sshUser: '', sshPrivateKeyPath: '', sshPort: 22, remoteRoot: '', retainDeployments: 20, defaultTimeoutSeconds: 1800 },
-  network: { vip: '', serviceCidr: '', clusterCidr: '', nodeCidrMaskSize: 24 },
+  deployment: { ssh_user: 'root', ssh_private_key_path: '', ssh_port: 22, remote_root: DEFAULTS.remote_root, retain_deployments: DEFAULTS.retain_deployments, default_timeout_seconds: DEFAULTS.default_timeout_seconds },
+  network: { vip: '', service_cidr: DEFAULTS.service_cidr, cluster_cidr: DEFAULTS.cluster_cidr, node_cidr_mask_size: DEFAULTS.node_cidr_mask_size },
   env: [],
 })
 
@@ -24,8 +36,30 @@ const offlinePath = ref('')
 
 async function load() {
   loading.value = true
-  try { cfg.value = await getGlobalConfig() }
-  finally { loading.value = false }
+  try {
+    const data = await getGlobalConfig()
+    const d = (data.deployment || {}) as any
+    const n = (data.network || {}) as any
+    cfg.value = {
+      deployment: {
+        ssh_user: d.ssh_user || 'root',
+        ssh_private_key_path: d.ssh_private_key_path || '',
+        ssh_port: d.ssh_port || 22,
+        remote_root: d.remote_root || DEFAULTS.remote_root,
+        retain_deployments: d.retain_deployments || DEFAULTS.retain_deployments,
+        default_timeout_seconds: d.default_timeout_seconds || DEFAULTS.default_timeout_seconds,
+      },
+      network: {
+        vip: n.vip || '',
+        service_cidr: n.service_cidr || DEFAULTS.service_cidr,
+        cluster_cidr: n.cluster_cidr || DEFAULTS.cluster_cidr,
+        node_cidr_mask_size: n.node_cidr_mask_size || DEFAULTS.node_cidr_mask_size,
+      },
+      env: [],
+    }
+  } finally {
+    loading.value = false
+  }
 }
 
 async function loadOffline() {
@@ -88,14 +122,14 @@ onMounted(() => { load(); loadOffline() })
     <div class="content-card" v-loading="loading">
       <el-form label-width="150px" style="max-width: 640px;">
         <el-divider content-position="left">部署</el-divider>
-        <el-form-item label="远端根目录"><el-input v-model="cfg.deployment.remoteRoot" placeholder="/opt/his-deploy" /></el-form-item>
-        <el-form-item label="保留部署记录数"><el-input-number v-model="cfg.deployment.retainDeployments" :min="0" /></el-form-item>
-        <el-form-item label="默认超时(秒)"><el-input-number v-model="cfg.deployment.defaultTimeoutSeconds" :min="60" /></el-form-item>
+        <el-form-item label="远端根目录"><el-input v-model="cfg.deployment.remote_root" placeholder="/opt/his-deploy" /></el-form-item>
+        <el-form-item label="保留部署记录数"><el-input-number v-model="cfg.deployment.retain_deployments" :min="0" /></el-form-item>
+        <el-form-item label="默认超时(秒)"><el-input-number v-model="cfg.deployment.default_timeout_seconds" :min="60" /></el-form-item>
 
         <el-divider content-position="left">网络</el-divider>
-        <el-form-item label="Service CIDR"><el-input v-model="cfg.network.serviceCidr" /></el-form-item>
-        <el-form-item label="Cluster CIDR"><el-input v-model="cfg.network.clusterCidr" /></el-form-item>
-        <el-form-item label="Node CIDR 掩码"><el-input-number v-model="cfg.network.nodeCidrMaskSize" :min="8" :max="32" /></el-form-item>
+        <el-form-item label="Service CIDR"><el-input v-model="cfg.network.service_cidr" /></el-form-item>
+        <el-form-item label="Cluster CIDR"><el-input v-model="cfg.network.cluster_cidr" /></el-form-item>
+        <el-form-item label="Node CIDR 掩码"><el-input-number v-model="cfg.network.node_cidr_mask_size" :min="8" :max="32" /></el-form-item>
 
         <el-form-item>
           <el-button type="primary" :loading="saving" @click="save">保存</el-button>
