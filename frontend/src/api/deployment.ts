@@ -155,4 +155,6 @@ export const getOfflineStatus = () =>
   request.get<any, OfflineStatus>('/deployment/offline/status')
 export const installOffline = (body: { path: string; bundleVersion?: string; clean?: boolean }) =>
   request.post<any, { bundleVersion: string; fileCount: number }>('/deployment/offline/install', body)
+export const verifyOffline = () =>
+  request.post<any, { ok: boolean; missing: string[]; manifest: string }>('/deployment/offline/verify')
 export const offlineUploadUrl = '/api/deployment/offline/upload'

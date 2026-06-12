@@ -21,6 +21,7 @@ func (h *Handler) registerOffline(g *gin.RouterGroup) {
 	g.GET("/offline/status", h.OfflineStatus)
 	g.POST("/offline/upload", h.OfflineUpload)
 	g.POST("/offline/install", h.OfflineInstall)
+	g.POST("/offline/verify", h.OfflineVerify)
 }
 
 // OfflineStatus returns the currently installed bundle metadata plus a live
@@ -143,4 +144,21 @@ func currentUsername(c *gin.Context) string {
 		}
 	}
 	return ""
+}
+
+// OfflineVerify checks the installed resource tree against its manifest and
+// returns the list of missing resources (校验：检查离线包是否有缺失）.
+func (h *Handler) OfflineVerify(c *gin.Context) {
+	resourceDir := h.svc.ResourceDir()
+	manifestPath := filepath.Join(filepath.Dir(resourceDir), "manifest.yml")
+	missing, err := offline.MissingManifestResources(manifestPath, resourceDir)
+	if err != nil {
+		response.Fail(c, 5001, "校验失败: "+err.Error())
+		return
+	}
+	rels := make([]string, 0, len(missing))
+	for _, m := range missing {
+		rels = append(rels, m.RelativePath)
+	}
+	response.OK(c, gin.H{"ok": len(missing) == 0, "missing": rels, "manifest": manifestPath})
 }
