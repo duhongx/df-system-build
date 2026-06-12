@@ -190,12 +190,12 @@ graph TD
   - _Requirements: 5.5, 9.4, 10.6_
 
 - [ ] 14. Cleanup Legacy Backend (Phase 6)
-  - [ ] 14.1 Delete `backend/internal/deployer/` package.
-  - [ ] 14.2 Delete `backend/internal/handler/deploy.go` and its route registration.
-  - [ ] 14.3 Delete `backend/internal/model/deploy.go`.
-  - [ ] 14.4 grep and remove every remaining `internal/deployer` / `model.DeployPlan` / `/api/deploy` reference.
-  - [ ] 14.5 Verify `go build ./...` and `go vet ./...` are clean.
-  - [ ] 14.6 Verify no chi or SQLite imports remain in `backend/`.
+  - [x] 14.1 Delete `backend/internal/deployer/` package.
+  - [x] 14.2 Delete `backend/internal/handler/deploy.go` and its route registration.
+  - [x] 14.3 Delete `backend/internal/model/deploy.go`.
+  - [x] 14.4 grep and remove every remaining `internal/deployer` / `model.DeployPlan` / `/api/deploy` reference.
+  - [x] 14.5 Verify `go build ./...` and `go vet ./...` are clean.
+  - [x] 14.6 Verify no chi or SQLite imports remain in `backend/`.
   - _Requirements: 1.1, 1.2, 1.5, 10.4, 10.8, 12.6_
 
 - [ ] 15. Frontend API Client (Phase 4)

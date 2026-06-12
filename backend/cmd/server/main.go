@@ -123,7 +123,6 @@ func main() {
 	handler.NewK8sWatchHandler().RegisterRoutes(api)
 	handler.NewBatchDeployHandler().RegisterRoutes(api)
 	handler.NewNotificationMsgHandler().RegisterRoutes(api)
-	handler.NewDeployHandler().RegisterRoutes(api)
 	deployhandler.New(deploy.NewService(repository.DB, deploy.Config{
 		ResourceDir: getEnvOr("DEPLOY_RESOURCE_DIR", "/opt/his-deploy/resources/offline"),
 		RunsDir:     cfg.Workspace.BaseDir + "/deployment-runs",
