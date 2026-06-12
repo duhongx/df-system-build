@@ -115,19 +115,19 @@ graph TD
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6_
 
 - [ ] 6. Conflict Matrix (Phase 2)
-  - [ ] 6.1 `conflict/matrix.go` — HardConflicts, K8sComponents, BusinessComponents constants.
-  - [ ] 6.2 Implement `Validate(bindings) []Conflict` (pair conflicts + K8s↔business per server).
-  - [ ] 6.3 Add `IsK8s(code)` / `IsBusiness(code)` helpers.
-  - [ ] 6.4 Property tests (rapid) for CP-3.
+  - [x] 6.1 `conflict/matrix.go` — HardConflicts, K8sComponents, BusinessComponents constants.
+  - [x] 6.2 Implement `Validate(bindings) []Conflict` (pair conflicts + K8s↔business per server).
+  - [x] 6.3 Add `IsK8s(code)` / `IsBusiness(code)` helpers.
+  - [x] 6.4 Property tests (rapid) for CP-3.
   - [ ] 6.5 Wire the conflict check into `TargetRepo.Put` so PUT /targets/{component} rejects conflicts.
   - _Requirements: 8.1, 8.2, 8.3, 8.5_
 
 - [ ] 7. Render & Defaults (Phase 1+2)
-  - [ ] 7.1 Implement merge in `render/render.go`: defaults → globalConfig → override, with per-key provenance.
-  - [ ] 7.2 Go template renderer over merged map + host context (inline + render_template sources).
-  - [ ] 7.3 Password charset validator (reject `'"\$` backtick space); call from GlobalConfigRepo.Put and OverrideRepo.Put.
-  - [ ] 7.4 Property tests for merge precedence (CP-2).
-  - [ ] 7.5 Unit tests for password validator covering all forbidden characters.
+  - [x] 7.1 Implement merge in `render/render.go`: defaults → globalConfig → override, with per-key provenance.
+  - [x] 7.2 Go template renderer over merged map + host context (inline + render_template sources).
+  - [x] 7.3 Password charset validator (reject `'"\$` backtick space); call from GlobalConfigRepo.Put and OverrideRepo.Put.
+  - [x] 7.4 Property tests for merge precedence (CP-2).
+  - [x] 7.5 Unit tests for password validator covering all forbidden characters.
   - _Requirements: 3.4, 3.5, 6.3_
 
 - [ ] 8. Resource Embed + StateDir (Phase 5)
@@ -251,7 +251,7 @@ graph TD
 
 - [ ] 22. Property Tests (Phase 6)
   - [ ] 22.1 `render/merge_property_test.go` — CP-2 parameter merge precedence (rapid).
-  - [ ] 22.2 `conflict/matrix_property_test.go` — CP-3 conflict matrix invariant.
+  - [x] 22.2 `conflict/matrix_property_test.go` — CP-3 conflict matrix invariant.
   - [ ] 22.3 `offline/atomic_property_test.go` — CP-4 install atomicity under fault injection.
   - [ ] 22.4 `repository/state_property_test.go` — CP-1 state machine atomicity.
   - [ ] 22.5 `handler/sse_property_test.go` — CP-6 no-loss SSE replay.
