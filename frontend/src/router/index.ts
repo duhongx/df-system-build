@@ -50,14 +50,14 @@ const routes = [
       // Legacy redirects
       { path: 'apps', redirect: '/settings/apps' },
       // Deployment Management (部署管理) — replaces the legacy 基础设施 stub
-      { path: 'deployment', redirect: '/deployment/dashboard' },
-      { path: 'deployment/dashboard', name: 'DeploymentDashboard', component: () => import('../views/DeploymentDashboardView.vue'), meta: { title: '部署管理' } },
+      { path: 'deployment', redirect: '/deployment/components' },
       { path: 'deployment/components', name: 'DeploymentComponents', component: () => import('../views/DeploymentComponentsView.vue'), meta: { title: '组件' } },
       { path: 'deployment/global-config', name: 'DeploymentGlobalConfig', component: () => import('../views/DeploymentGlobalConfigView.vue'), meta: { title: '全局配置' } },
-      { path: 'deployment/offline', name: 'DeploymentOffline', component: () => import('../views/DeploymentOfflineView.vue'), meta: { title: '离线包' } },
       { path: 'deployment/runs', name: 'DeploymentRuns', component: () => import('../views/DeploymentRunsView.vue'), meta: { title: '部署运行' } },
       { path: 'deployment/runs/:id', name: 'DeploymentRunDetail', component: () => import('../views/DeploymentRunDetailView.vue'), meta: { title: '运行详情' } },
-      // Legacy infrastructure redirects
+      // Legacy redirects
+      { path: 'deployment/dashboard', redirect: '/deployment/components' },
+      { path: 'deployment/offline', redirect: '/deployment/global-config' },
       { path: 'infra/check', redirect: '/deployment/components' },
       { path: 'infra/plan', redirect: '/deployment/runs' },
       { path: 'infra/execute', redirect: '/deployment/runs' },
