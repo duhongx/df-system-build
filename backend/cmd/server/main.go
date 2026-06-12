@@ -9,9 +9,11 @@ import (
 	"syscall"
 	"time"
 
+	"df-build-server/internal/deploy"
+	deployhandler "df-build-server/internal/deploy/handler"
+	deployrepo "df-build-server/internal/deploy/repository"
 	"df-build-server/internal/handler"
 	"df-build-server/internal/middleware"
-	deployrepo "df-build-server/internal/deploy/repository"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/scheduler"
 	"df-build-server/internal/web"
@@ -122,6 +124,10 @@ func main() {
 	handler.NewBatchDeployHandler().RegisterRoutes(api)
 	handler.NewNotificationMsgHandler().RegisterRoutes(api)
 	handler.NewDeployHandler().RegisterRoutes(api)
+	deployhandler.New(deploy.NewService(repository.DB, deploy.Config{
+		ResourceDir: getEnvOr("DEPLOY_RESOURCE_DIR", "/opt/his-deploy/resources/offline"),
+		RunsDir:     cfg.Workspace.BaseDir + "/deployment-runs",
+	})).RegisterRoutes(api)
 	handler.NewPostgreSQLHandler().RegisterRoutes(api)
 
 	// SPA static file serving (embedded frontend)
@@ -182,4 +188,12 @@ func requestLogger() gin.HandlerFunc {
 			logger.Log.Debugf("[%d] %s %s %v", status, method, path, latency)
 		}
 	}
+}
+
+// getEnvOr returns the value of env var key, or def if it is unset/empty.
+func getEnvOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

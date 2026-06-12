@@ -117,8 +117,28 @@ func (r *Runtime) runRemoteComponent(ctx context.Context, depID int64, cfg *engi
 // backendPool caches ssh+sftp connections keyed by host address for
 // the lifetime of one deployment dispatch. Closed once at the end of
 // the dispatch via closeAll.
+// HostCredentials carries the per-host SSH credentials resolved from an
+// external source (in df-build-system: the Server Management registry). It
+// lets the runtime dial each host with its own credentials instead of a single
+// global SSH user/key from DeploymentSettings.
+type HostCredentials struct {
+	User           string
+	Password       string
+	PrivateKey     []byte
+	PrivateKeyPath string
+	Port           int
+	HostKey        []byte
+}
+
+// CredentialResolver maps a host address (or name) to its SSH credentials.
+// Returning ok=false means "no per-host credentials; fall back to the global
+// DeploymentSettings defaults". Injected via runtime.Options so the engine
+// stays independent of df-build-server's model/repository packages.
+type CredentialResolver func(addr string) (HostCredentials, bool)
+
 type backendPool struct {
 	settings *store.DeploymentSettings
+	resolver CredentialResolver
 	mu       sync.Mutex
 	entries  map[string]*pooledBackend
 	// localAddrs is the set of IPv4 addresses bound to the dfctl-web
@@ -138,6 +158,7 @@ type pooledBackend struct {
 func (r *Runtime) poolFor(_ int64, settings *store.DeploymentSettings) *backendPool {
 	return &backendPool{
 		settings:   settings,
+		resolver:   r.credResolver,
 		entries:    map[string]*pooledBackend{},
 		localAddrs: localIPv4Set(),
 	}
@@ -193,6 +214,39 @@ func (p *backendPool) get(host engine.Host) (exec.Backend, error) {
 		be := exec.NewLocalBackend()
 		p.entries[addr] = &pooledBackend{rb: nil, backend: be}
 		return be, nil
+	}
+	// Per-host credentials from the Server registry take precedence over the
+	// global DeploymentSettings SSH user/key. This is the df-build-system path
+	// (Requirement 2.5/2.6): credentials are read live from model.Server at
+	// dial time, so a credential rotation is picked up without re-binding.
+	if p.resolver != nil {
+		if creds, ok := p.resolver(addr); ok {
+			user := creds.User
+			if user == "" {
+				user = "root"
+			}
+			port := creds.Port
+			if port <= 0 {
+				port = 22
+			}
+			dialAddr := addr
+			if !strings.Contains(addr, ":") {
+				dialAddr = fmt.Sprintf("%s:%d", addr, port)
+			}
+			rb, be, err := exec.NewRemoteBackend(exec.SSHConfig{
+				Addr:           dialAddr,
+				User:           user,
+				Password:       creds.Password,
+				PrivateKey:     creds.PrivateKey,
+				PrivateKeyPath: creds.PrivateKeyPath,
+				HostKey:        creds.HostKey,
+			})
+			if err != nil {
+				return exec.Backend{}, err
+			}
+			p.entries[addr] = &pooledBackend{rb: rb, backend: be}
+			return be, nil
+		}
 	}
 	keyPath := p.settings.SSHPrivateKeyPath
 	if keyPath == "" {

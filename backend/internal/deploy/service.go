@@ -9,70 +9,64 @@
 // Boundaries:
 //   - Target hosts reuse the existing Server Management feature (model.Server);
 //     no duplicate host table is maintained.
-//   - Business data is persisted in PostgreSQL via GORM.
-//   - Rollback markers live in State_Dir on each target host's local filesystem,
-//     NOT in PostgreSQL.
-//
-// Sub-packages:
-//   - planner:            Pipeline YAML -> ordered Action plan, virtual component expansion
-//   - runner:             sequential Action execution with fail-stop semantics
-//   - runtime:            concurrency slots, cancellation, conflict snapshot, log pubsub
-//   - exec:               local + remote(SSH/SFTP) execution backends
-//   - actions:            ~40 declarative Action handlers
-//   - render:             Go template rendering + parameter merge (defaults->global->override)
-//   - offline:            offline bundle sha256 verification + atomic swap
-//   - defaults:           embedded component defaults and pipeline YAML
-//   - conflict:           host-binding conflict matrix
-//   - statedir:           rollback marker conventions on target hosts
-//   - handler:            Gin HTTP handlers under /api/deployment
-//   - repository:         GORM repositories for deployment business data
+//   - Business data is persisted in PostgreSQL via GORM (engine/store.Store is
+//     implemented by repository.GormStore).
+//   - Rollback markers live in State_Dir on each target host's local
+//     filesystem, NOT in PostgreSQL.
+//   - The 4.5 GB offline resource tree lives on disk as Resource_Dir (installed
+//     via offline bundle); only small text artifacts are embedded.
 package deploy
 
-import "context"
+import (
+	"path/filepath"
+	"time"
 
-// CreateRunInput describes a request to deploy one or more components.
-type CreateRunInput struct {
-	TriggerUser string   // resolved from the JWT context
-	ScopeType   string   // "components" | "virtual"
-	Components  []string // component codes, or a single virtual component name
-	DryRun      bool
+	deployrepo "df-build-server/internal/deploy/repository"
+	"df-build-server/internal/deploy/engine/runtime"
+	"df-build-server/internal/deploy/engine/store"
+
+	"gorm.io/gorm"
+)
+
+// Service is the deployment-management orchestrator facade. It wires the
+// migrated engine runtime to df-build-system's PostgreSQL store and Server
+// Management credential source, and exposes the pieces HTTP handlers need.
+type Service struct {
+	rt    *runtime.Runtime
+	store store.Store
 }
 
-// RollbackInput describes a request to roll back one or more components.
-type RollbackInput struct {
-	TriggerUser string
-	ScopeType   string
-	Components  []string
+// Config configures the Service.
+type Config struct {
+	// ResourceDir is the on-disk offline-resource root (cluster.resource_dir).
+	ResourceDir string
+	// RunsDir is the parent directory for per-run rendered YAML + logs.
+	RunsDir string
+	// Timeout is the per-run deadline (default 30m when zero).
+	Timeout time.Duration
 }
 
-// RunPlan is the previewed action plan grouped by host (no execution).
-type RunPlan struct {
-	Components []string         `json:"components"`
-	Hosts      []HostPlanGroup  `json:"hosts"`
+// NewService builds the deployment-management service backed by the given DB.
+func NewService(db *gorm.DB, cfg Config) *Service {
+	st := deployrepo.NewGormStore(db)
+	rt := runtime.New(runtime.Options{
+		Store:              st,
+		ResourceDir:        cfg.ResourceDir,
+		RunsDir:            cfg.RunsDir,
+		Timeout:            cfg.Timeout,
+		TargetMode:         "ssh",
+		CredentialResolver: NewServerCredentialResolver(db),
+	})
+	return &Service{rt: rt, store: st}
 }
 
-// HostPlanGroup is the ordered set of planned actions for a single host.
-type HostPlanGroup struct {
-	Host    string       `json:"host"`
-	Actions []PlanAction `json:"actions"`
-}
+// Runtime exposes the engine runtime (Submit / Manager / Hub) to handlers.
+func (s *Service) Runtime() *runtime.Runtime { return s.rt }
 
-// PlanAction is a single previewed action.
-type PlanAction struct {
-	Component string `json:"component"`
-	Type      string `json:"type"`
-	Name      string `json:"name"`
-	Target    string `json:"target"`
-}
+// Store exposes the persistence layer to handlers for config/target/state reads.
+func (s *Service) Store() store.Store { return s.store }
 
-// Service is the deployment-management orchestrator facade.
-//
-// Implementation is wired in Task 11; this interface establishes the package
-// boundary so handlers (Task 12) and the rest of the subsystem can be developed
-// against a stable contract.
-type Service interface {
-	CreateRun(ctx context.Context, in CreateRunInput) (uint, error)
-	Preview(ctx context.Context, in CreateRunInput) (*RunPlan, error)
-	Cancel(ctx context.Context, runID uint) error
-	Rollback(ctx context.Context, in RollbackInput) (uint, error)
+// DefaultRunsDir returns the conventional runs directory under a workspace root.
+func DefaultRunsDir(workspaceRoot string) string {
+	return filepath.Join(workspaceRoot, "deployment-runs")
 }

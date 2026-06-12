@@ -61,22 +61,28 @@ type Options struct {
 	// RunsDir is the parent directory holding per-deployment render
 	// dirs. Each Submit creates RunsDir/<id>/{config,custom}.yml.
 	RunsDir string
+
+	// CredentialResolver, when set, supplies per-host SSH credentials from an
+	// external registry (df-build-system: Server Management). When it returns
+	// ok=false for a host, the runtime falls back to the global SSH settings.
+	CredentialResolver CredentialResolver
 }
 
 // Runtime ties together the manager (concurrency), hub (live logs), and
 // executor (engine driver). One Runtime per dfctlv2-web process.
 type Runtime struct {
-	store       store.Store
-	loader      ConfigLoader
-	factory     ActionExecutorFactory
-	timeout     time.Duration
-	retain      int
-	manager     *Manager
-	hub         *Hub
-	pruneSem    chan struct{} // serialise prune jobs
-	targetMode  string        // "ssh" | "local"
-	resourceDir string
-	runsDir     string
+	store        store.Store
+	loader       ConfigLoader
+	factory      ActionExecutorFactory
+	timeout      time.Duration
+	retain       int
+	manager      *Manager
+	hub          *Hub
+	pruneSem     chan struct{} // serialise prune jobs
+	targetMode   string        // "ssh" | "local"
+	resourceDir  string
+	runsDir      string
+	credResolver CredentialResolver
 }
 
 // New wires a fresh runtime. Defaults are applied for missing fields.
@@ -102,17 +108,18 @@ func New(opts Options) *Runtime {
 		}
 	}
 	return &Runtime{
-		store:       opts.Store,
-		loader:      opts.ConfigLoader,
-		factory:     opts.ExecutorFactory,
-		timeout:     opts.Timeout,
-		retain:      opts.RetainDeployments,
-		manager:     NewManager(),
-		hub:         NewHub(opts.Store),
-		pruneSem:    make(chan struct{}, 1),
-		targetMode:  opts.TargetMode,
-		resourceDir: opts.ResourceDir,
-		runsDir:     opts.RunsDir,
+		store:        opts.Store,
+		loader:       opts.ConfigLoader,
+		factory:      opts.ExecutorFactory,
+		timeout:      opts.Timeout,
+		retain:       opts.RetainDeployments,
+		manager:      NewManager(),
+		hub:          NewHub(opts.Store),
+		pruneSem:     make(chan struct{}, 1),
+		targetMode:   opts.TargetMode,
+		resourceDir:  opts.ResourceDir,
+		runsDir:      opts.RunsDir,
+		credResolver: opts.CredentialResolver,
 	}
 }
 

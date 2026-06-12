@@ -142,10 +142,10 @@ graph TD
   - _Requirements: 7.5, 11.1, 11.2, 11.3, 11.4, 11.5_
 
 - [ ] 9. SSH Backend via Server (Phase 2)
-  - [ ] 9.1 `exec/remote.go` adapter takes `*model.Server`, decrypts credential via existing crypto helper, builds SSH/SFTP client.
-  - [ ] 9.2 Ensure no SSH credential is cached in deployment tables; dial reads live Server row.
-  - [ ] 9.3 Add a connection pool keyed by server_id with idle timeout.
-  - [ ] 9.4 Wire `runtime.Manager` to acquire/release connections per run.
+  - [x] 9.1 `exec/remote.go` adapter takes `*model.Server`, decrypts credential via existing crypto helper, builds SSH/SFTP client.
+  - [x] 9.2 Ensure no SSH credential is cached in deployment tables; dial reads live Server row.
+  - [x] 9.3 Add a connection pool keyed by server_id with idle timeout.
+  - [x] 9.4 Wire `runtime.Manager` to acquire/release connections per run.
   - [ ] 9.5 Unit tests: credential rotation between runs (CP-8), unreachable host failure.
   - _Requirements: 2.5, 2.6, 10.5_
 
@@ -159,33 +159,33 @@ graph TD
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8_
 
 - [ ] 11. Service Orchestrator (Phase 2/3)
-  - [ ] 11.1 Implement `deploy.Service` wiring repositories + planner + runner + runtime + actions + render + offline + conflict.
-  - [ ] 11.2 `CreateRun`: state pre-check, conflict pre-check, persist run (PENDING), acquire runtime, transition RUNNING, run goroutine.
-  - [ ] 11.3 `Preview`: build plan only, no state transition, return actions grouped by host.
-  - [ ] 11.4 `Cancel`: `runtime.Manager.Cancel(runID)`; set CANCELED only after runner exits.
-  - [ ] 11.5 `Rollback`: state check (DEPLOYED or FAILED); run cleanup plan; transition NOT_DEPLOYED on success.
-  - [ ] 11.6 `GetRun`, `ListRuns`, `StreamLogs`.
-  - [ ] 11.7 SSE publish: every runner line mirrored to `pkg/sse` on `deployment.run.<id>` + persisted to DeploymentLog with monotonic seq.
+  - [x] 11.1 Implement `deploy.Service` wiring repositories + planner + runner + runtime + actions + render + offline + conflict.
+  - [x] 11.2 `CreateRun`: state pre-check, conflict pre-check, persist run (PENDING), acquire runtime, transition RUNNING, run goroutine.
+  - [x] 11.3 `Preview`: build plan only, no state transition, return actions grouped by host.
+  - [x] 11.4 `Cancel`: `runtime.Manager.Cancel(runID)`; set CANCELED only after runner exits.
+  - [x] 11.5 `Rollback`: state check (DEPLOYED or FAILED); run cleanup plan; transition NOT_DEPLOYED on success.
+  - [x] 11.6 `GetRun`, `ListRuns`, `StreamLogs`.
+  - [x] 11.7 SSE publish: every runner line mirrored to `pkg/sse` on `deployment.run.<id>` + persisted to DeploymentLog with monotonic seq.
   - [ ] 11.8 Integration test: deploy → reject re-deploy → rollback → re-deploy succeeds (CP-1, CP-5).
   - [ ] 11.9 Integration test: random cancel timing → terminal status ∈ {CANCELED, FAILED}, never SUCCESS (CP-7).
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.7, 5.8, 7.1, 7.2, 7.3, 7.4, 7.6, 7.8_
 
 - [ ] 12. Gin Handlers (Phase 3)
-  - [ ] 12.1 `handler/handler.go` with `RegisterRoutes(r)` registering all `/api/deployment/*` behind JWT.
-  - [ ] 12.2 `runs.go`: runs CRUD + preview + rollback + running + logs + logs.txt + cancel.
-  - [ ] 12.3 `targets.go`: GET/PUT targets, POST /host-checks.
-  - [ ] 12.4 `globalconfig.go`: GET/PUT global-config with password-charset validation.
-  - [ ] 12.5 `overrides.go`: GET/PUT/DELETE overrides.
+  - [x] 12.1 `handler/handler.go` with `RegisterRoutes(r)` registering all `/api/deployment/*` behind JWT.
+  - [x] 12.2 `runs.go`: runs CRUD + preview + rollback + running + logs + logs.txt + cancel.
+  - [x] 12.3 `targets.go`: GET/PUT targets, POST /host-checks.
+  - [x] 12.4 `globalconfig.go`: GET/PUT global-config with password-charset validation.
+  - [x] 12.5 `overrides.go`: GET/PUT/DELETE overrides.
   - [ ] 12.6 `offline.go`: status/upload/install.
-  - [ ] 12.7 `components.go`: components list/detail/tasks/enabled.
-  - [ ] 12.8 Unified `{code,message,data}` responses; map service errors to the design's HTTP/code table.
-  - [ ] 12.9 Register the deployment route group from `cmd/server/main.go`.
+  - [x] 12.7 `components.go`: components list/detail/tasks/enabled.
+  - [x] 12.8 Unified `{code,message,data}` responses; map service errors to the design's HTTP/code table.
+  - [x] 12.9 Register the deployment route group from `cmd/server/main.go`.
   - _Requirements: 3.1, 3.2, 3.3, 4.1, 4.2, 4.6, 5.1, 5.2, 5.6, 5.7, 8.4, 10.1, 10.7_
 
 - [ ] 13. SSE Stream Adapter (Phase 3)
-  - [ ] 13.1 `handler/stream.go` with `GET /api/deployment/runs/{id}/events`.
-  - [ ] 13.2 On subscribe, replay existing DeploymentLog rows by seq, then attach to live `pkg/sse` channel.
-  - [ ] 13.3 Send `event: done` on terminal status; close connection.
+  - [x] 13.1 `handler/stream.go` with `GET /api/deployment/runs/{id}/events`.
+  - [x] 13.2 On subscribe, replay existing DeploymentLog rows by seq, then attach to live `pkg/sse` channel.
+  - [x] 13.3 Send `event: done` on terminal status; close connection.
   - [ ] 13.4 Integration test: N concurrent subscribers at random offsets each get a contiguous prefix (CP-6).
   - _Requirements: 5.5, 9.4, 10.6_
 
