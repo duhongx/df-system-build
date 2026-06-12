@@ -57,6 +57,8 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/runs/:id/logs", h.RunLogs)
 		g.GET("/runs/:id/logs.txt", h.RunLogsText)
 		g.POST("/runs/:id/cancel", h.CancelRun)
+
+		h.registerOffline(g)
 	}
 	// SSE endpoint is registered outside the header-JWT group because the
 	// browser EventSource API cannot set an Authorization header; it

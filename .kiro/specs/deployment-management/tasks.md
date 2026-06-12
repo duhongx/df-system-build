@@ -150,12 +150,12 @@ graph TD
   - _Requirements: 2.5, 2.6, 10.5_
 
 - [ ] 10. Offline Bundle (Phase 5)
-  - [ ] 10.1 `offline/install.go`: stage archive to temp, verify sha256 vs manifest, atomic rename into Resource_Dir.
-  - [ ] 10.2 `offline/upload.go`: multipart upload to staging; reject paths outside upload dir.
-  - [ ] 10.3 Server-local-path install resolving symlinks via EvalSymlinks against an allow-list root.
-  - [ ] 10.4 `offline/status.go` returning current OfflineBundle + resource count summary.
+  - [x] 10.1 `offline/install.go`: stage archive to temp, verify sha256 vs manifest, atomic rename into Resource_Dir.
+  - [x] 10.2 `offline/upload.go`: multipart upload to staging; reject paths outside upload dir.
+  - [x] 10.3 Server-local-path install resolving symlinks via EvalSymlinks against an allow-list root.
+  - [x] 10.4 `offline/status.go` returning current OfflineBundle + resource count summary.
   - [ ] 10.5 Fault-injection tests: kill mid-install → T0 or T1 only (CP-4); corrupt sha256 → abort, T0 intact.
-  - [ ] 10.6 `manifest.Generate(dir)` walking Resource_Dir to emit fresh manifest.yml.
+  - [x] 10.6 `manifest.Generate(dir)` walking Resource_Dir to emit fresh manifest.yml.
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8_
 
 - [ ] 11. Service Orchestrator (Phase 2/3)
@@ -176,7 +176,7 @@ graph TD
   - [x] 12.3 `targets.go`: GET/PUT targets, POST /host-checks.
   - [x] 12.4 `globalconfig.go`: GET/PUT global-config with password-charset validation.
   - [x] 12.5 `overrides.go`: GET/PUT/DELETE overrides.
-  - [ ] 12.6 `offline.go`: status/upload/install.
+  - [x] 12.6 `offline.go`: status/upload/install.
   - [x] 12.7 `components.go`: components list/detail/tasks/enabled.
   - [x] 12.8 Unified `{code,message,data}` responses; map service errors to the design's HTTP/code table.
   - [x] 12.9 Register the deployment route group from `cmd/server/main.go`.
@@ -215,7 +215,7 @@ graph TD
   - [x] 17.1 `DeploymentTargetsView.vue` component selector + bound servers sourced from existing Server Management.
   - [x] 17.2 On Save call PUT /targets/{component}; surface 409 conflicts inline naming the conflicting pair.
   - [x] 17.3 `DeploymentGlobalConfigView.vue` categorized editor; inline password-charset validation errors.
-  - [ ] 17.4 `DeploymentOfflineView.vue` upload dropzone + server-local path + bundle metadata + install progress.
+  - [x] 17.4 `DeploymentOfflineView.vue` upload dropzone + server-local path + bundle metadata + install progress.
   - [ ] 17.5 ComponentOverride editor (modal JSON editor with shell-charset feedback).
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 3.5, 4.1, 4.2, 4.3, 4.4, 4.5, 8.3, 9.2, 9.5, 9.7_
 
@@ -242,11 +242,11 @@ graph TD
   - _Requirements: 1.3_
 
 - [ ] 21. CLI Subcommands (Phase 5)
-  - [ ] 21.1 Add a `deploy` subcommand group to `cmd/server` (keep single binary).
-  - [ ] 21.2 `df-build-server deploy verify` reproducing sha256 + manifest reverse check.
-  - [ ] 21.3 `df-build-server deploy manifest gen <dir>` writing a fresh manifest.yml.
-  - [ ] 21.4 Both exit non-zero on failure with a clear summary.
-  - [ ] 21.5 Unit tests against synthetic trees (clean + tampered manifests).
+  - [x] 21.1 Add a `deploy` subcommand group to `cmd/server` (keep single binary).
+  - [x] 21.2 `df-build-server deploy verify` reproducing sha256 + manifest reverse check.
+  - [x] 21.3 `df-build-server deploy manifest gen <dir>` writing a fresh manifest.yml.
+  - [x] 21.4 Both exit non-zero on failure with a clear summary.
+  - [x] 21.5 Unit tests against synthetic trees (clean + tampered manifests).
   - _Requirements: 4.7, 4.8, 11.5_
 
 - [ ] 22. Property Tests (Phase 6)

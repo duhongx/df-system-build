@@ -32,8 +32,11 @@ import (
 // migrated engine runtime to df-build-system's PostgreSQL store and Server
 // Management credential source, and exposes the pieces HTTP handlers need.
 type Service struct {
-	rt    *runtime.Runtime
-	store store.Store
+	rt          *runtime.Runtime
+	store       store.Store
+	offlineRepo *deployrepo.OfflineRepo
+	resourceDir string
+	uploadDir   string
 }
 
 // Config configures the Service.
@@ -42,6 +45,8 @@ type Config struct {
 	ResourceDir string
 	// RunsDir is the parent directory for per-run rendered YAML + logs.
 	RunsDir string
+	// UploadDir is the staging directory for uploaded offline bundles.
+	UploadDir string
 	// Timeout is the per-run deadline (default 30m when zero).
 	Timeout time.Duration
 }
@@ -57,7 +62,17 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		TargetMode:         "ssh",
 		CredentialResolver: NewServerCredentialResolver(db),
 	})
-	return &Service{rt: rt, store: st}
+	uploadDir := cfg.UploadDir
+	if uploadDir == "" {
+		uploadDir = filepath.Join(filepath.Dir(cfg.RunsDir), "deployment-uploads")
+	}
+	return &Service{
+		rt:          rt,
+		store:       st,
+		offlineRepo: deployrepo.NewOfflineRepo(db),
+		resourceDir: cfg.ResourceDir,
+		uploadDir:   uploadDir,
+	}
 }
 
 // Runtime exposes the engine runtime (Submit / Manager / Hub) to handlers.
@@ -65,6 +80,15 @@ func (s *Service) Runtime() *runtime.Runtime { return s.rt }
 
 // Store exposes the persistence layer to handlers for config/target/state reads.
 func (s *Service) Store() store.Store { return s.store }
+
+// OfflineRepo exposes the offline-bundle metadata repository.
+func (s *Service) OfflineRepo() *deployrepo.OfflineRepo { return s.offlineRepo }
+
+// ResourceDir returns the on-disk offline-resource root.
+func (s *Service) ResourceDir() string { return s.resourceDir }
+
+// UploadDir returns the staging directory for uploaded offline bundles.
+func (s *Service) UploadDir() string { return s.uploadDir }
 
 // DefaultRunsDir returns the conventional runs directory under a workspace root.
 func DefaultRunsDir(workspaceRoot string) string {

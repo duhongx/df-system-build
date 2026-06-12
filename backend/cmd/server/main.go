@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"df-build-server/internal/deploy"
+	deploycli "df-build-server/internal/deploy/cli"
 	deployhandler "df-build-server/internal/deploy/handler"
 	deployrepo "df-build-server/internal/deploy/repository"
 	"df-build-server/internal/handler"
@@ -24,6 +25,11 @@ import (
 )
 
 func main() {
+	// Deploy CLI subcommands (verify / manifest gen) short-circuit the server.
+	if len(os.Args) > 1 && os.Args[1] == "deploy" {
+		os.Exit(runDeployCLI(os.Args[2:]))
+	}
+
 	// Load configuration - support CLI flag, env var, or default
 	configPath := "config/config.yaml"
 	if envPath := os.Getenv("CONFIG_PATH"); envPath != "" {
@@ -195,4 +201,57 @@ func getEnvOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// runDeployCLI handles `df-build-server deploy <verify|manifest gen>`.
+func runDeployCLI(args []string) int {
+	resourceDir := getEnvOr("DEPLOY_RESOURCE_DIR", "/opt/his-deploy/resources/offline")
+	if len(args) == 0 {
+		fmt.Println("usage: df-build-server deploy <verify|manifest> ...")
+		return 2
+	}
+	switch args[0] {
+	case "verify":
+		manifest := getEnvOr("DEPLOY_MANIFEST", "/opt/his-deploy/resources/manifest.yml")
+		if len(args) > 1 {
+			manifest = args[1]
+		}
+		res, err := deploycli.Verify(resourceDir, manifest)
+		if err != nil {
+			fmt.Printf("verify error: %v\n", err)
+			return 6
+		}
+		if !res.OK {
+			fmt.Printf("✗ verify failed: %d missing resource(s)\n", len(res.Missing))
+			for _, m := range res.Missing {
+				fmt.Printf("  - %s\n", m)
+			}
+			return 6
+		}
+		fmt.Println("✓ verify ok: all manifest resources present")
+		return 0
+	case "manifest":
+		if len(args) < 2 || args[1] != "gen" {
+			fmt.Println("usage: df-build-server deploy manifest gen [resourceDir] [bundleVersion]")
+			return 2
+		}
+		dir := resourceDir
+		if len(args) > 2 {
+			dir = args[2]
+		}
+		bundleVersion := ""
+		if len(args) > 3 {
+			bundleVersion = args[3]
+		}
+		res, err := deploycli.ManifestGen(dir, "", bundleVersion, nil)
+		if err != nil {
+			fmt.Printf("manifest gen error: %v\n", err)
+			return 6
+		}
+		fmt.Printf("✓ scanned %d files in %d components\n✓ wrote manifest: %s\n", res.Files, res.Components, res.Output)
+		return 0
+	default:
+		fmt.Printf("unknown deploy subcommand: %s\n", args[0])
+		return 2
+	}
 }

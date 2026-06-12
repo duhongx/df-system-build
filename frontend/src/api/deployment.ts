@@ -134,3 +134,15 @@ export const getRunLogs = (id: number, afterSeq = 0, limit = 500) =>
 // SSE: EventSource cannot set headers, so the JWT goes in the query string.
 export const runEventSource = (id: number) =>
   new EventSource(`/api/deployment/runs/${id}/events?token=${encodeURIComponent(getToken())}`)
+
+// ---- offline bundle ----
+export interface OfflineStatus {
+  current: { bundleVersion: string; fileCount: number; installedAt: string; installedBy: string } | null
+  resourceDir: string
+  scan: Record<string, number>
+}
+export const getOfflineStatus = () =>
+  request.get<any, OfflineStatus>('/deployment/offline/status')
+export const installOffline = (body: { path: string; bundleVersion?: string; clean?: boolean }) =>
+  request.post<any, { bundleVersion: string; fileCount: number }>('/deployment/offline/install', body)
+export const offlineUploadUrl = '/api/deployment/offline/upload'
