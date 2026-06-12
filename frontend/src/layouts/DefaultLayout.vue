@@ -353,7 +353,6 @@ async function handleSavePassword() {
           </template>
           <el-menu-item index="/deployment/dashboard">概览</el-menu-item>
           <el-menu-item index="/deployment/components">组件</el-menu-item>
-          <el-menu-item index="/deployment/targets">主机绑定</el-menu-item>
           <el-menu-item index="/deployment/global-config">全局配置</el-menu-item>
           <el-menu-item index="/deployment/offline">离线包</el-menu-item>
           <el-menu-item index="/deployment/runs">部署运行</el-menu-item>

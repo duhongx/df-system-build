@@ -53,7 +53,6 @@ const routes = [
       { path: 'deployment', redirect: '/deployment/dashboard' },
       { path: 'deployment/dashboard', name: 'DeploymentDashboard', component: () => import('../views/DeploymentDashboardView.vue'), meta: { title: '部署管理' } },
       { path: 'deployment/components', name: 'DeploymentComponents', component: () => import('../views/DeploymentComponentsView.vue'), meta: { title: '组件' } },
-      { path: 'deployment/targets', name: 'DeploymentTargets', component: () => import('../views/DeploymentTargetsView.vue'), meta: { title: '主机绑定' } },
       { path: 'deployment/global-config', name: 'DeploymentGlobalConfig', component: () => import('../views/DeploymentGlobalConfigView.vue'), meta: { title: '全局配置' } },
       { path: 'deployment/offline', name: 'DeploymentOffline', component: () => import('../views/DeploymentOfflineView.vue'), meta: { title: '离线包' } },
       { path: 'deployment/runs', name: 'DeploymentRuns', component: () => import('../views/DeploymentRunsView.vue'), meta: { title: '部署运行' } },
