@@ -131,12 +131,10 @@ export const runningRuns = () =>
   request.get<any, any[]>('/deployment/runs/running')
 export const getRun = (id: number) =>
   request.get<any, DeploymentRun>(`/deployment/runs/${id}`)
-export const createRun = (body: { component?: string; all?: boolean; host?: string }) =>
-  request.post<any, { runId: number }>('/deployment/runs', body)
-export const previewRun = (body: { component?: string; all?: boolean }) =>
-  request.post<any, { runId: number; dryRun: boolean }>('/deployment/runs/preview', body)
-export const rollbackRun = (body: { component?: string; all?: boolean; host?: string }) =>
-  request.post<any, { runId: number }>('/deployment/runs/rollback', body)
+export const createRun = (body: { mode?: string; component?: string; phase?: string; host_ids?: number[]; dry_run?: boolean }) =>
+  request.post<any, { id: number }>('/deployment/runs', body)
+export const previewRun = (body: { mode?: string; component?: string; phase?: string; host_ids?: number[]; dry_run?: boolean }) =>
+  request.post<any, { task_count: number; action_count: number; plan: any[] }>('/deployment/runs/preview', body)
 export const cancelRun = (id: number) =>
   request.post<any, { canceled: boolean }>(`/deployment/runs/${id}/cancel`)
 export const getRunLogs = (id: number, afterSeq = 0, limit = 500) =>

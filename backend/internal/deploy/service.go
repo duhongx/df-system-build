@@ -18,10 +18,13 @@
 package deploy
 
 import (
+	"context"
 	"path/filepath"
 	"time"
 
 	deployrepo "df-build-server/internal/deploy/repository"
+	"df-build-server/internal/deploy/engine"
+	"df-build-server/internal/deploy/engine/render"
 	"df-build-server/internal/deploy/engine/runtime"
 	"df-build-server/internal/deploy/engine/store"
 
@@ -37,6 +40,7 @@ type Service struct {
 	offlineRepo *deployrepo.OfflineRepo
 	resourceDir string
 	uploadDir   string
+	runsDir     string
 }
 
 // Config configures the Service.
@@ -72,6 +76,7 @@ func NewService(db *gorm.DB, cfg Config) *Service {
 		offlineRepo: deployrepo.NewOfflineRepo(db),
 		resourceDir: cfg.ResourceDir,
 		uploadDir:   uploadDir,
+		runsDir:     cfg.RunsDir,
 	}
 }
 
@@ -89,6 +94,21 @@ func (s *Service) ResourceDir() string { return s.resourceDir }
 
 // UploadDir returns the staging directory for uploaded offline bundles.
 func (s *Service) UploadDir() string { return s.uploadDir }
+
+// RenderCurrent renders the current store state (settings, hosts, targets,
+// overrides) into a preview run directory and loads the resulting engine
+// Config. Used by deployment preview to build the action plan without
+// executing anything — mirrors his-deploy's loadCurrent/previewRender.
+func (s *Service) RenderCurrent(ctx context.Context) (*engine.Config, error) {
+	runDir := filepath.Join(s.runsDir, "preview")
+	if _, err := render.FromStore(ctx, s.store, render.Inputs{RunDir: runDir, ResourceDir: s.resourceDir}); err != nil {
+		return nil, err
+	}
+	return engine.LoadDeploymentConfigFiles(
+		filepath.Join(runDir, "config.yml"),
+		filepath.Join(runDir, "custom.yml"),
+	)
+}
 
 // DefaultRunsDir returns the conventional runs directory under a workspace root.
 func DefaultRunsDir(workspaceRoot string) string {

@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, nextTick } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
-  cancelRun, getRun, getRunLogs, rollbackRun, runEventSource,
+  cancelRun, getRun, getRunLogs, createRun, runEventSource,
   type DeploymentRun, type DeploymentLog,
 } from '../api/deployment'
 import { formatTime } from '../utils/time'
 
 const route = useRoute()
+const router = useRouter()
 const runId = Number(route.params.id)
 const run = ref<DeploymentRun | null>(null)
 const logs = ref<DeploymentLog[]>([])
@@ -68,10 +69,11 @@ async function handleCancel() {
 async function handleRollback() {
   if (!run.value) return
   const body = run.value.scope_kind === 'all'
-    ? { all: true }
-    : { component: run.value.target_component }
-  const res = await rollbackRun(body)
-  ElMessage.success(`已发起回滚，运行 #${res.runId}`)
+    ? { mode: 'cleanup' }
+    : { mode: 'rollback', component: run.value.target_component }
+  const res = await createRun(body)
+  ElMessage.success(`已发起回滚，运行 #${res.id}`)
+  router.push(`/deployment/runs/${res.id}`)
 }
 
 onMounted(async () => {

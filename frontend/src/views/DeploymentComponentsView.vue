@@ -1,14 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import {
-  createRun, listComponents, previewRun, rollbackRun,
+  listComponents,
   getEnabled, putEnabled, getOverride, putOverride, getComponentDefaults, getComponentTasks,
   type DeploymentComponent, type ComponentTask,
 } from '../api/deployment'
-import { useRouter } from 'vue-router'
 
-const router = useRouter()
 const loading = ref(false)
 const components = ref<DeploymentComponent[]>([])
 const savingEnabled = ref(false)
@@ -63,25 +61,6 @@ async function toggleEnabled(row: DeploymentComponent) {
   } finally {
     savingEnabled.value = false
   }
-}
-
-// ---- run actions ----
-async function deploy(row: DeploymentComponent) {
-  await ElMessageBox.confirm(`确定部署组件 "${row.code}" 吗？`, '确认', { type: 'warning' })
-  const res = await createRun({ component: row.code })
-  ElMessage.success(`已发起部署，运行 #${res.runId}`)
-  router.push(`/deployment/runs/${res.runId}`)
-}
-async function rollback(row: DeploymentComponent) {
-  await ElMessageBox.confirm(`确定回滚组件 "${row.code}" 吗？`, '确认', { type: 'warning' })
-  const res = await rollbackRun({ component: row.code })
-  ElMessage.success(`已发起回滚，运行 #${res.runId}`)
-  router.push(`/deployment/runs/${res.runId}`)
-}
-async function preview(row: DeploymentComponent) {
-  const res = await previewRun({ component: row.code })
-  ElMessage.success(`已发起预览（dry-run），运行 #${res.runId}`)
-  router.push(`/deployment/runs/${res.runId}`)
 }
 
 // ---- param editor (key-value form) ----
@@ -173,7 +152,7 @@ onMounted(load)
   <div class="page">
     <h4 class="page-title">组件</h4>
     <div class="content-card">
-      <p class="hint">启用的组件会在「全量部署」时执行；禁用的组件不部署。每个组件都可单独配置参数。</p>
+      <p class="hint">启用/禁用组件并配置参数。部署操作请到「部署运行」页点击「新建部署」。</p>
       <el-table :data="components" v-loading="loading" size="small" border stripe>
         <el-table-column prop="code" label="组件" min-width="150" />
         <el-table-column label="分类" width="90">
@@ -189,11 +168,8 @@ onMounted(load)
             <el-tag :type="statusTag(row.status)" size="small">{{ row.status }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="280" fixed="right">
+        <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" link type="primary" @click="deploy(row)">部署</el-button>
-            <el-button size="small" link @click="preview(row)">预览</el-button>
-            <el-button size="small" link type="warning" @click="rollback(row)">回滚</el-button>
             <el-button size="small" link @click="openOverride(row)">参数</el-button>
             <el-button size="small" link @click="openTasks(row)">计划</el-button>
           </template>

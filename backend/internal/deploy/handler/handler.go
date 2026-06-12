@@ -9,6 +9,7 @@ import (
 
 	"df-build-server/internal/deploy"
 	"df-build-server/internal/deploy/conflict"
+	"df-build-server/internal/deploy/engine"
 	"df-build-server/internal/deploy/engine/runtime"
 	"df-build-server/internal/deploy/engine/store"
 	"df-build-server/internal/deploy/engine/virtualcomponents"
@@ -53,7 +54,6 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/runs/running", h.RunningRuns)
 		g.POST("/runs", h.CreateRun)
 		g.POST("/runs/preview", h.PreviewRun)
-		g.POST("/runs/rollback", h.Rollback)
 		g.GET("/runs/:id", h.GetRun)
 		g.GET("/runs/:id/logs", h.RunLogs)
 		g.GET("/runs/:id/logs.txt", h.RunLogsText)
@@ -347,106 +347,214 @@ func conflictMessage(vs []conflict.Conflict) string {
 
 // ---- runs ----
 
+// createRequest mirrors his-deploy's deployment create/preview body.
+type createRequest struct {
+	Mode      string  `json:"mode"`      // deploy | rollback | cleanup | phase
+	Component string  `json:"component"` // pipeline or virtual component (scope=component)
+	Phase     string  `json:"phase"`     // required when mode=phase
+	Host      string  `json:"host"`      // optional single-host restriction
+	HostIDs   []int64 `json:"host_ids"`  // selected target servers (scope=component)
+	DryRun    bool    `json:"dry_run"`
+}
+
+// resolveOptions translates a createRequest into runtime.RunOptions. "cleanup"
+// is a UI label for rollback + all-scope. Returns an error message when invalid.
+func resolveOptions(body createRequest) (runtime.RunOptions, string) {
+	switch body.Mode {
+	case "cleanup":
+		return runtime.RunOptions{Mode: runtime.ModeRollback, Scope: runtime.ScopeAll}, ""
+	case "deploy", "rollback", "phase":
+	default:
+		return runtime.RunOptions{}, "无效的操作类型（应为 deploy/rollback/phase/cleanup）"
+	}
+	if body.Component == "" {
+		return runtime.RunOptions{}, "请选择要操作的组件"
+	}
+	opts := runtime.RunOptions{
+		Scope:     runtime.ScopeComponent,
+		Component: body.Component,
+		Host:      body.Host,
+		DryRun:    body.DryRun,
+	}
+	switch body.Mode {
+	case "deploy":
+		opts.Mode = runtime.ModeDeploy
+	case "rollback":
+		opts.Mode = runtime.ModeRollback
+	case "phase":
+		opts.Mode = runtime.ModePhase
+		if body.Phase == "" {
+			return runtime.RunOptions{}, "单阶段模式必须选择阶段（phase）"
+		}
+		opts.Phase = body.Phase
+	}
+	return opts, ""
+}
+
+// CreateRun creates a deployment task (新建部署). Supports deploy / rollback /
+// phase / cleanup, applies the selected target hosts before submit, and
+// enforces the clean-before-redeploy hard constraint.
 func (h *Handler) CreateRun(c *gin.Context) {
-	h.submit(c, runtime.ModeDeploy)
-}
-
-func (h *Handler) Rollback(c *gin.Context) {
-	h.submit(c, runtime.ModeRollback)
-}
-
-func (h *Handler) PreviewRun(c *gin.Context) {
-	// Preview is a dry-run: builds and publishes the plan without dispatch.
-	var body struct {
-		Component string `json:"component"`
-		All       bool   `json:"all"`
-	}
-	_ = c.ShouldBindJSON(&body)
-	if !body.All {
-		if msg, ok := h.checkHasTargets(c, body.Component); !ok {
-			response.Fail(c, 4001, msg)
-			return
-		}
-	}
-	opts := runtime.RunOptions{Mode: runtime.ModeDeploy, DryRun: true}
-	if body.All {
-		opts.Scope = runtime.ScopeAll
-	} else {
-		opts.Scope = runtime.ScopeComponent
-		opts.Component = body.Component
-	}
-	dep, conf, err := h.svc.Runtime().Submit(c.Request.Context(), opts)
-	if err != nil {
-		if conf != nil {
-			response.FailWithStatus(c, 409, 4090, "已有进行中的部署")
-			return
-		}
-		response.Fail(c, 5001, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"runId": dep.ID, "dryRun": true})
-}
-
-func (h *Handler) submit(c *gin.Context, mode runtime.Mode) {
-	var body struct {
-		Component string `json:"component"`
-		All       bool   `json:"all"`
-		Host      string `json:"host"`
-	}
+	var body createRequest
 	if err := c.ShouldBindJSON(&body); err != nil {
 		response.Fail(c, 4001, "请求体格式错误")
 		return
 	}
-	// Mirror his-deploy: all-scope deploy is intentionally disabled (its success
-	// state isn't recorded per-component, defeating the clean-before-redeploy
-	// guard). All-scope rollback remains allowed.
-	if body.All && mode == runtime.ModeDeploy {
-		response.Fail(c, 4001, "全量部署已关闭，请按组件依次部署；全量清理（回滚）仍可使用")
+	opts, errMsg := resolveOptions(body)
+	if errMsg != "" {
+		response.Fail(c, 4001, errMsg)
 		return
 	}
-	if !body.All {
-		if msg, ok := h.checkHasTargets(c, body.Component); !ok {
-			response.Fail(c, 4001, msg)
-			return
-		}
-		// Clean-before-redeploy hard constraint (mirrors his-deploy
-		// deployStateBlocks): a component-scope deploy is only allowed when the
-		// component is not_deployed. A deployed/failed component must be rolled
-		// back first — re-deploying on residue is a whole class of bugs.
-		if mode == runtime.ModeDeploy {
-			if msg, blocked := h.deployStateBlocks(c, body.Component); blocked {
+	ctx := c.Request.Context()
+
+	if opts.Scope == runtime.ScopeComponent {
+		if opts.Mode == runtime.ModeDeploy && !opts.DryRun {
+			if msg, blocked := h.deployStateBlocks(c, opts.Component); blocked {
 				response.FailWithStatus(c, 409, 4090, msg)
 				return
 			}
 		}
-	}
-	// Conflict pre-check before any deploy run.
-	if mode == runtime.ModeDeploy {
-		all, err := h.svc.Store().ListAllTargets(c.Request.Context())
-		if err == nil {
-			if v := conflict.Validate(all); len(v) > 0 {
-				response.FailWithStatus(c, 409, 4091, conflictMessage(v))
-				return
+		// Apply the operator's host selection BEFORE submit so the engine sees
+		// it (only after the state check passes). Skip virtual components.
+		if body.HostIDs != nil {
+			if _, isVirtual := virtualcomponents.Find(opts.Component); !isVirtual {
+				if err := h.svc.Store().ReplaceTargets(ctx, opts.Component, body.HostIDs); err != nil {
+					response.Fail(c, 5001, "写入目标主机失败: "+err.Error())
+					return
+				}
+			}
+		}
+		if opts.Mode == runtime.ModeDeploy {
+			if all, err := h.svc.Store().ListAllTargets(ctx); err == nil {
+				if v := conflict.Validate(all); len(v) > 0 {
+					response.FailWithStatus(c, 409, 4091, conflictMessage(v))
+					return
+				}
 			}
 		}
 	}
-	opts := runtime.RunOptions{Mode: mode, Host: body.Host}
-	if body.All {
-		opts.Scope = runtime.ScopeAll
-	} else {
-		opts.Scope = runtime.ScopeComponent
-		opts.Component = body.Component
-	}
-	dep, conf, err := h.svc.Runtime().Submit(c.Request.Context(), opts)
+
+	dep, conf, err := h.svc.Runtime().Submit(ctx, opts)
 	if err != nil {
 		if conf != nil {
-			response.FailWithStatus(c, 409, 4090, "已有进行中的部署，请稍后再试")
+			response.FailWithStatus(c, 409, 4090, "已有部署任务正在执行，无法启动新任务")
 			return
 		}
 		response.Fail(c, 5001, err.Error())
 		return
 	}
-	response.OK(c, gin.H{"runId": dep.ID})
+	response.OK(c, gin.H{"id": dep.ID})
+}
+
+// PreviewRun renders the current config and returns the planned tasks/actions
+// without executing — the dialog's 预览 button.
+func (h *Handler) PreviewRun(c *gin.Context) {
+	var body createRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		response.Fail(c, 4001, "请求体格式错误")
+		return
+	}
+	opts, errMsg := resolveOptions(body)
+	if errMsg != "" {
+		response.Fail(c, 4001, errMsg)
+		return
+	}
+	cfg, err := h.svc.RenderCurrent(c.Request.Context())
+	if err != nil {
+		response.Fail(c, 5001, "加载部署配置失败: "+err.Error())
+		return
+	}
+	plan := h.buildPreviewPlan(cfg, opts)
+	actionCount := 0
+	for _, p := range plan {
+		actionCount += p.Actions
+	}
+	response.OK(c, gin.H{
+		"mode":         body.Mode,
+		"component":    opts.Component,
+		"plan":         plan,
+		"task_count":   len(plan),
+		"action_count": actionCount,
+	})
+}
+
+type previewPlanItem struct {
+	Component string `json:"component"`
+	Phase     string `json:"phase"`
+	TaskName  string `json:"task_name"`
+	Host      string `json:"host"`
+	Actions   int    `json:"actions"`
+}
+
+func (h *Handler) buildPreviewPlan(cfg *engine.Config, opts runtime.RunOptions) []previewPlanItem {
+	out := []previewPlanItem{}
+	for _, comp := range componentsForPreview(cfg, opts) {
+		for _, phase := range phasesForPreview(opts) {
+			plan, err := engine.BuildPlanForHost(cfg, comp, phase, opts.Host)
+			if err != nil {
+				continue
+			}
+			for _, item := range plan {
+				out = append(out, previewPlanItem{
+					Component: comp,
+					Phase:     item.Task.Phase,
+					TaskName:  item.Task.Name,
+					Host:      item.Host.Name,
+					Actions:   len(item.Task.Actions),
+				})
+			}
+		}
+	}
+	return out
+}
+
+func componentsForPreview(cfg *engine.Config, opts runtime.RunOptions) []string {
+	if opts.Scope == runtime.ScopeComponent {
+		if vc, ok := virtualcomponents.Find(opts.Component); ok {
+			set := map[string]bool{}
+			for _, m := range vc.Mappings {
+				if _, ok := cfg.Components[m.Name]; ok {
+					set[m.Name] = true
+				}
+			}
+			hint := "deploy"
+			if opts.Mode == runtime.ModeRollback {
+				hint = "rollback"
+			}
+			full, err := engine.ComponentOrderForPhase(cfg, hint)
+			if err != nil {
+				return []string{}
+			}
+			out := []string{}
+			for _, name := range full {
+				if set[name] {
+					out = append(out, name)
+				}
+			}
+			return out
+		}
+		return []string{opts.Component}
+	}
+	hint := "deploy"
+	if opts.Mode == runtime.ModeRollback {
+		hint = "rollback"
+	}
+	order, err := engine.ComponentOrderForPhase(cfg, hint)
+	if err != nil {
+		return []string{}
+	}
+	return order
+}
+
+func phasesForPreview(opts runtime.RunOptions) []string {
+	switch opts.Mode {
+	case runtime.ModePhase:
+		return []string{opts.Phase}
+	case runtime.ModeRollback:
+		return []string{"rollback", "residue"}
+	default:
+		return []string{"preflight", "render", "deploy", "test"}
+	}
 }
 
 // checkHasTargets returns ok=false with a friendly message when a non-virtual
