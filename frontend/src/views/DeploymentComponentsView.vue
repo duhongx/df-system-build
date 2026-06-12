@@ -195,28 +195,28 @@ onMounted(load)
     <div class="content-card">
       <p class="hint">启用/禁用组件、关联目标主机、配置参数、查看 Pipeline 任务。部署操作请到「部署运行」页点击「新建部署」。</p>
       <el-table :data="components" v-loading="loading" size="small" border stripe>
-        <el-table-column prop="code" label="组件" min-width="150" />
-        <el-table-column label="分类" width="80">
-          <template #default="{ row }">{{ categoryLabel(row.category) }}</template>
-        </el-table-column>
-        <el-table-column label="启用" width="80">
+        <el-table-column label="启用" width="70" align="center">
           <template #default="{ row }">
             <el-switch v-model="row.enabled" :disabled="savingEnabled" @change="toggleEnabled(row)" />
           </template>
         </el-table-column>
-        <el-table-column label="目标主机" width="110">
+        <el-table-column prop="code" label="组件" width="170" />
+        <el-table-column label="分类" width="80">
+          <template #default="{ row }">{{ categoryLabel(row.category) }}</template>
+        </el-table-column>
+        <el-table-column label="目标主机" width="100">
           <template #default="{ row }">
             <span :class="{ 'host-warn': row.enabled && !row.hostIds.length }">
               {{ row.hostIds.length ? `${row.hostIds.length} 台` : '未关联' }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110">
+        <el-table-column label="状态" width="120">
           <template #default="{ row }">
             <el-tag :type="statusTag(row.status)" size="small">{{ row.status }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="240" fixed="right">
+        <el-table-column label="操作" min-width="240">
           <template #default="{ row }">
             <el-button size="small" link type="primary" @click="openHosts(row)">目标主机</el-button>
             <el-button size="small" link @click="openOverride(row)">参数</el-button>
