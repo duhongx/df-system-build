@@ -1,0 +1,136 @@
+import request, { getToken, type PageResult } from './request'
+
+export interface DeploymentComponent {
+  code: string
+  category: string // k8s | business | other
+  status: string   // not_deployed | deployed | failed
+  enabled: boolean
+}
+
+export interface DeploymentSettings {
+  sshUser: string
+  sshPrivateKeyPath: string
+  sshPort: number
+  remoteRoot: string
+  retainDeployments: number
+  defaultTimeoutSeconds: number
+}
+
+export interface NetworkSettings {
+  vip: string
+  serviceCidr: string
+  clusterCidr: string
+  nodeCidrMaskSize: number
+}
+
+export interface EnvEntry {
+  key: string
+  value: string
+}
+
+export interface GlobalConfig {
+  deployment: DeploymentSettings
+  network: NetworkSettings
+  env: EnvEntry[]
+}
+
+export interface ComponentTargets {
+  component_name: string
+  host_ids: number[]
+}
+
+export interface ComponentOverride {
+  component_name: string
+  params: Record<string, any>
+}
+
+export interface ConflictReport {
+  serverId: number
+  components: string[]
+  reason: string
+}
+
+export interface DeploymentRun {
+  id: number
+  taskType: string
+  targetComponent: string
+  targetHost: string
+  dryRun: boolean
+  status: string
+  startedAt?: string
+  endedAt?: string
+  errorSummary: string
+  scopeKind: string
+  phase: string
+  durationMs: number
+  createdAt: string
+}
+
+export interface DeploymentLog {
+  sequence: number
+  timestamp: string
+  component: string
+  host: string
+  phase: string
+  action_name: string
+  action_type: string
+  status: string
+  detail: string
+  is_error: boolean
+}
+
+// ---- components ----
+export const listComponents = () =>
+  request.get<any, DeploymentComponent[]>('/deployment/components')
+export const getEnabled = () =>
+  request.get<any, string[]>('/deployment/components/enabled')
+export const putEnabled = (components: string[]) =>
+  request.put<any, any>('/deployment/components/enabled', { components })
+
+// ---- global config ----
+export const getGlobalConfig = () =>
+  request.get<any, GlobalConfig>('/deployment/global-config')
+export const putGlobalConfig = (body: Partial<GlobalConfig> & { envReplace?: boolean }) =>
+  request.put<any, any>('/deployment/global-config', body)
+
+// ---- overrides ----
+export const listOverrides = () =>
+  request.get<any, ComponentOverride[]>('/deployment/overrides')
+export const getOverride = (component: string) =>
+  request.get<any, ComponentOverride>(`/deployment/overrides/${component}`)
+export const putOverride = (component: string, params: Record<string, any>) =>
+  request.put<any, any>(`/deployment/overrides/${component}`, { params })
+export const deleteOverride = (component: string) =>
+  request.delete<any, any>(`/deployment/overrides/${component}`)
+
+// ---- targets ----
+export const listTargets = () =>
+  request.get<any, ComponentTargets[]>('/deployment/targets')
+export const getTargets = (component: string) =>
+  request.get<any, ComponentTargets>(`/deployment/targets/${component}`)
+export const putTargets = (component: string, serverIds: number[]) =>
+  request.put<any, any>(`/deployment/targets/${component}`, { serverIds })
+export const runHostChecks = () =>
+  request.post<any, { conflicts: ConflictReport[] }>('/deployment/host-checks')
+
+// ---- runs ----
+export const listRuns = (page = 1, pageSize = 20) =>
+  request.get<any, PageResult<DeploymentRun>>('/deployment/runs', { params: { page, pageSize } })
+export const runningRuns = () =>
+  request.get<any, any[]>('/deployment/runs/running')
+export const getRun = (id: number) =>
+  request.get<any, DeploymentRun>(`/deployment/runs/${id}`)
+export const createRun = (body: { component?: string; all?: boolean; host?: string }) =>
+  request.post<any, { runId: number }>('/deployment/runs', body)
+export const previewRun = (body: { component?: string; all?: boolean }) =>
+  request.post<any, { runId: number; dryRun: boolean }>('/deployment/runs/preview', body)
+export const rollbackRun = (body: { component?: string; all?: boolean; host?: string }) =>
+  request.post<any, { runId: number }>('/deployment/runs/rollback', body)
+export const cancelRun = (id: number) =>
+  request.post<any, { canceled: boolean }>(`/deployment/runs/${id}/cancel`)
+export const getRunLogs = (id: number, afterSeq = 0, limit = 500) =>
+  request.get<any, DeploymentLog[]>(`/deployment/runs/${id}/logs`, { params: { afterSeq, limit } })
+
+// SSE: EventSource cannot set headers, so the JWT goes in the query string.
+export const runEventSource = (id: number) =>
+  new EventSource(`/api/deployment/runs/${id}/events?token=${encodeURIComponent(getToken())}`)

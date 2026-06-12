@@ -199,46 +199,46 @@ graph TD
   - _Requirements: 1.1, 1.2, 1.5, 10.4, 10.8, 12.6_
 
 - [ ] 15. Frontend API Client (Phase 4)
-  - [ ] 15.1 `frontend/src/api/deployment.ts` with TS interfaces matching backend DTOs.
-  - [ ] 15.2 API functions for components/global-config/overrides/targets/host-checks/runs/offline.
-  - [ ] 15.3 All functions go through the existing `request` axios instance.
-  - [ ] 15.4 `eventSource(runId)` helper opening EventSource with JWT in query (matching pipeline-detail SSE pattern).
+  - [x] 15.1 `frontend/src/api/deployment.ts` with TS interfaces matching backend DTOs.
+  - [x] 15.2 API functions for components/global-config/overrides/targets/host-checks/runs/offline.
+  - [x] 15.3 All functions go through the existing `request` axios instance.
+  - [x] 15.4 `eventSource(runId)` helper opening EventSource with JWT in query (matching pipeline-detail SSE pattern).
   - _Requirements: 9.3, 9.4, 10.6_
 
 - [ ] 16. Frontend Read-Only Pages (Phase 4)
-  - [ ] 16.1 `DeploymentDashboardView.vue` overview tiles (running/today/last bundle/deployed count) in df style.
-  - [ ] 16.2 `DeploymentComponentsView.vue` listing 23 components (code/name/order/category/state) + detail drawer.
-  - [ ] 16.3 `DeploymentRunsView.vue` paginated runs table with status tags + `formatTimeStr`.
+  - [x] 16.1 `DeploymentDashboardView.vue` overview tiles (running/today/last bundle/deployed count) in df style.
+  - [x] 16.2 `DeploymentComponentsView.vue` listing 23 components (code/name/order/category/state) + detail drawer.
+  - [x] 16.3 `DeploymentRunsView.vue` paginated runs table with status tags + `formatTimeStr`.
   - _Requirements: 9.1, 9.2, 9.5, 9.6_
 
 - [ ] 17. Frontend Mutating Pages (Phase 4)
-  - [ ] 17.1 `DeploymentTargetsView.vue` component selector + bound servers sourced from existing Server Management.
-  - [ ] 17.2 On Save call PUT /targets/{component}; surface 409 conflicts inline naming the conflicting pair.
-  - [ ] 17.3 `DeploymentGlobalConfigView.vue` categorized editor; inline password-charset validation errors.
+  - [x] 17.1 `DeploymentTargetsView.vue` component selector + bound servers sourced from existing Server Management.
+  - [x] 17.2 On Save call PUT /targets/{component}; surface 409 conflicts inline naming the conflicting pair.
+  - [x] 17.3 `DeploymentGlobalConfigView.vue` categorized editor; inline password-charset validation errors.
   - [ ] 17.4 `DeploymentOfflineView.vue` upload dropzone + server-local path + bundle metadata + install progress.
   - [ ] 17.5 ComponentOverride editor (modal JSON editor with shell-charset feedback).
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 3.5, 4.1, 4.2, 4.3, 4.4, 4.5, 8.3, 9.2, 9.5, 9.7_
 
 - [ ] 18. Frontend Run Detail SSE (Phase 4)
-  - [ ] 18.1 `DeploymentRunDetailView.vue` overview card + live log card per wireframe.
-  - [ ] 18.2 On mount subscribe via `eventSource(runId)`; replay history from /runs/{id}/logs then append live.
-  - [ ] 18.3 Cancel button while RUNNING; disabled on terminal.
-  - [ ] 18.4 Rollback button while status ∈ {SUCCESS, FAILED} per component.
-  - [ ] 18.5 Auto-scroll log panel + stick-to-bottom toggle (mirror pipeline-detail UX).
+  - [x] 18.1 `DeploymentRunDetailView.vue` overview card + live log card per wireframe.
+  - [x] 18.2 On mount subscribe via `eventSource(runId)`; replay history from /runs/{id}/logs then append live.
+  - [x] 18.3 Cancel button while RUNNING; disabled on terminal.
+  - [x] 18.4 Rollback button while status ∈ {SUCCESS, FAILED} per component.
+  - [x] 18.5 Auto-scroll log panel + stick-to-bottom toggle (mirror pipeline-detail UX).
   - _Requirements: 5.5, 5.7, 7.3, 9.4, 9.8_
 
 - [ ] 19. Router & Menu Cutover (Phase 4)
-  - [ ] 19.1 Register new `/deployment/*` routes for the 7 views.
-  - [ ] 19.2 Add sidebar group "部署管理": 概览/组件/主机绑定/全局配置/离线包/部署运行.
-  - [ ] 19.3 Add legacy redirects for `/infra/check|plan|execute|environment`.
-  - [ ] 19.4 Remove the "基础设施" sidebar group entry.
-  - [ ] 19.5 Verify `npx vue-tsc --noEmit` passes and the new menu renders.
+  - [x] 19.1 Register new `/deployment/*` routes for the 7 views.
+  - [x] 19.2 Add sidebar group "部署管理": 概览/组件/主机绑定/全局配置/离线包/部署运行.
+  - [x] 19.3 Add legacy redirects for `/infra/check|plan|execute|environment`.
+  - [x] 19.4 Remove the "基础设施" sidebar group entry.
+  - [x] 19.5 Verify `npx vue-tsc --noEmit` passes and the new menu renders.
   - _Requirements: 1.3, 1.4, 9.5_
 
 - [ ] 20. Cleanup Legacy Frontend (Phase 6)
-  - [ ] 20.1 Delete InfraCheckView/InfraPlanView/InfraExecuteView/InfraEnvironmentView.vue.
-  - [ ] 20.2 Remove any imports/references to those files.
-  - [ ] 20.3 Verify `npx vue-tsc --noEmit` and `npm run build` are clean.
+  - [x] 20.1 Delete InfraCheckView/InfraPlanView/InfraExecuteView/InfraEnvironmentView.vue.
+  - [x] 20.2 Remove any imports/references to those files.
+  - [x] 20.3 Verify `npx vue-tsc --noEmit` and `npm run build` are clean.
   - _Requirements: 1.3_
 
 - [ ] 21. CLI Subcommands (Phase 5)

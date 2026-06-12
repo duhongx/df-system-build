@@ -346,15 +346,17 @@ async function handleSavePassword() {
           <el-menu-item index="/settings/notifications">通知配置</el-menu-item>
         </el-sub-menu>
 
-        <el-sub-menu index="infra-center">
+        <el-sub-menu index="deployment-center">
           <template #title>
             <el-icon><Cpu /></el-icon>
-            <span>基础设施</span>
+            <span>部署管理</span>
           </template>
-          <el-menu-item index="/infra/check">部署检测</el-menu-item>
-          <el-menu-item index="/infra/plan">部署规划</el-menu-item>
-          <el-menu-item index="/infra/execute">执行部署</el-menu-item>
-          <el-menu-item index="/infra/environment">环境清单</el-menu-item>
+          <el-menu-item index="/deployment/dashboard">概览</el-menu-item>
+          <el-menu-item index="/deployment/components">组件</el-menu-item>
+          <el-menu-item index="/deployment/targets">主机绑定</el-menu-item>
+          <el-menu-item index="/deployment/global-config">全局配置</el-menu-item>
+          <el-menu-item index="/deployment/offline">离线包</el-menu-item>
+          <el-menu-item index="/deployment/runs">部署运行</el-menu-item>
         </el-sub-menu>
       </el-menu>
     </aside>

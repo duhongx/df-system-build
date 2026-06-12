@@ -49,11 +49,20 @@ const routes = [
       { path: 'settings', redirect: '/settings/general' },
       // Legacy redirects
       { path: 'apps', redirect: '/settings/apps' },
-      // Infrastructure
-      { path: 'infra/check', name: 'InfraCheck', component: () => import('../views/InfraCheckView.vue'), meta: { title: '部署检测' } },
-      { path: 'infra/plan', name: 'InfraPlan', component: () => import('../views/InfraPlanView.vue'), meta: { title: '部署规划' } },
-      { path: 'infra/execute', name: 'InfraExecute', component: () => import('../views/InfraExecuteView.vue'), meta: { title: '执行部署' } },
-      { path: 'infra/environment', name: 'InfraEnvironment', component: () => import('../views/InfraEnvironmentView.vue'), meta: { title: '环境清单' } },
+      // Deployment Management (部署管理) — replaces the legacy 基础设施 stub
+      { path: 'deployment', redirect: '/deployment/dashboard' },
+      { path: 'deployment/dashboard', name: 'DeploymentDashboard', component: () => import('../views/DeploymentDashboardView.vue'), meta: { title: '部署管理' } },
+      { path: 'deployment/components', name: 'DeploymentComponents', component: () => import('../views/DeploymentComponentsView.vue'), meta: { title: '组件' } },
+      { path: 'deployment/targets', name: 'DeploymentTargets', component: () => import('../views/DeploymentTargetsView.vue'), meta: { title: '主机绑定' } },
+      { path: 'deployment/global-config', name: 'DeploymentGlobalConfig', component: () => import('../views/DeploymentGlobalConfigView.vue'), meta: { title: '全局配置' } },
+      { path: 'deployment/offline', name: 'DeploymentOffline', component: () => import('../views/DeploymentOfflineView.vue'), meta: { title: '离线包' } },
+      { path: 'deployment/runs', name: 'DeploymentRuns', component: () => import('../views/DeploymentRunsView.vue'), meta: { title: '部署运行' } },
+      { path: 'deployment/runs/:id', name: 'DeploymentRunDetail', component: () => import('../views/DeploymentRunDetailView.vue'), meta: { title: '运行详情' } },
+      // Legacy infrastructure redirects
+      { path: 'infra/check', redirect: '/deployment/components' },
+      { path: 'infra/plan', redirect: '/deployment/runs' },
+      { path: 'infra/execute', redirect: '/deployment/runs' },
+      { path: 'infra/environment', redirect: '/deployment/global-config' },
     ]
   }
 ]
