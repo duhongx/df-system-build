@@ -263,8 +263,8 @@ graph TD
   - [ ] 23.2 Exercise menu: add target binding, edit global config, upload bundle, preview, run `prepare`, watch SSE, rollback.
   - [ ] 23.3 Verify legacy `/infra/*` URLs redirect to `/deployment/*`.
   - [ ] 23.4 Confirm `grep -r "dfctl\|chi\.\|glebarez/sqlite" backend/` returns zero results.
-  - [ ] 23.5 Update `README.md` with a "部署管理" section + dual-persistence-root migration warning.
-  - [ ] 23.6 Write `docs/deployment-management.md` (overview, migration decisions, manual-data-migration note).
+  - [x] 23.5 Update `README.md` with a "部署管理" section + dual-persistence-root migration warning.
+  - [x] 23.6 Write `docs/deployment-management.md` (overview, migration decisions, manual-data-migration note).
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 7.9, 9.1, 9.2, 12.1, 12.4, 12.5, 12.6_
 
 ## Notes
