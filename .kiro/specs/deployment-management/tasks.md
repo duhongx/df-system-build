@@ -106,12 +106,12 @@ graph TD
   - _Requirements: 7.1, 7.2, 7.6, 7.8, 10.2_
 
 - [ ] 5. Action Library Adapter (Phase 1+2)
-  - [ ] 5.1 `actions/registry.go` — global handler map + `Register(type, handler)`.
-  - [ ] 5.2 Move per-action bodies into `file.go`/`system.go`/`k8s.go`/`check.go`/`state.go`/`slb.go`/`command.go`.
-  - [ ] 5.3 Update handlers to take typed `Context` (run id, component, host, exec.Backend, statedir helper).
+  - [x] 5.1 `actions/registry.go` — global handler map + `Register(type, handler)`.
+  - [x] 5.2 Move per-action bodies into `file.go`/`system.go`/`k8s.go`/`check.go`/`state.go`/`slb.go`/`command.go`.
+  - [x] 5.3 Update handlers to take typed `Context` (run id, component, host, exec.Backend, statedir helper).
   - [ ] 5.4 Wire state actions (record_path_state/backup_file/restore_file/remove_path_if_*/assert_path_absent_if_created) to statedir (stub until Task 8).
-  - [ ] 5.5 Per-action unit tests using LocalBackend against temp dir; happy + error paths.
-  - [ ] 5.6 Test that fails if any required action type (Requirement 6.1, ~40 types) is missing from the registry.
+  - [x] 5.5 Per-action unit tests using LocalBackend against temp dir; happy + error paths.
+  - [x] 5.6 Test that fails if any required action type (Requirement 6.1, ~40 types) is missing from the registry.
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6_
 
 - [ ] 6. Conflict Matrix (Phase 2)
@@ -250,12 +250,12 @@ graph TD
   - _Requirements: 4.7, 4.8, 11.5_
 
 - [ ] 22. Property Tests (Phase 6)
-  - [ ] 22.1 `render/merge_property_test.go` — CP-2 parameter merge precedence (rapid).
+  - [x] 22.1 `render/merge_property_test.go` — CP-2 parameter merge precedence (rapid).
   - [x] 22.2 `conflict/matrix_property_test.go` — CP-3 conflict matrix invariant.
   - [x] 22.3 `offline/atomic_property_test.go` — CP-4 install atomicity under fault injection.
-  - [ ] 22.4 `repository/state_property_test.go` — CP-1 state machine atomicity.
-  - [ ] 22.5 `handler/sse_property_test.go` — CP-6 no-loss SSE replay.
-  - [ ] 22.6 Run `go test -count=10 -timeout=10m ./internal/deploy/...` to shake out flakiness.
+  - [x] 22.4 `repository/state_property_test.go` — CP-1 state machine atomicity.
+  - [x] 22.5 `handler/sse_property_test.go` — CP-6 no-loss SSE replay.
+  - [x] 22.6 Run `go test -count=10 -timeout=10m ./internal/deploy/...` to shake out flakiness.
   - _Requirements: 3.4, 4.3, 4.4, 4.5, 5.5, 5.7, 7.1, 7.2, 7.4, 7.5, 7.6, 7.8, 8.1, 8.2_
 
 - [ ] 23. End-to-End Verification (Phase 6)
