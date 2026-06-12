@@ -71,10 +71,11 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 // ---- components ----
 
 type componentDTO struct {
-	Code     string `json:"code"`
-	Category string `json:"category"`
-	Status   string `json:"status"`
-	Enabled  bool   `json:"enabled"`
+	Code     string  `json:"code"`
+	Category string  `json:"category"`
+	Status   string  `json:"status"`
+	Enabled  bool    `json:"enabled"`
+	HostIDs  []int64 `json:"hostIds"`
 }
 
 func (h *Handler) ListComponents(c *gin.Context) {
@@ -95,6 +96,13 @@ func (h *Handler) ListComponents(c *gin.Context) {
 	for _, e := range enabled {
 		enabledSet[e.Name] = true
 	}
+	// host bindings per component
+	hostsByComp := map[string][]int64{}
+	if all, err := st.ListAllTargets(ctx); err == nil {
+		for _, t := range all {
+			hostsByComp[t.ComponentName] = t.HostIDs
+		}
+	}
 
 	out := []componentDTO{}
 	for _, name := range virtualcomponents.PipelineComponents() {
@@ -102,11 +110,16 @@ func (h *Handler) ListComponents(c *gin.Context) {
 		if status == "" {
 			status = store.DeployStateNotDeployed
 		}
+		hids := hostsByComp[name]
+		if hids == nil {
+			hids = []int64{}
+		}
 		out = append(out, componentDTO{
 			Code:     name,
 			Category: categoryOf(name),
 			Status:   status,
 			Enabled:  enabledSet[name],
+			HostIDs:  hids,
 		})
 	}
 	response.OK(c, out)

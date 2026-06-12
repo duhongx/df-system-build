@@ -5,6 +5,7 @@ export interface DeploymentComponent {
   category: string // k8s | business | other
   status: string   // not_deployed | deployed | failed
   enabled: boolean
+  hostIds: number[]
 }
 
 export interface DeploymentSettings {
@@ -93,7 +94,7 @@ export interface ComponentTask {
   phase: string
   id: string
   name: string
-  actions: { type: string; name: string }[]
+  actions: { type: string; name: string; summary: string }[]
 }
 export const getComponentTasks = (name: string) =>
   request.get<any, { name: string; pipelineComponents: string[]; items: ComponentTask[] }>(`/deployment/components/${name}/tasks`)
