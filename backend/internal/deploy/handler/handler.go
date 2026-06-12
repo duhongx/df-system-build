@@ -70,57 +70,30 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 
 // ---- components ----
 
-type componentDTO struct {
-	Code     string  `json:"code"`
-	Category string  `json:"category"`
-	Status   string  `json:"status"`
-	Enabled  bool    `json:"enabled"`
-	HostIDs  []int64 `json:"hostIds"`
-}
-
 func (h *Handler) ListComponents(c *gin.Context) {
 	ctx := c.Request.Context()
 	st := h.svc.Store()
 
-	states, err := st.ListComponentDeployStates(ctx)
-	if err != nil {
-		response.Fail(c, 5001, err.Error())
-		return
-	}
 	stateByName := map[string]string{}
-	for _, s := range states {
-		stateByName[s.ComponentName] = s.Status
+	if states, err := st.ListComponentDeployStates(ctx); err == nil {
+		for _, s := range states {
+			stateByName[s.ComponentName] = s.Status
+		}
 	}
-	enabled, _ := st.ListEnabledComponents(ctx)
-	enabledSet := map[string]bool{}
-	for _, e := range enabled {
-		enabledSet[e.Name] = true
-	}
-	// host bindings per component
-	hostsByComp := map[string][]int64{}
-	if all, err := st.ListAllTargets(ctx); err == nil {
-		for _, t := range all {
-			hostsByComp[t.ComponentName] = t.HostIDs
+	enabledByPipeline := map[string]bool{}
+	if enabled, err := st.ListEnabledComponents(ctx); err == nil {
+		for _, e := range enabled {
+			enabledByPipeline[e.Name] = true
 		}
 	}
 
-	out := []componentDTO{}
-	for _, name := range virtualcomponents.PipelineComponents() {
-		status := stateByName[name]
-		if status == "" {
-			status = store.DeployStateNotDeployed
+	out := []vcSummary{}
+	for _, vc := range virtualcomponents.All() {
+		ownTargets, _ := st.ListTargetsForOwner(ctx, vc.Name)
+		if ownTargets == nil {
+			ownTargets = map[string][]int64{}
 		}
-		hids := hostsByComp[name]
-		if hids == nil {
-			hids = []int64{}
-		}
-		out = append(out, componentDTO{
-			Code:     name,
-			Category: categoryOf(name),
-			Status:   status,
-			Enabled:  enabledSet[name],
-			HostIDs:  hids,
-		})
+		out = append(out, h.buildVCSummary(vc, enabledByPipeline, ownTargets, stateByName[vc.Name]))
 	}
 	response.OK(c, out)
 }
@@ -150,13 +123,28 @@ func (h *Handler) GetEnabled(c *gin.Context) {
 
 func (h *Handler) PutEnabled(c *gin.Context) {
 	var body struct {
-		Components []string `json:"components"`
+		Components []string `json:"components"` // virtual component names
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		response.Fail(c, 4001, "请求体格式错误")
 		return
 	}
-	if err := h.svc.Store().ReplaceEnabledComponents(c.Request.Context(), body.Components); err != nil {
+	// Expand enabled virtual components to their pipeline components.
+	seen := map[string]bool{}
+	pipeline := []string{}
+	for _, vcName := range body.Components {
+		vc, ok := virtualcomponents.Find(vcName)
+		if !ok {
+			continue
+		}
+		for _, m := range vc.Mappings {
+			if !seen[m.Name] {
+				seen[m.Name] = true
+				pipeline = append(pipeline, m.Name)
+			}
+		}
+	}
+	if err := h.svc.Store().ReplaceEnabledComponents(c.Request.Context(), pipeline); err != nil {
 		response.Fail(c, 5001, err.Error())
 		return
 	}
@@ -279,7 +267,21 @@ func (h *Handler) ListTargets(c *gin.Context) {
 }
 
 func (h *Handler) GetTargets(c *gin.Context) {
-	t, err := h.svc.Store().GetTargets(c.Request.Context(), c.Param("component"))
+	name := c.Param("component")
+	ctx := c.Request.Context()
+	if vc, ok := virtualcomponents.Find(name); ok {
+		own, _ := h.svc.Store().ListTargetsForOwner(ctx, vc.Name)
+		if own == nil {
+			own = map[string][]int64{}
+		}
+		hostIDs := vc.AggregateUserHosts(own)
+		if hostIDs == nil {
+			hostIDs = []int64{}
+		}
+		response.OK(c, gin.H{"component_name": name, "host_ids": hostIDs})
+		return
+	}
+	t, err := h.svc.Store().GetTargets(ctx, name)
 	if err != nil {
 		response.Fail(c, 5001, err.Error())
 		return
@@ -288,7 +290,7 @@ func (h *Handler) GetTargets(c *gin.Context) {
 }
 
 func (h *Handler) PutTargets(c *gin.Context) {
-	component := c.Param("component")
+	name := c.Param("component")
 	var body struct {
 		ServerIDs []int64 `json:"serverIds"`
 	}
@@ -299,19 +301,47 @@ func (h *Handler) PutTargets(c *gin.Context) {
 	ctx := c.Request.Context()
 	st := h.svc.Store()
 
-	// Conflict pre-check: simulate the proposed binding against current state.
+	if vc, isVirtual := virtualcomponents.Find(name); isVirtual {
+		if err := vc.ValidateUserHostIDs(body.ServerIDs); err != nil {
+			response.Fail(c, 4001, err.Error())
+			return
+		}
+		allHosts, deployHost := h.deployContext()
+		placements := vc.Expand(virtualcomponents.Inputs{
+			UserSelectedHostIDs: body.ServerIDs,
+			DeployHostID:        deployHost,
+			AllHostIDs:          allHosts,
+		})
+		batch := make([]store.OwnerComponentHosts, 0, len(placements))
+		for _, p := range placements {
+			batch = append(batch, store.OwnerComponentHosts{Component: p.Component, OwnerVC: vc.Name, HostIDs: p.HostIDs})
+		}
+		if err := st.ReplaceTargetsForOwners(ctx, batch); err != nil {
+			response.Fail(c, 5001, err.Error())
+			return
+		}
+		// Conflict check on the resulting global snapshot (warn via 409).
+		if all, err := st.ListAllTargets(ctx); err == nil {
+			if v := conflict.Validate(all); len(v) > 0 {
+				response.FailWithStatus(c, 409, 4091, conflictMessage(v))
+				return
+			}
+		}
+		response.OK(c, gin.H{"updated": true})
+		return
+	}
+
 	all, err := st.ListAllTargets(ctx)
 	if err != nil {
 		response.Fail(c, 5001, err.Error())
 		return
 	}
-	proposed := replaceComponentTargets(all, component, body.ServerIDs)
+	proposed := replaceComponentTargets(all, name, body.ServerIDs)
 	if violations := conflict.Validate(proposed); len(violations) > 0 {
 		response.FailWithStatus(c, 409, 4091, conflictMessage(violations))
 		return
 	}
-
-	if err := st.ReplaceTargets(ctx, component, body.ServerIDs); err != nil {
+	if err := st.ReplaceTargets(ctx, name, body.ServerIDs); err != nil {
 		response.Fail(c, 5001, err.Error())
 		return
 	}

@@ -1,11 +1,19 @@
 import request, { getToken, type PageResult } from './request'
 
 export interface DeploymentComponent {
-  code: string
+  name: string
+  displayName: string
+  description: string
   category: string // k8s | business | other
-  status: string   // not_deployed | deployed | failed
+  order: number
   enabled: boolean
+  requireHostSelection: boolean
+  autoBindNote: string
   hostIds: number[]
+  pipelineComponents: string[]
+  deployState: string // not_deployed | deployed | failed
+  minUserHosts: number
+  maxUserHosts: number
 }
 
 export interface DeploymentSettings {

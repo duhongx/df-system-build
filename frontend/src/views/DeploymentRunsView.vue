@@ -35,11 +35,13 @@ const form = reactive({
 
 const phaseOptions = ['preflight', 'render', 'deploy', 'test', 'rollback', 'residue']
 const showComponent = computed(() => form.mode !== 'cleanup')
-const showHostPicker = computed(() => form.mode === 'deploy' || form.mode === 'rollback' || form.mode === 'phase')
-const selectedComponent = computed(() => components.value.find(c => c.code === form.component))
+const showHostPicker = computed(() =>
+  (form.mode === 'deploy' || form.mode === 'rollback' || form.mode === 'phase') &&
+  !!selectedComponent.value?.requireHostSelection)
+const selectedComponent = computed(() => components.value.find(c => c.name === form.component))
 const blockedByState = computed(() =>
   form.mode === 'deploy' && !form.dry_run && selectedComponent.value &&
-  selectedComponent.value.status !== 'not_deployed')
+  selectedComponent.value.deployState !== 'not_deployed')
 
 async function load() {
   loading.value = true
@@ -197,15 +199,15 @@ onMounted(load)
 
         <el-form-item v-if="showComponent" label="组件">
           <el-select v-model="form.component" placeholder="选择组件" filterable style="width: 100%;" @change="onComponentChange">
-            <el-option v-for="c in components" :key="c.code" :label="c.code" :value="c.code">
+            <el-option v-for="c in components" :key="c.name" :label="c.displayName" :value="c.name">
               <span style="display:inline-flex;align-items:center;gap:8px;width:100%;justify-content:space-between;">
-                <span>{{ c.code }}</span>
-                <el-tag size="small" :type="stateTag(c.status)">{{ stateLabel(c.status) }}</el-tag>
+                <span>{{ c.displayName }}</span>
+                <el-tag size="small" :type="stateTag(c.deployState)">{{ stateLabel(c.deployState) }}</el-tag>
               </span>
             </el-option>
           </el-select>
           <el-alert v-if="blockedByState && selectedComponent" type="error" :closable="false" style="margin-top: 8px;"
-            :title="`组件「${selectedComponent.code}」当前为 ${stateLabel(selectedComponent.status)}，不能直接重新部署，请先用「回滚」清理后再部署。`" />
+            :title="`组件「${selectedComponent.displayName}」当前为 ${stateLabel(selectedComponent.deployState)}，不能直接重新部署，请先用「回滚」清理后再部署。`" />
         </el-form-item>
 
         <el-form-item v-if="form.mode === 'phase'" label="阶段">
