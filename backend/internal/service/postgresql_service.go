@@ -398,12 +398,17 @@ func (s *PostgreSQLService) CreateSQLViewDependencyTask(req SQLViewDependencyTas
 	if statementTimeout == "" {
 		statementTimeout = "10min"
 	}
+	executionMode, err := normalizeSQLViewDependencyExecutionMode(req.ExecutionMode)
+	if err != nil {
+		return nil, err
+	}
 	task := &model.SQLViewDependencyTask{
 		SchemaName:       ref.schema,
 		TableName:        ref.table,
 		ColumnName:       ref.column,
 		AlterSQL:         strings.TrimSpace(req.AlterSQL),
 		Status:           "CREATED",
+		ExecutionMode:    executionMode,
 		RiskLevel:        "WARN",
 		RiskReason:       "字段属性变更涉及视图依赖时会短暂删除并恢复视图，默认仅生成执行计划",
 		LockTimeout:      lockTimeout,
@@ -545,7 +550,7 @@ func (s *PostgreSQLService) PrecheckSQLViewDependencyTask(ctx context.Context, i
 		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", err.Error(), username)
 		return nil, nil, err
 	}
-	msg := fmt.Sprintf("预检通过，依赖视图 %d 个；短锁执行将使用 lock_timeout=%s", len(items), task.LockTimeout)
+	msg := fmt.Sprintf("预检通过，依赖视图 %d 个；执行变更将使用 lock_timeout=%s", len(items), task.LockTimeout)
 	updated, err := markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_PASSED", msg, username)
 	if err != nil {
 		return nil, nil, err
@@ -554,7 +559,7 @@ func (s *PostgreSQLService) PrecheckSQLViewDependencyTask(ctx context.Context, i
 }
 
 func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id uint, username string) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
-	task, items, err := s.markSQLViewDependencyTaskRunning(id, "EXECUTING", "开始短锁事务执行", username, ensureSQLViewDependencyTaskCanExecute)
+	task, items, err := s.markSQLViewDependencyTaskRunning(id, "EXECUTING", "开始执行字段变更", username, ensureSQLViewDependencyTaskCanExecute)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -569,11 +574,31 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 		}
 		return updated, items, err
 	}
-	steps := BuildSQLViewDependencyTransactionalSteps(*task, items)
-	err = s.runSQLViewDependencyStepsOnDB(ctx, db, task.ID, steps)
+	executionMode := task.ExecutionMode
+	if strings.TrimSpace(executionMode) == "" {
+		executionMode = SQLViewDependencyExecutionModeStep
+	}
+	if executionMode == SQLViewDependencyExecutionModeTransaction {
+		err = s.runSQLViewDependencyStepsOnDB(ctx, db, task.ID, BuildSQLViewDependencyTransactionalSteps(*task, items))
+	} else {
+		err = s.runSQLViewDependencyStepExecutionOnDB(ctx, db, task.ID, BuildSQLViewDependencyStepExecutionPlan(*task, items))
+	}
 	if err != nil {
-		msg := "短锁事务执行失败，事务已回滚；如仍存在缺失视图，请使用恢复 SQL: " + err.Error()
-		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "FAILED", msg, username)
+		status := "FAILED"
+		msg := "执行变更失败: " + err.Error()
+		var stepErr SQLViewDependencyStepExecutionError
+		if errors.As(err, &stepErr) {
+			if stepErr.RestoreAttempted && stepErr.RestoreSucceeded {
+				status = "RESTORED"
+				msg = "字段变更失败，已按备份恢复视图: " + stepErr.Err.Error()
+			} else if stepErr.RestoreAttempted && !stepErr.RestoreSucceeded {
+				status = "RESTORE_FAILED"
+				msg = "字段变更失败，且自动恢复视图失败，请导出恢复 SQL 人工处理: " + err.Error()
+			}
+		} else if executionMode == SQLViewDependencyExecutionModeTransaction {
+			msg = "事务执行失败，事务已回滚；如仍存在缺失视图，请使用恢复 SQL: " + err.Error()
+		}
+		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, status, msg, username)
 		if saveErr != nil {
 			return nil, nil, saveErr
 		}
@@ -583,7 +608,11 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 	task.Status = "SUCCESS"
 	task.Operator = strings.TrimSpace(username)
 	task.ExecutedAt = &now
-	task.ExecuteMessage = fmt.Sprintf("短锁事务执行完成，恢复视图 %d 个", len(items))
+	if executionMode == SQLViewDependencyExecutionModeTransaction {
+		task.ExecuteMessage = fmt.Sprintf("事务执行完成，恢复视图 %d 个", len(items))
+	} else {
+		task.ExecuteMessage = fmt.Sprintf("分步执行完成，恢复视图 %d 个", len(items))
+	}
 	if err := repository.DB.Save(task).Error; err != nil {
 		return nil, nil, err
 	}
@@ -661,6 +690,65 @@ func (s *PostgreSQLService) runSQLViewDependencyStepsOnDB(ctx context.Context, d
 		case "COMMIT;", "ROLLBACK;":
 			inTx = false
 		}
+	}
+	return nil
+}
+
+func (s *PostgreSQLService) runSQLViewDependencyStepExecutionOnDB(ctx context.Context, db *sql.DB, taskID uint, plan SQLViewDependencyStepExecutionPlan) error {
+	allSteps := plan.AllSteps()
+	stepModels, err := replaceSQLViewDependencySteps(taskID, allSteps)
+	if err != nil {
+		return err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	executor := sqlConnViewDependencyExecutor{ctx: ctx, conn: conn}
+	stepIndex := 0
+	runGroup := func(stage string, steps []string) error {
+		for _, step := range steps {
+			if stepIndex < len(stepModels) {
+				_ = markSQLViewDependencyStepRunning(stepModels[stepIndex].ID)
+			}
+			if err := executor.Exec(step); err != nil {
+				if stepIndex < len(stepModels) {
+					_ = markSQLViewDependencyStepFinished(stepModels[stepIndex].ID, "FAILED", err.Error())
+				}
+				stepIndex++
+				return SQLViewDependencyStepExecutionError{Stage: stage, Err: err}
+			}
+			if stepIndex < len(stepModels) {
+				_ = markSQLViewDependencyStepFinished(stepModels[stepIndex].ID, "SUCCESS", "")
+			}
+			stepIndex++
+		}
+		return nil
+	}
+	if err := runGroup("删除依赖视图", plan.DropSteps); err != nil {
+		return err
+	}
+	if err := runGroup("字段变更", plan.AlterSteps); err != nil {
+		restoreErr := runGroup("恢复依赖视图", plan.RestoreSteps)
+		var stepErr SQLViewDependencyStepExecutionError
+		if errors.As(err, &stepErr) {
+			stepErr.RestoreAttempted = true
+			stepErr.RestoreSucceeded = restoreErr == nil
+			stepErr.RestoreErr = restoreErr
+			return stepErr
+		}
+		return err
+	}
+	if err := runGroup("恢复依赖视图", plan.RestoreSteps); err != nil {
+		var stepErr SQLViewDependencyStepExecutionError
+		if errors.As(err, &stepErr) {
+			stepErr.RestoreAttempted = true
+			stepErr.RestoreSucceeded = false
+			stepErr.RestoreErr = stepErr.Err
+			return stepErr
+		}
+		return err
 	}
 	return nil
 }

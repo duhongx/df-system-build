@@ -79,6 +79,7 @@ type SQLViewDependencyTask struct {
 	ColumnName       string     `gorm:"size:128;index" json:"columnName"`
 	AlterSQL         string     `gorm:"type:text" json:"alterSql"`
 	Status           string     `gorm:"size:32;index" json:"status"`
+	ExecutionMode    string     `gorm:"size:24;index" json:"executionMode"`
 	RiskLevel        string     `gorm:"size:24" json:"riskLevel"`
 	RiskReason       string     `gorm:"type:text" json:"riskReason"`
 	LockTimeout      string     `gorm:"size:32" json:"lockTimeout"`

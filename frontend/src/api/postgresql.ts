@@ -121,6 +121,7 @@ export interface SQLViewDependencyTask {
   columnName: string
   alterSql: string
   status: string
+  executionMode: string
   riskLevel: string
   riskReason: string
   lockTimeout: string
@@ -169,6 +170,7 @@ export interface SQLViewDependencyTaskRequest {
   tableName: string
   columnName: string
   alterSql: string
+  executionMode?: string
   lockTimeout?: string
   statementTimeout?: string
 }

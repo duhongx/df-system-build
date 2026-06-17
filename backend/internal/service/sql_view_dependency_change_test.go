@@ -86,6 +86,9 @@ func TestCreateSQLViewDependencyTaskPersistsValidatedTask(t *testing.T) {
 	if task.ID == 0 || task.Status != "CREATED" || task.Operator != "tester" {
 		t.Fatalf("unexpected task: %+v", task)
 	}
+	if task.ExecutionMode != "STEP" {
+		t.Fatalf("expected new tasks to default to STEP execution, got %q", task.ExecutionMode)
+	}
 
 	var got model.SQLViewDependencyTask
 	if err := repository.DB.First(&got, task.ID).Error; err != nil {
@@ -93,6 +96,25 @@ func TestCreateSQLViewDependencyTaskPersistsValidatedTask(t *testing.T) {
 	}
 	if got.SchemaName != "his" || got.TableName != "patient" || got.ColumnName != "code" {
 		t.Fatalf("unexpected persisted task: %+v", got)
+	}
+}
+
+func TestCreateSQLViewDependencyTaskAcceptsTransactionExecutionMode(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	svc := NewPostgreSQLService()
+
+	task, err := svc.CreateSQLViewDependencyTask(SQLViewDependencyTaskRequest{
+		SchemaName:    "his",
+		TableName:     "patient",
+		ColumnName:    "code",
+		AlterSQL:      "ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(64);",
+		ExecutionMode: "TRANSACTION",
+	}, "tester")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if task.ExecutionMode != "TRANSACTION" {
+		t.Fatalf("expected TRANSACTION execution mode, got %q", task.ExecutionMode)
 	}
 }
 
@@ -365,6 +387,49 @@ func TestBuildSQLViewDependencyTransactionalPlanUsesShortLockSettings(t *testing
 	}
 	if strings.Index(joined, `DROP VIEW IF EXISTS "his"."v_patient";`) > strings.Index(joined, task.AlterSQL) {
 		t.Fatalf("drop must happen before alter:\n%s", joined)
+	}
+}
+
+func TestBuildSQLViewDependencyStepExecutionPlanDoesNotWrapInTransaction(t *testing.T) {
+	task := model.SQLViewDependencyTask{
+		AlterSQL: "ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(64);",
+	}
+	items := []model.SQLViewDependencyItem{
+		{DropOrder: 1, RestoreOrder: 1, DropSQL: `DROP VIEW IF EXISTS "his"."v_patient";`, CreateSQL: `CREATE OR REPLACE VIEW "his"."v_patient" AS SELECT code FROM his.patient;`, VerifySQL: `SELECT to_regclass('"his"."v_patient"');`},
+	}
+
+	plan := BuildSQLViewDependencyStepExecutionPlan(task, items)
+	joined := strings.Join(plan.AllSteps(), "\n")
+
+	if strings.Contains(joined, "BEGIN;") || strings.Contains(joined, "COMMIT;") || strings.Contains(joined, "ROLLBACK;") {
+		t.Fatalf("step execution plan must not wrap statements in a transaction:\n%s", joined)
+	}
+	if len(plan.DropSteps) == 0 || len(plan.AlterSteps) != 1 || len(plan.RestoreSteps) == 0 {
+		t.Fatalf("expected drop, alter and restore groups, got %+v", plan)
+	}
+	if plan.AlterSteps[0] != task.AlterSQL {
+		t.Fatalf("expected original ALTER SQL as alter step, got %+v", plan.AlterSteps)
+	}
+}
+
+func TestRunSQLViewDependencyStepExecutionRestoresAfterAlterFailure(t *testing.T) {
+	executor := &recordingViewDependencyExecutor{failAt: 2}
+	plan := SQLViewDependencyStepExecutionPlan{
+		DropSteps:    []string{`DROP VIEW IF EXISTS "his"."v_patient";`},
+		AlterSteps:   []string{"ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(64);"},
+		RestoreSteps: []string{`CREATE OR REPLACE VIEW "his"."v_patient" AS SELECT code FROM his.patient;`, `SELECT to_regclass('"his"."v_patient"');`},
+	}
+
+	err := runSQLViewDependencyStepExecution(executor, plan)
+
+	if err == nil {
+		t.Fatalf("expected ALTER failure")
+	}
+	if len(executor.steps) != 4 {
+		t.Fatalf("expected drop, failed alter and restore steps, got %#v", executor.steps)
+	}
+	if executor.steps[2] != plan.RestoreSteps[0] || executor.steps[3] != plan.RestoreSteps[1] {
+		t.Fatalf("expected automatic restore after alter failure, got %#v", executor.steps)
 	}
 }
 

@@ -29,8 +29,27 @@ type SQLViewDependencyTaskRequest struct {
 	TableName        string `json:"tableName" binding:"required"`
 	ColumnName       string `json:"columnName" binding:"required"`
 	AlterSQL         string `json:"alterSql" binding:"required"`
+	ExecutionMode    string `json:"executionMode"`
 	LockTimeout      string `json:"lockTimeout"`
 	StatementTimeout string `json:"statementTimeout"`
+}
+
+const (
+	SQLViewDependencyExecutionModeStep        = "STEP"
+	SQLViewDependencyExecutionModeTransaction = "TRANSACTION"
+)
+
+func normalizeSQLViewDependencyExecutionMode(mode string) (string, error) {
+	mode = strings.ToUpper(strings.TrimSpace(mode))
+	if mode == "" {
+		return SQLViewDependencyExecutionModeStep, nil
+	}
+	switch mode {
+	case SQLViewDependencyExecutionModeStep, SQLViewDependencyExecutionModeTransaction:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("不支持的执行方式: %s", mode)
+	}
 }
 
 type viewDependencySnapshot struct {
@@ -210,6 +229,30 @@ func BuildSQLViewDependencyTransactionalSteps(task model.SQLViewDependencyTask, 
 	return steps
 }
 
+type SQLViewDependencyStepExecutionPlan struct {
+	DropSteps    []string
+	AlterSteps   []string
+	RestoreSteps []string
+}
+
+func (p SQLViewDependencyStepExecutionPlan) AllSteps() []string {
+	steps := make([]string, 0, len(p.DropSteps)+len(p.AlterSteps)+len(p.RestoreSteps))
+	steps = append(steps, p.DropSteps...)
+	steps = append(steps, p.AlterSteps...)
+	steps = append(steps, p.RestoreSteps...)
+	return steps
+}
+
+func BuildSQLViewDependencyStepExecutionPlan(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) SQLViewDependencyStepExecutionPlan {
+	plan := SQLViewDependencyStepExecutionPlan{}
+	for _, item := range orderedViewDependencyDropItems(items) {
+		appendSQLStep(&plan.DropSteps, item.DropSQL)
+	}
+	appendSQLStep(&plan.AlterSteps, task.AlterSQL)
+	appendSQLViewDependencyRestoreSteps(&plan.RestoreSteps, items)
+	return plan
+}
+
 func BuildSQLViewDependencyRestoreTransactionalSteps(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) []string {
 	steps := buildSQLViewDependencyTransactionPrefix(task)
 	appendSQLViewDependencyRestoreSteps(&steps, items)
@@ -284,6 +327,54 @@ func appendSQLStep(steps *[]string, sqlText string) {
 
 type sqlViewDependencyExecutor interface {
 	Exec(sqlText string) error
+}
+
+type SQLViewDependencyStepExecutionError struct {
+	Stage            string
+	Err              error
+	RestoreAttempted bool
+	RestoreSucceeded bool
+	RestoreErr       error
+}
+
+func (e SQLViewDependencyStepExecutionError) Error() string {
+	if e.RestoreAttempted {
+		if e.RestoreSucceeded {
+			return fmt.Sprintf("%s失败，已按备份恢复视图: %v", e.Stage, e.Err)
+		}
+		return fmt.Sprintf("%s失败，且按备份恢复视图失败: %v; restore: %v", e.Stage, e.Err, e.RestoreErr)
+	}
+	return fmt.Sprintf("%s失败: %v", e.Stage, e.Err)
+}
+
+func (e SQLViewDependencyStepExecutionError) Unwrap() error {
+	return e.Err
+}
+
+func runSQLViewDependencyStepExecution(executor sqlViewDependencyExecutor, plan SQLViewDependencyStepExecutionPlan) error {
+	for _, step := range plan.DropSteps {
+		if err := executor.Exec(step); err != nil {
+			return SQLViewDependencyStepExecutionError{Stage: "删除依赖视图", Err: err}
+		}
+	}
+	for _, step := range plan.AlterSteps {
+		if err := executor.Exec(step); err != nil {
+			restoreErr := runSQLViewDependencySteps(executor, plan.RestoreSteps)
+			return SQLViewDependencyStepExecutionError{
+				Stage:            "字段变更",
+				Err:              err,
+				RestoreAttempted: true,
+				RestoreSucceeded: restoreErr == nil,
+				RestoreErr:       restoreErr,
+			}
+		}
+	}
+	for _, step := range plan.RestoreSteps {
+		if err := executor.Exec(step); err != nil {
+			return SQLViewDependencyStepExecutionError{Stage: "恢复依赖视图", Err: err, RestoreAttempted: true, RestoreSucceeded: false, RestoreErr: err}
+		}
+	}
+	return nil
 }
 
 func runSQLViewDependencySteps(executor sqlViewDependencyExecutor, steps []string) error {
@@ -460,7 +551,7 @@ func ensureSQLViewDependencyTaskCanExecute(task model.SQLViewDependencyTask, ite
 		return err
 	}
 	if task.Status != "PRECHECK_PASSED" {
-		return fmt.Errorf("请先执行预检，预检通过后再短锁执行")
+		return fmt.Errorf("请先执行预检，预检通过后再执行变更")
 	}
 	return nil
 }
