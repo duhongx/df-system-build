@@ -461,7 +461,16 @@ const deploymentTableRows = computed<DeploymentTableRow[]>(() => deployments.val
   })
 }))
 
-const deploymentMergedColumnIndexes = new Set([0, 1, 2, 11, 12])
+const deploymentMergedColumnIndexes = new Set([0, 1, 2, 10, 11])
+
+function businessAppDisplay(row: DeploymentTableRow) {
+  if (row.deploymentName !== 'web-main') {
+    return row.businessAppName && row.businessAppName !== '-' ? row.businessAppName : row.deploymentName
+  }
+  if (row.appIdentifier === 'web-main') return 'web-main'
+  if (!row.businessAppName || row.businessAppName === '-') return row.appIdentifier
+  return `${row.appIdentifier} / ${row.businessAppName}`
+}
 
 function deploymentTableSpanMethod({ rowIndex, columnIndex }: { rowIndex: number; columnIndex: number }) {
   if (!deploymentMergedColumnIndexes.has(columnIndex)) return { rowspan: 1, colspan: 1 }
@@ -594,14 +603,16 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
               <span class="image-text">{{ row.deployment.spec?.template?.spec?.containers?.[0]?.image || '-' }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="web-main/子系统ID" width="150">
+          <el-table-column label="业务应用" min-width="220" show-overflow-tooltip>
             <template #default="{ row }">
-              <span :class="['app-identifier', row.appIdentifier === 'web-main' ? 'main-app' : '']">{{ row.appIdentifier }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="业务应用" min-width="180" show-overflow-tooltip>
-            <template #default="{ row }">
-              <span class="business-app-name">{{ row.businessAppName }}</span>
+              <span
+                :class="[
+                  'business-app-name',
+                  row.deploymentName === 'web-main' && row.appIdentifier !== 'web-main' ? 'web-main-child-app' : '',
+                ]"
+              >
+                {{ businessAppDisplay(row) }}
+              </span>
             </template>
           </el-table-column>
           <el-table-column prop="version" label="版本" width="110" show-overflow-tooltip />
@@ -949,20 +960,16 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
   word-break: break-all;
 }
 
-.app-identifier {
+.business-app-name {
   display: inline-flex;
   align-items: center;
-  min-width: 42px;
-  color: #606266;
-  font-weight: 600;
-}
-
-.app-identifier.main-app {
-  color: #1f2937;
-}
-
-.business-app-name {
   color: #303133;
+  font-weight: 500;
+}
+
+.business-app-name.web-main-child-app {
+  padding-left: 12px;
+  color: #606266;
 }
 
 .runtime-version-empty {
@@ -1027,10 +1034,6 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
 
 :deep(.web-main-child-row) td {
   background: #fbfdff !important;
-}
-
-:deep(.web-main-child-row .app-identifier) {
-  padding-left: 12px;
 }
 
 .log-content {
