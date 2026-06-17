@@ -24,6 +24,30 @@ export const getK8sIngresses = (namespace: string) =>
 export const getK8sDeployments = (namespace: string) =>
   request.get<any, any>('/kubernetes/deployments', { params: { namespace } })
 
+export interface DeploymentRuntimeVersion {
+  id: number
+  namespace: string
+  deploymentName: string
+  appId: number
+  appName: string
+  appCode: string
+  appType: string
+  vueRole: string
+  runtimeVersionPath: string
+  image: string
+  businessVersionJson: string
+  status: string
+  errorMessage: string
+  syncedAt: string
+}
+
+export const syncK8sDeploymentRuntimeVersions = (namespace: string, deployments?: string[]) =>
+  request.post<any, { runtimeVersions: DeploymentRuntimeVersion[] }>(
+    '/kubernetes/deployments/runtime-versions/sync',
+    { deployments: deployments || [] },
+    { params: { namespace } },
+  )
+
 export const getK8sPods = (namespace: string) =>
   request.get<any, any>('/kubernetes/pods', { params: { namespace } })
 

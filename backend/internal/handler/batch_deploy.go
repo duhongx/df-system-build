@@ -41,8 +41,9 @@ const (
 )
 
 type BatchDeployHandler struct {
-	appRepo      *repository.ApplicationRepo
-	pipelineRepo *repository.PipelineRepo
+	appRepo       *repository.ApplicationRepo
+	pipelineRepo  *repository.PipelineRepo
+	runtimeReader service.ArtifactDeployRuntimeReader
 }
 
 type deployRecordRef struct {
@@ -95,8 +96,9 @@ var downloadJobStore = struct {
 
 func NewBatchDeployHandler() *BatchDeployHandler {
 	return &BatchDeployHandler{
-		appRepo:      repository.NewApplicationRepo(),
-		pipelineRepo: repository.NewPipelineRepo(),
+		appRepo:       repository.NewApplicationRepo(),
+		pipelineRepo:  repository.NewPipelineRepo(),
+		runtimeReader: service.NewK8sRuntimeVersionReader(),
 	}
 }
 
@@ -358,7 +360,16 @@ func (h *BatchDeployHandler) GetArtifactDeployBatch(c *gin.Context) {
 	}
 	var batch model.ArtifactDeployBatch
 	if err := repository.DB.Where("deploy_batch_no = ?", batchNo).First(&batch).Error; err != nil {
-		response.OK(c, gin.H{"batch": nil, "records": []model.ArtifactDeployRecord{}})
+		namespace := strings.TrimSpace(c.Query("namespace"))
+		if namespace == "" {
+			namespace = k8s.GetDefaultNamespace()
+		}
+		records, previewErr := service.BuildArtifactDeployPreviewRecordsFromCache(c.Request.Context(), batchNo, namespace)
+		if previewErr != nil {
+			response.Fail(c, 13022, "读取当前运行状态失败: "+previewErr.Error())
+			return
+		}
+		response.OK(c, gin.H{"batch": nil, "records": records})
 		return
 	}
 	records := []model.ArtifactDeployRecord{}
@@ -1440,14 +1451,14 @@ func persistArtifactVersionFromDir(input artifactVersionInput) (model.ArtifactVe
 
 func refreshArtifactVersion(version model.ArtifactVersion) (model.ArtifactVersion, []model.ArtifactVersionItem, error) {
 	return persistArtifactVersionFromDir(artifactVersionInput{
-		VersionNo:    version.VersionNo,
-		SourceType:   version.SourceType,
-		SourceLabel:  version.SourceLabel,
-		Status:       version.Status,
-		LocalDir:     version.LocalDir,
-		TargetPath:   firstNonEmptyString(version.TargetPath, version.LocalDir),
-		RemotePath:   version.RemotePath,
-		Error:        version.Error,
+		VersionNo:   version.VersionNo,
+		SourceType:  version.SourceType,
+		SourceLabel: version.SourceLabel,
+		Status:      version.Status,
+		LocalDir:    version.LocalDir,
+		TargetPath:  firstNonEmptyString(version.TargetPath, version.LocalDir),
+		RemotePath:  version.RemotePath,
+		Error:       version.Error,
 	})
 }
 

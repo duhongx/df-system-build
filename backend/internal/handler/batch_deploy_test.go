@@ -3,6 +3,7 @@ package handler
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +22,8 @@ import (
 
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
-	"df-build-server/pkg/config"
+	"df-build-server/internal/service"
+	"df-build-server/internal/testutil"
 	"df-build-server/pkg/logger"
 
 	"github.com/gin-gonic/gin"
@@ -308,7 +310,7 @@ func TestDownloadJobPersistsAndRestoresActiveJob(t *testing.T) {
 	if logger.Log == nil {
 		logger.Init("error", "stdout", "")
 	}
-	if err := repository.InitDB(&config.DatabaseConfig{Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "test.db")}); err != nil {
+	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
 		t.Fatalf("init db: %v", err)
 	}
 	if err := repository.DB.AutoMigrate(&model.DownloadJob{}); err != nil {
@@ -343,7 +345,7 @@ func TestDownloadWorkspaceDirForStartReusesLatestFailedJobDir(t *testing.T) {
 	if logger.Log == nil {
 		logger.Init("error", "stdout", "")
 	}
-	if err := repository.InitDB(&config.DatabaseConfig{Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "test.db")}); err != nil {
+	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
 		t.Fatalf("init db: %v", err)
 	}
 	if err := repository.DB.AutoMigrate(&model.DownloadJob{}); err != nil {
@@ -945,6 +947,129 @@ func TestGetArtifactDeployBatchReturnsRecordsForVersionRollback(t *testing.T) {
 	}
 }
 
+func TestGetArtifactDeployBatchReturnsCurrentRuntimePreviewBeforeDeployment(t *testing.T) {
+	setupArtifactVersionTestDB(t)
+
+	var gateway model.Application
+	if err := repository.DB.Where("app_name = ?", "his-gateway").First(&gateway).Error; err != nil {
+		t.Fatalf("load gateway app: %v", err)
+	}
+	var subApp model.Application
+	if err := repository.DB.Where("app_name = ?", "web-menzhenysz").First(&subApp).Error; err != nil {
+		t.Fatalf("load sub app: %v", err)
+	}
+	version := model.ArtifactVersion{VersionNo: "version-current", SourceType: "download", Status: "available", Count: 2, DeployableCount: 2}
+	if err := repository.DB.Create(&version).Error; err != nil {
+		t.Fatalf("create artifact version: %v", err)
+	}
+	items := []model.ArtifactVersionItem{
+		{
+			VersionNo:          version.VersionNo,
+			FileName:           "his-gateway.jar",
+			FileType:           "jar",
+			AppID:              gateway.ID,
+			AppName:            gateway.AppName,
+			AppType:            gateway.AppType,
+			MatchStatus:        "matched",
+			ValidateStatus:     "valid",
+			Deployable:         true,
+			PackageVersionJSON: `{"git":{"branch":"release","commit":{"id":"new-gateway"}}}`,
+		},
+		{
+			VersionNo:          version.VersionNo,
+			FileName:           "04.zip",
+			FileType:           "vue",
+			AppID:              subApp.ID,
+			AppName:            subApp.AppName,
+			AppType:            subApp.AppType,
+			MatchStatus:        "matched",
+			ValidateStatus:     "valid",
+			Deployable:         true,
+			PackageVersionJSON: `{"xiTongId":"04","version":"2.0.1"}`,
+		},
+	}
+	if err := repository.DB.Create(&items).Error; err != nil {
+		t.Fatalf("create artifact version items: %v", err)
+	}
+	cacheRows := []model.DeploymentRuntimeVersion{
+		{
+			Namespace:           "prod",
+			DeploymentName:      "his-gateway",
+			AppID:               gateway.ID,
+			AppName:             gateway.AppName,
+			AppType:             gateway.AppType,
+			RuntimeVersionPath:  service.RuntimeVersionPathForApplication(gateway),
+			Image:               "registry/his-gateway:old",
+			BusinessVersionJSON: `{"git":{"branch":"release","commit":{"id":"old-gateway"}}}`,
+			Status:              "synced",
+			SyncedAt:            time.Now(),
+		},
+		{
+			Namespace:           "prod",
+			DeploymentName:      "web-main",
+			AppID:               subApp.ID,
+			AppName:             subApp.AppName,
+			AppCode:             subApp.AppCode,
+			AppType:             subApp.AppType,
+			VueRole:             subApp.VueRole,
+			RuntimeVersionPath:  service.RuntimeVersionPathForApplication(subApp),
+			Image:               "registry/web-main:old",
+			BusinessVersionJSON: `{"xiTongId":"04","version":"1.9.0"}`,
+			Status:              "synced",
+			SyncedAt:            time.Now(),
+		},
+	}
+	if err := repository.DB.Create(&cacheRows).Error; err != nil {
+		t.Fatalf("create runtime version cache: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	req := httptest.NewRequest(http.MethodGet, "/batch-deploy/deploy-batches/version-current?namespace=prod", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+	c.Params = gin.Params{{Key: "batchNo", Value: "version-current"}}
+
+	h := NewBatchDeployHandler()
+	h.runtimeReader = panicArtifactDeployRuntimeReader{}
+	h.GetArtifactDeployBatch(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Code int `json:"code"`
+		Data struct {
+			Batch   *model.ArtifactDeployBatch   `json:"batch"`
+			Records []model.ArtifactDeployRecord `json:"records"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Code != 0 || payload.Data.Batch != nil || len(payload.Data.Records) != 2 {
+		t.Fatalf("expected two current preview records without persisted batch, got %#v", payload)
+	}
+	for _, record := range payload.Data.Records {
+		if record.Status != "current" || record.BeforeImage == "" || record.BeforeBusinessVersionJSON == "" {
+			t.Fatalf("preview record should include current image and business version: %#v", record)
+		}
+	}
+	if payload.Data.Records[1].DeploymentName != "web-main" || payload.Data.Records[1].RuntimeVersionPath != "/usr/share/nginx/html/apps/04/config.json" {
+		t.Fatalf("vue sub app should preview under web-main deployment: %#v", payload.Data.Records[1])
+	}
+}
+
+type panicArtifactDeployRuntimeReader struct{}
+
+func (panicArtifactDeployRuntimeReader) CurrentDeploymentImage(context.Context, string, string) (string, error) {
+	panic("runtime reader should not be called when previewing cached deployment versions")
+}
+
+func (panicArtifactDeployRuntimeReader) ReadBusinessVersion(context.Context, model.ArtifactDeployRecord) (string, error) {
+	panic("runtime reader should not be called when previewing cached deployment versions")
+}
+
 func TestMatchDoesNotRecordLatestArtifact(t *testing.T) {
 	setupArtifactVersionTestDB(t)
 	if err := repository.DB.AutoMigrate(&model.Artifact{}); err != nil {
@@ -1019,10 +1144,10 @@ func setupArtifactVersionTestDB(t *testing.T) {
 	if logger.Log == nil {
 		logger.Init("error", "stdout", "")
 	}
-	if err := repository.InitDB(&config.DatabaseConfig{Driver: "sqlite", SQLitePath: filepath.Join(t.TempDir(), "test.db")}); err != nil {
+	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
 		t.Fatalf("init db: %v", err)
 	}
-	if err := repository.DB.AutoMigrate(&model.Application{}, &model.ArtifactVersion{}, &model.ArtifactVersionItem{}, &model.ArtifactDeployBatch{}, &model.ArtifactDeployRecord{}); err != nil {
+	if err := repository.DB.AutoMigrate(&model.Application{}, &model.ArtifactVersion{}, &model.ArtifactVersionItem{}, &model.ArtifactDeployBatch{}, &model.ArtifactDeployRecord{}, &model.DeploymentRuntimeVersion{}); err != nil {
 		t.Fatalf("migrate artifact version tables: %v", err)
 	}
 	apps := []model.Application{
@@ -1046,6 +1171,19 @@ func assertVersionItem(t *testing.T, item model.ArtifactVersionItem, matchStatus
 
 type memoryRemoteFS struct {
 	files map[string][]byte
+}
+
+type fakeArtifactDeployRuntimeReader struct {
+	images   map[string]string
+	versions map[string]string
+}
+
+func (r fakeArtifactDeployRuntimeReader) CurrentDeploymentImage(_ context.Context, namespace, deploymentName string) (string, error) {
+	return r.images[namespace+"/"+deploymentName], nil
+}
+
+func (r fakeArtifactDeployRuntimeReader) ReadBusinessVersion(_ context.Context, record model.ArtifactDeployRecord) (string, error) {
+	return r.versions[record.AppName], nil
 }
 
 func (fs memoryRemoteFS) ReadDir(dir string) ([]os.FileInfo, error) {
@@ -1098,9 +1236,14 @@ type memoryFileInfo struct {
 	dir  bool
 }
 
-func (i memoryFileInfo) Name() string       { return i.name }
-func (i memoryFileInfo) Size() int64        { return i.size }
-func (i memoryFileInfo) Mode() os.FileMode  { if i.dir { return os.ModeDir | 0755 }; return 0644 }
+func (i memoryFileInfo) Name() string { return i.name }
+func (i memoryFileInfo) Size() int64  { return i.size }
+func (i memoryFileInfo) Mode() os.FileMode {
+	if i.dir {
+		return os.ModeDir | 0755
+	}
+	return 0644
+}
 func (i memoryFileInfo) ModTime() time.Time { return time.Time{} }
 func (i memoryFileInfo) IsDir() bool        { return i.dir }
 func (i memoryFileInfo) Sys() any           { return nil }

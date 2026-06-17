@@ -19,6 +19,7 @@ import { formatTime } from '../utils/time'
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
+const deployLoading = ref(false)
 const version = ref<ArtifactVersion | null>(null)
 const items = ref<ArtifactVersionItem[]>([])
 const deployBatch = ref<ArtifactDeployBatch | null>(null)
@@ -34,6 +35,7 @@ const invalidItems = computed(() => items.value.filter(item => item.validateStat
 const unmatchedItems = computed(() => items.value.filter(item => item.matchStatus === 'unmatched' && item.validateStatus === 'valid'))
 const versionEditable = computed(() => !deployBatch.value)
 const versionRows = computed(() => buildVersionRows(items.value))
+const deployRecordRows = computed(() => buildDeployRecordRows(deployRecords.value))
 
 onMounted(loadDetail)
 
@@ -43,13 +45,14 @@ async function loadDetail() {
     const result = await getArtifactVersion(versionNo.value)
     version.value = result.version
     items.value = result.items || []
-    await loadDeployBatch()
+    void loadDeployBatch()
   } finally {
     loading.value = false
   }
 }
 
 async function loadDeployBatch() {
+  deployLoading.value = true
   try {
     const result = await getArtifactDeployBatch(versionNo.value)
     deployBatch.value = result.batch
@@ -57,6 +60,8 @@ async function loadDeployBatch() {
   } catch (e) {
     deployBatch.value = null
     deployRecords.value = []
+  } finally {
+    deployLoading.value = false
   }
 }
 
@@ -103,10 +108,12 @@ function deployRecordStatusType(status?: string) {
   if (status === 'deployed' || status === 'rolled_back') return 'success'
   if (status === 'failed' || status === 'rollback_failed') return 'danger'
   if (status === 'image_ready') return 'warning'
+  if (status === 'current') return 'info'
   return 'info'
 }
 
 function deployRecordStatusText(status?: string) {
+  if (status === 'current') return '当前状态'
   if (status === 'image_ready') return '等待卡点'
   if (status === 'deployed') return '已部署'
   if (status === 'rolled_back') return '已回滚'
@@ -114,15 +121,11 @@ function deployRecordStatusText(status?: string) {
   return status || '-'
 }
 
-function formatBusinessVersion(value?: string) {
+function formatRawJson(value?: string) {
   if (!value) return '-'
   try {
     const data = JSON.parse(value)
-    if (data.git) {
-      const commit = data.git.commit || {}
-      return [data.git.branch, commit.id || commit.idAbbrev, commit.time].filter(Boolean).join(' / ')
-    }
-    return [data.xiTongId, data.version, data.branch, data.commit, data.date].filter(Boolean).join(' / ')
+    return JSON.stringify(data, null, 2)
   } catch (e) {
     return value
   }
@@ -134,6 +137,11 @@ type VersionTableRow = ArtifactVersionItem & {
   containerPath: string
 }
 
+type DeployRecordTableRow = ArtifactDeployRecord & {
+  rowKey: string
+  deploymentTarget: string
+}
+
 function deploymentTargetForItem(item: ArtifactVersionItem) {
   if (item.appType === 'vue') {
     if (item.appName === 'web-main') return 'web-main'
@@ -141,6 +149,16 @@ function deploymentTargetForItem(item: ArtifactVersionItem) {
     return 'web-main'
   }
   return item.appName || '-'
+}
+
+function deploymentTargetForRecord(record: ArtifactDeployRecord) {
+  if (record.deploymentName) return record.deploymentName
+  if (record.appType === 'vue') {
+    if (record.appName === 'web-main') return 'web-main'
+    if (record.appName === 'web-cdr' || record.appName === 'web-opm') return record.appName
+    return 'web-main'
+  }
+  return record.appName || '-'
 }
 
 function buildVersionRows(sourceItems: ArtifactVersionItem[]): VersionTableRow[] {
@@ -151,6 +169,26 @@ function buildVersionRows(sourceItems: ArtifactVersionItem[]): VersionTableRow[]
       deploymentTarget: deploymentTargetForItem(item),
       containerPath: containerPathForItem(item),
       statusReason: item.appName || item.statusReason || '-',
+    }))
+    .sort((a, b) => {
+      const targetCompare = a.deploymentTarget.localeCompare(b.deploymentTarget)
+      if (targetCompare !== 0) {
+        if (a.deploymentTarget === 'web-main') return -1
+        if (b.deploymentTarget === 'web-main') return 1
+        return targetCompare
+      }
+      if (a.appName === 'web-main') return -1
+      if (b.appName === 'web-main') return 1
+      return a.fileName.localeCompare(b.fileName)
+    })
+}
+
+function buildDeployRecordRows(sourceRecords: ArtifactDeployRecord[]): DeployRecordTableRow[] {
+  return sourceRecords
+    .map(record => ({
+      ...record,
+      rowKey: record.id ? `record-${record.id}` : `record-${record.deployBatchNo}-${record.artifactVersionItemId}-${record.fileName}`,
+      deploymentTarget: deploymentTargetForRecord(record),
     }))
     .sort((a, b) => {
       const targetCompare = a.deploymentTarget.localeCompare(b.deploymentTarget)
@@ -193,16 +231,20 @@ function artifactSpanMethod({ rowIndex, columnIndex }: { rowIndex: number; colum
   return { rowspan, colspan: 1 }
 }
 
-function currentImage(row: ArtifactDeployRecord) {
-  if (row.status === 'rolled_back') return row.beforeImage || '-'
-  return row.afterImage || row.beforeImage || '-'
-}
-
-function currentBusinessVersion(row: ArtifactDeployRecord) {
-  if (row.status === 'rolled_back') {
-    return formatBusinessVersion(row.restoredBusinessVersionJson || row.beforeBusinessVersionJson)
+function deployRecordSpanMethod({ rowIndex, columnIndex }: { rowIndex: number; columnIndex: number }) {
+  if (columnIndex !== 0) return { rowspan: 1, colspan: 1 }
+  const rows = deployRecordRows.value
+  const current = rows[rowIndex]
+  if (!current) return { rowspan: 1, colspan: 1 }
+  if (rowIndex > 0 && rows[rowIndex - 1]?.deploymentTarget === current.deploymentTarget) {
+    return { rowspan: 0, colspan: 0 }
   }
-  return formatBusinessVersion(row.afterBusinessVersionJson || row.beforeBusinessVersionJson)
+  let rowspan = 1
+  for (let i = rowIndex + 1; i < rows.length; i++) {
+    if (rows[i].deploymentTarget !== current.deploymentTarget) break
+    rowspan++
+  }
+  return { rowspan, colspan: 1 }
 }
 
 function applyVersionResult(result: { version: ArtifactVersion; items: ArtifactVersionItem[] }) {
@@ -379,10 +421,11 @@ async function handleRollback() {
           <div>
             <strong>部署记录与回滚</strong>
             <span v-if="deployBatch">部署批次 {{ deployBatch.deployBatchNo }}，状态 {{ deployRecordStatusText(deployBatch.status) }}</span>
-            <span v-else>当前版本还没有部署记录</span>
+            <span v-else-if="deployRecords.length">当前版本尚未部署，以下展示待更新 Deployment 的当前运行状态</span>
+            <span v-else>当前版本尚未部署，且待更新 Deployment 当前不存在</span>
           </div>
           <div class="header-actions">
-            <el-button :loading="loading" @click="loadDeployBatch">刷新</el-button>
+            <el-button :loading="deployLoading" @click="loadDeployBatch">刷新</el-button>
             <el-button
               v-if="deployBatch && deployRecords.length"
               type="warning"
@@ -394,10 +437,23 @@ async function handleRollback() {
           </div>
         </div>
       </template>
-      <el-table :data="deployRecords" border stripe height="420" table-layout="auto">
-        <el-table-column prop="appName" label="应用" min-width="150" show-overflow-tooltip />
+      <el-table
+        :data="deployRecordRows"
+        border
+        stripe
+        height="420"
+        table-layout="auto"
+        row-key="rowKey"
+        :span-method="deployRecordSpanMethod"
+        v-loading="deployLoading"
+      >
+        <el-table-column label="部署目标" width="140" align="center">
+          <template #default="{ row }">
+            <strong class="deployment-target">{{ row.deploymentTarget }}</strong>
+          </template>
+        </el-table-column>
         <el-table-column prop="fileName" label="制品" min-width="150" show-overflow-tooltip />
-        <el-table-column prop="deploymentName" label="Deployment" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="appName" label="应用" min-width="150" show-overflow-tooltip />
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-tag :type="deployRecordStatusType(row.status)" size="small">{{ deployRecordStatusText(row.status) }}</el-tag>
@@ -405,23 +461,17 @@ async function handleRollback() {
         </el-table-column>
         <el-table-column prop="beforeImage" label="更新前镜像" min-width="230" show-overflow-tooltip />
         <el-table-column prop="afterImage" label="更新后镜像" min-width="230" show-overflow-tooltip />
-        <el-table-column label="当前镜像" min-width="230" show-overflow-tooltip>
-          <template #default="{ row }">{{ currentImage(row) }}</template>
+        <el-table-column label="更新包版本" min-width="320">
+          <template #default="{ row }"><pre class="json-cell">{{ formatRawJson(row.packageVersionJson) }}</pre></template>
         </el-table-column>
-        <el-table-column label="更新包版本" min-width="240" show-overflow-tooltip>
-          <template #default="{ row }">{{ formatBusinessVersion(row.packageVersionJson) }}</template>
+        <el-table-column label="更新前版本" min-width="320">
+          <template #default="{ row }"><pre class="json-cell">{{ formatRawJson(row.beforeBusinessVersionJson) }}</pre></template>
         </el-table-column>
-        <el-table-column label="更新前版本" min-width="240" show-overflow-tooltip>
-          <template #default="{ row }">{{ formatBusinessVersion(row.beforeBusinessVersionJson) }}</template>
+        <el-table-column label="更新后版本" min-width="320">
+          <template #default="{ row }"><pre class="json-cell">{{ formatRawJson(row.afterBusinessVersionJson) }}</pre></template>
         </el-table-column>
-        <el-table-column label="更新后版本" min-width="240" show-overflow-tooltip>
-          <template #default="{ row }">{{ formatBusinessVersion(row.afterBusinessVersionJson) }}</template>
-        </el-table-column>
-        <el-table-column label="回滚后版本" min-width="240" show-overflow-tooltip>
-          <template #default="{ row }">{{ formatBusinessVersion(row.restoredBusinessVersionJson) }}</template>
-        </el-table-column>
-        <el-table-column label="当前版本" min-width="240" show-overflow-tooltip>
-          <template #default="{ row }">{{ currentBusinessVersion(row) }}</template>
+        <el-table-column label="回滚后版本" min-width="320">
+          <template #default="{ row }"><pre class="json-cell">{{ formatRawJson(row.restoredBusinessVersionJson) }}</pre></template>
         </el-table-column>
         <el-table-column prop="errorMessage" label="错误" min-width="220" show-overflow-tooltip />
       </el-table>
@@ -500,6 +550,17 @@ async function handleRollback() {
 .deployment-target {
   color: #1f2937;
   font-weight: 600;
+}
+.json-cell {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #374151;
 }
 @media (max-width: 1280px) {
   .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }

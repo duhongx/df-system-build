@@ -7,7 +7,9 @@ import {
   getK8sServices, getK8sConfigMaps, getK8sIngresses, getK8sConfigMap, updateK8sConfigMap,
   getK8sPodLogs, restartK8sDeployment, scaleK8sDeployment,
   updateK8sImage, updateK8sResources, getK8sTopNodes, getK8sTopPods,
-  updateK8sServicePorts, deleteK8sService, getK8sImageTags
+  updateK8sServicePorts, deleteK8sService, getK8sImageTags,
+  syncK8sDeploymentRuntimeVersions,
+  type DeploymentRuntimeVersion,
 } from '../api/kubernetes'
 import { useSettingsStore } from '../stores/settings'
 
@@ -23,6 +25,8 @@ const overview = ref<any>(null)
 
 // Deployments
 const deployments = ref<any[]>([])
+const deploymentRuntimeVersions = ref<DeploymentRuntimeVersion[]>([])
+const versionSyncing = ref('')
 
 // Pods
 const pods = ref<any[]>([])
@@ -100,6 +104,7 @@ async function loadTab() {
       case 'deployments':
         const depData = await getK8sDeployments(namespace.value)
         deployments.value = depData?.items || []
+        deploymentRuntimeVersions.value = depData?.runtimeVersions || []
         break
       case 'pods':
         const podData = await getK8sPods(namespace.value)
@@ -292,6 +297,65 @@ function depReady(dep: any) {
   const desired = dep.spec?.replicas || 0
   return `${ready}/${desired}`
 }
+
+function runtimeVersionsForDeployment(deploymentName: string) {
+  return deploymentRuntimeVersions.value.filter(item => item.deploymentName === deploymentName)
+}
+
+function runtimeVersionStatusType(status?: string) {
+  if (status === 'synced') return 'success'
+  if (status === 'failed') return 'danger'
+  return 'info'
+}
+
+function runtimeVersionStatusText(status?: string) {
+  if (status === 'synced') return '已采集'
+  if (status === 'failed') return '失败'
+  return status || '未采集'
+}
+
+function formatRuntimeVersion(value?: string) {
+  if (!value) return '-'
+  try {
+    const data = JSON.parse(value)
+    if (data?.git) {
+      const branch = data.git.branch || '-'
+      const idValue = data.git.commit?.id
+      const id = typeof idValue === 'object' ? (idValue.abbrev || idValue.full || '-') : (idValue || data.git.commit?.id?.abbrev || '-')
+      const time = data.git.commit?.time || '-'
+      return `${branch} / ${id} / ${time}`
+    }
+    const version = data.version || '-'
+    const branch = data.branch || '-'
+    const commit = data.commit || '-'
+    const date = data.date || '-'
+    return `${version} / ${branch} / ${commit} / ${date}`
+  } catch (e) {
+    return value
+  }
+}
+
+function deploymentVersionSummary(deploymentName: string) {
+  const rows = runtimeVersionsForDeployment(deploymentName)
+  if (!rows.length) return '未采集'
+  const main = rows.find(row => row.appName === deploymentName) || rows[0]
+  const childCount = rows.filter(row => row.deploymentName === 'web-main' && row.appName !== 'web-main').length
+  const suffix = childCount > 0 ? `，子应用 ${childCount} 个` : ''
+  return `${formatRuntimeVersion(main.businessVersionJson)}${suffix}`
+}
+
+async function handleSyncRuntimeVersions(deploymentName?: string) {
+  const syncKey = deploymentName || '__all__'
+  versionSyncing.value = syncKey
+  try {
+    const targets = deploymentName ? [deploymentName] : deployments.value.map(dep => dep.metadata?.name).filter(Boolean)
+    const result = await syncK8sDeploymentRuntimeVersions(namespace.value, targets)
+    deploymentRuntimeVersions.value = result.runtimeVersions || []
+    ElMessage.success('运行版本已同步')
+  } finally {
+    versionSyncing.value = ''
+  }
+}
 </script>
 
 <template>
@@ -304,7 +368,19 @@ function depReady(dep: any) {
           <el-option v-for="ns in namespaces" :key="ns" :label="ns" :value="ns" />
         </el-select>
       </div>
-      <el-button size="small" @click="loadTab" :loading="loading"><el-icon><Refresh /></el-icon>刷新</el-button>
+      <div class="header-actions">
+        <el-button
+          v-if="activeTab === 'deployments'"
+          size="small"
+          type="primary"
+          plain
+          :loading="versionSyncing === '__all__'"
+          @click="handleSyncRuntimeVersions()"
+        >
+          同步版本
+        </el-button>
+        <el-button size="small" @click="loadTab" :loading="loading"><el-icon><Refresh /></el-icon>刷新</el-button>
+      </div>
     </div>
 
     <!-- Content based on route -->
@@ -359,15 +435,58 @@ function depReady(dep: any) {
               <span style="font-size: 12px; color: #606266;">{{ row.spec?.template?.spec?.containers?.[0]?.image || '-' }}</span>
             </template>
           </el-table-column>
+          <el-table-column label="版本" min-width="320">
+            <template #default="{ row }">
+              <el-popover
+                v-if="runtimeVersionsForDeployment(row.metadata?.name).length"
+                placement="left"
+                trigger="hover"
+                width="720"
+              >
+                <template #reference>
+                  <div class="runtime-version-summary">
+                    {{ deploymentVersionSummary(row.metadata?.name) }}
+                  </div>
+                </template>
+                <el-table :data="runtimeVersionsForDeployment(row.metadata?.name)" size="small" border max-height="360">
+                  <el-table-column prop="appName" label="应用" width="150" show-overflow-tooltip />
+                  <el-table-column prop="runtimeVersionPath" label="版本路径" min-width="220" show-overflow-tooltip />
+                  <el-table-column label="状态" width="90">
+                    <template #default="{ row: versionRow }">
+                      <el-tag :type="runtimeVersionStatusType(versionRow.status)" size="small">
+                        {{ runtimeVersionStatusText(versionRow.status) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="业务版本" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row: versionRow }">
+                      {{ formatRuntimeVersion(versionRow.businessVersionJson) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="errorMessage" label="错误" min-width="180" show-overflow-tooltip />
+                </el-table>
+              </el-popover>
+              <span v-else class="runtime-version-empty">未采集</span>
+            </template>
+          </el-table-column>
           <el-table-column label="创建时间" width="170">
             <template #default="{ row }">{{ row.metadata?.creationTimestamp?.replace('T', ' ').replace('Z', '') || '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="260">
+          <el-table-column label="操作" width="330">
             <template #default="{ row }">
               <el-button type="primary" link size="small" @click="handleRestart(row.metadata?.name)">重启</el-button>
               <el-button type="primary" link size="small" @click="handleScale(row.metadata?.name, row.spec?.replicas || 1)">扩缩容</el-button>
               <el-button type="primary" link size="small" @click="handleUpdateImage(row)">回滚</el-button>
               <el-button type="primary" link size="small" @click="handleUpdateResources(row)">资源</el-button>
+              <el-button
+                type="primary"
+                link
+                size="small"
+                :loading="versionSyncing === row.metadata?.name"
+                @click="handleSyncRuntimeVersions(row.metadata?.name)"
+              >
+                同步版本
+              </el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -627,6 +746,7 @@ function depReady(dep: any) {
   background: #fff; padding: 12px 16px; border-radius: 6px; border: 1px solid #ebeef5;
 }
 .header-left { display: flex; align-items: center; gap: 16px; }
+.header-actions { display: flex; align-items: center; gap: 8px; }
 .page-title { font-size: 15px; font-weight: 600; color: #303133; margin: 0; }
 
 .content-area {
@@ -644,6 +764,22 @@ function depReady(dep: any) {
 
 .section-card { background: #fff; border-radius: 8px; border: 1px solid #ebeef5; padding: 16px; }
 .section-title { font-size: 14px; font-weight: 600; color: #303133; margin: 0 0 12px 0; }
+
+.runtime-version-summary {
+  max-width: 520px;
+  color: #606266;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.runtime-version-empty {
+  color: #c0c4cc;
+  font-size: 12px;
+}
 
 .log-content {
   background: #1e1e1e; color: #d4d4d4; padding: 16px; border-radius: 6px;

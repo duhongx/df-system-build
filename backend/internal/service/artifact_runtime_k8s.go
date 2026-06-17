@@ -89,6 +89,10 @@ func CurrentDeploymentImage(ctx context.Context, namespace, deploymentName strin
 	return DeploymentContainerImage(dep, deploymentName), nil
 }
 
+func (K8sRuntimeVersionReader) CurrentDeploymentImage(ctx context.Context, namespace, deploymentName string) (string, error) {
+	return CurrentDeploymentImage(ctx, namespace, deploymentName)
+}
+
 func ReadyPodForDeployment(ctx context.Context, cs kubernetes.Interface, namespace, deploymentName string) (*corev1.Pod, error) {
 	dep, err := cs.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
 	if err != nil {

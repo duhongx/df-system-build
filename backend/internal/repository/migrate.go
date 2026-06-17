@@ -32,6 +32,7 @@ func AutoMigrate() error {
 		&model.ArtifactVersionItem{},
 		&model.ArtifactDeployBatch{},
 		&model.ArtifactDeployRecord{},
+		&model.DeploymentRuntimeVersion{},
 		&model.SQLChangeBatch{},
 		&model.SQLChangeFile{},
 		&model.SQLChangeStatement{},
