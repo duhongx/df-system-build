@@ -314,25 +314,68 @@ function runtimeVersionStatusText(status?: string) {
   return status || '未采集'
 }
 
-function formatRuntimeVersion(value?: string) {
+type RuntimeVersionDetail = {
+  label: string
+  value: string
+}
+
+function parseRuntimeVersionJson(value?: string) {
   if (!value) return '-'
   try {
-    const data = JSON.parse(value)
-    if (data?.git) {
-      const branch = data.git.branch || '-'
-      const idValue = data.git.commit?.id
-      const id = typeof idValue === 'object' ? (idValue.abbrev || idValue.full || '-') : (idValue || data.git.commit?.id?.abbrev || '-')
-      const time = data.git.commit?.time || '-'
-      return `${branch} / ${id} / ${time}`
-    }
-    const version = data.version || '-'
-    const branch = data.branch || '-'
-    const commit = data.commit || '-'
-    const date = data.date || '-'
-    return `${version} / ${branch} / ${commit} / ${date}`
+    return JSON.parse(value)
   } catch (e) {
-    return value
+    return null
   }
+}
+
+function versionText(value: unknown) {
+  if (value === undefined || value === null || value === '') return '-'
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+function runtimeCommitId(data: any) {
+  const idValue = data?.git?.commit?.id
+  if (typeof idValue === 'object') return idValue.abbrev || idValue.full || '-'
+  return idValue || data?.git?.commit?.id?.abbrev || data?.commit || '-'
+}
+
+function formatRuntimeVersionSummary(value?: string) {
+  const data = parseRuntimeVersionJson(value)
+  if (!data || typeof data !== 'object') return value || '-'
+  if (data.git) {
+    return `${data.git.branch || '-'} / ${runtimeCommitId(data)}`
+  }
+  return `${data.version || '-'} / ${data.branch || '-'} / ${data.commit || '-'}`
+}
+
+function formatRuntimeVersionDetails(value?: string): RuntimeVersionDetail[] {
+  const data = parseRuntimeVersionJson(value)
+  if (!data || typeof data !== 'object') {
+    return [{ label: '原始值', value: value || '-' }]
+  }
+  if (data.git) {
+    return [
+      { label: 'branch', value: versionText(data.git.branch) },
+      { label: 'commit.id', value: versionText(runtimeCommitId(data)) },
+      { label: 'commit.time', value: versionText(data.git.commit?.time) },
+    ]
+  }
+  const preferredKeys = ['xiTongId', 'xiTongMc', 'homePath', 'version', 'date', 'branch', 'commit']
+  const details = preferredKeys
+    .filter(key => data[key] !== undefined)
+    .map(key => ({ label: key, value: versionText(data[key]) }))
+  if (data.position !== undefined) {
+    details.push({ label: 'position', value: versionText(data.position) })
+  }
+  return details.length ? details : Object.keys(data).map(key => ({ label: key, value: versionText(data[key]) }))
+}
+
+function formatRuntimeVersionJson(value?: string) {
+  if (!value) return '-'
+  const data = parseRuntimeVersionJson(value)
+  if (!data) return value
+  return JSON.stringify(data, null, 2)
 }
 
 function deploymentVersionSummary(deploymentName: string) {
@@ -341,7 +384,7 @@ function deploymentVersionSummary(deploymentName: string) {
   const main = rows.find(row => row.appName === deploymentName) || rows[0]
   const childCount = rows.filter(row => row.deploymentName === 'web-main' && row.appName !== 'web-main').length
   const suffix = childCount > 0 ? `，子应用 ${childCount} 个` : ''
-  return `${formatRuntimeVersion(main.businessVersionJson)}${suffix}`
+  return `${formatRuntimeVersionSummary(main.businessVersionJson)}${suffix}`
 }
 
 async function handleSyncRuntimeVersions(deploymentName?: string) {
@@ -448,23 +491,30 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
                     {{ deploymentVersionSummary(row.metadata?.name) }}
                   </div>
                 </template>
-                <el-table :data="runtimeVersionsForDeployment(row.metadata?.name)" size="small" border max-height="360">
-                  <el-table-column prop="appName" label="应用" width="150" show-overflow-tooltip />
-                  <el-table-column prop="runtimeVersionPath" label="版本路径" min-width="220" show-overflow-tooltip />
-                  <el-table-column label="状态" width="90">
-                    <template #default="{ row: versionRow }">
+                <div class="runtime-version-popover">
+                  <div
+                    v-for="versionRow in runtimeVersionsForDeployment(row.metadata?.name)"
+                    :key="versionRow.id || `${versionRow.deploymentName}-${versionRow.appName}-${versionRow.runtimeVersionPath}`"
+                    class="runtime-version-card"
+                  >
+                    <div class="runtime-version-card-head">
+                      <strong>{{ versionRow.appName || versionRow.deploymentName }}</strong>
                       <el-tag :type="runtimeVersionStatusType(versionRow.status)" size="small">
                         {{ runtimeVersionStatusText(versionRow.status) }}
                       </el-tag>
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="业务版本" min-width="260" show-overflow-tooltip>
-                    <template #default="{ row: versionRow }">
-                      {{ formatRuntimeVersion(versionRow.businessVersionJson) }}
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="errorMessage" label="错误" min-width="180" show-overflow-tooltip />
-                </el-table>
+                    </div>
+                    <div class="runtime-version-path">{{ versionRow.runtimeVersionPath || '-' }}</div>
+                    <div class="runtime-version-detail-grid">
+                      <div v-for="detail in formatRuntimeVersionDetails(versionRow.businessVersionJson)" :key="detail.label">
+                        <span>{{ detail.label }}</span>
+                        <strong>{{ detail.value }}</strong>
+                      </div>
+                    </div>
+                    <div class="runtime-version-json-title">完整版本数据</div>
+                    <pre class="runtime-version-json">{{ formatRuntimeVersionJson(versionRow.businessVersionJson) }}</pre>
+                    <div v-if="versionRow.errorMessage" class="runtime-version-error">{{ versionRow.errorMessage }}</div>
+                  </div>
+                </div>
               </el-popover>
               <span v-else class="runtime-version-empty">未采集</span>
             </template>
@@ -778,6 +828,98 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
 
 .runtime-version-empty {
   color: #c0c4cc;
+  font-size: 12px;
+}
+
+.runtime-version-popover {
+  max-height: 520px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.runtime-version-card {
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  padding: 10px;
+  background: #fff;
+}
+
+.runtime-version-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.runtime-version-card-head strong {
+  color: #1f2937;
+  font-size: 13px;
+}
+
+.runtime-version-path {
+  margin-top: 6px;
+  color: #8a9099;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.runtime-version-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  margin-top: 10px;
+}
+
+.runtime-version-detail-grid > div {
+  min-width: 0;
+  border: 1px solid #f0f2f5;
+  background: #fafafa;
+  padding: 6px 8px;
+}
+
+.runtime-version-detail-grid span {
+  display: block;
+  color: #8a9099;
+  font-size: 11px;
+}
+
+.runtime-version-detail-grid strong {
+  display: block;
+  margin-top: 3px;
+  color: #303133;
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.runtime-version-json-title {
+  margin-top: 10px;
+  color: #606266;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.runtime-version-json {
+  margin: 6px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  background: #f7f8fa;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  color: #374151;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.runtime-version-error {
+  margin-top: 8px;
+  color: #f56c6c;
   font-size: 12px;
 }
 

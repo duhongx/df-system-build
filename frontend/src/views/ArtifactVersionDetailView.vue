@@ -28,6 +28,9 @@ const rollbacking = ref(false)
 const itemOperatingId = ref<number | null>(null)
 const replaceInput = ref<HTMLInputElement>()
 const replacingItem = ref<ArtifactVersionItem | null>(null)
+const versionJsonDialogVisible = ref(false)
+const versionJsonDialogTitle = ref('')
+const versionJsonDialogContent = ref('')
 
 const versionNo = computed(() => String(route.params.versionNo || ''))
 const deployableItems = computed(() => items.value.filter(item => item.deployable))
@@ -129,6 +132,53 @@ function formatRawJson(value?: string) {
   } catch (e) {
     return value
   }
+}
+
+function parseVersionJson(value?: string) {
+  if (!value) return null
+  try {
+    return JSON.parse(value)
+  } catch (e) {
+    return null
+  }
+}
+
+function versionJsonText(value: unknown) {
+  if (value === undefined || value === null || value === '') return '-'
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+function versionCommitId(data: any) {
+  const idValue = data?.git?.commit?.id
+  if (typeof idValue === 'object') return idValue.abbrev || idValue.full || '-'
+  return idValue || data?.git?.commit?.id?.abbrev || data?.commit || '-'
+}
+
+function versionJsonSummaryFields(value?: string) {
+  const data = parseVersionJson(value)
+  if (!data || typeof data !== 'object') {
+    return value ? [{ label: '原始值', value }] : []
+  }
+  if (data.git) {
+    return [
+      { label: 'branch', value: versionJsonText(data.git.branch) },
+      { label: 'commit', value: versionJsonText(versionCommitId(data)) },
+      { label: 'time', value: versionJsonText(data.git.commit?.time) },
+    ]
+  }
+  return [
+    { label: 'version', value: versionJsonText(data.version) },
+    { label: 'branch', value: versionJsonText(data.branch) },
+    { label: 'commit', value: versionJsonText(data.commit) },
+    { label: 'date', value: versionJsonText(data.date) },
+  ]
+}
+
+function openVersionJsonDialog(title: string, value?: string) {
+  versionJsonDialogTitle.value = title
+  versionJsonDialogContent.value = formatRawJson(value)
+  versionJsonDialogVisible.value = true
 }
 
 type VersionTableRow = ArtifactVersionItem & {
@@ -462,20 +512,61 @@ async function handleRollback() {
         <el-table-column prop="beforeImage" label="更新前镜像" min-width="230" show-overflow-tooltip />
         <el-table-column prop="afterImage" label="更新后镜像" min-width="230" show-overflow-tooltip />
         <el-table-column label="更新包版本" min-width="320">
-          <template #default="{ row }"><pre class="json-cell">{{ formatRawJson(row.packageVersionJson) }}</pre></template>
+          <template #default="{ row }">
+            <div v-if="row.packageVersionJson" class="version-json-cell">
+              <div v-for="field in versionJsonSummaryFields(row.packageVersionJson)" :key="field.label">
+                <span>{{ field.label }}</span>
+                <strong>{{ field.value }}</strong>
+              </div>
+              <el-button link type="primary" @click="openVersionJsonDialog(`${row.fileName} 更新包版本`, row.packageVersionJson)">完整数据</el-button>
+            </div>
+            <span v-else>-</span>
+          </template>
         </el-table-column>
         <el-table-column label="更新前版本" min-width="320">
-          <template #default="{ row }"><pre class="json-cell">{{ formatRawJson(row.beforeBusinessVersionJson) }}</pre></template>
+          <template #default="{ row }">
+            <div v-if="row.beforeBusinessVersionJson" class="version-json-cell">
+              <div v-for="field in versionJsonSummaryFields(row.beforeBusinessVersionJson)" :key="field.label">
+                <span>{{ field.label }}</span>
+                <strong>{{ field.value }}</strong>
+              </div>
+              <el-button link type="primary" @click="openVersionJsonDialog(`${row.fileName} 更新前版本`, row.beforeBusinessVersionJson)">完整数据</el-button>
+            </div>
+            <span v-else>-</span>
+          </template>
         </el-table-column>
         <el-table-column label="更新后版本" min-width="320">
-          <template #default="{ row }"><pre class="json-cell">{{ formatRawJson(row.afterBusinessVersionJson) }}</pre></template>
+          <template #default="{ row }">
+            <div v-if="row.afterBusinessVersionJson" class="version-json-cell">
+              <div v-for="field in versionJsonSummaryFields(row.afterBusinessVersionJson)" :key="field.label">
+                <span>{{ field.label }}</span>
+                <strong>{{ field.value }}</strong>
+              </div>
+              <el-button link type="primary" @click="openVersionJsonDialog(`${row.fileName} 更新后版本`, row.afterBusinessVersionJson)">完整数据</el-button>
+            </div>
+            <span v-else>-</span>
+          </template>
         </el-table-column>
         <el-table-column label="回滚后版本" min-width="320">
-          <template #default="{ row }"><pre class="json-cell">{{ formatRawJson(row.restoredBusinessVersionJson) }}</pre></template>
+          <template #default="{ row }">
+            <div v-if="row.restoredBusinessVersionJson" class="version-json-cell">
+              <div v-for="field in versionJsonSummaryFields(row.restoredBusinessVersionJson)" :key="field.label">
+                <span>{{ field.label }}</span>
+                <strong>{{ field.value }}</strong>
+              </div>
+              <el-button link type="primary" @click="openVersionJsonDialog(`${row.fileName} 回滚后版本`, row.restoredBusinessVersionJson)">完整数据</el-button>
+            </div>
+            <span v-else>-</span>
+          </template>
         </el-table-column>
         <el-table-column prop="errorMessage" label="错误" min-width="220" show-overflow-tooltip />
       </el-table>
     </el-card>
+
+    <el-dialog v-model="versionJsonDialogVisible" :title="versionJsonDialogTitle || '完整版本数据'" width="760px">
+      <div class="json-dialog-label">完整版本数据</div>
+      <pre class="json-dialog-content">{{ versionJsonDialogContent }}</pre>
+    </el-dialog>
   </div>
 </template>
 
@@ -561,6 +652,56 @@ async function handleRollback() {
   font-size: 12px;
   line-height: 1.45;
   color: #374151;
+}
+.version-json-cell {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+  align-items: start;
+  color: #606266;
+  font-size: 12px;
+}
+.version-json-cell > div {
+  min-width: 0;
+}
+.version-json-cell span {
+  display: block;
+  color: #8a9099;
+  line-height: 1.25;
+}
+.version-json-cell strong {
+  display: block;
+  margin-top: 2px;
+  color: #303133;
+  font-weight: 500;
+  line-height: 1.35;
+  word-break: break-all;
+}
+.version-json-cell .el-button {
+  justify-self: start;
+  padding: 0;
+  min-height: 20px;
+}
+.json-dialog-label {
+  margin-bottom: 8px;
+  color: #606266;
+  font-size: 13px;
+  font-weight: 600;
+}
+.json-dialog-content {
+  margin: 0;
+  max-height: 62vh;
+  overflow: auto;
+  padding: 12px;
+  background: #f7f8fa;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  color: #374151;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 @media (max-width: 1280px) {
   .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
