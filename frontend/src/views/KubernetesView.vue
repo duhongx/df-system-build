@@ -27,6 +27,10 @@ const overview = ref<any>(null)
 const deployments = ref<any[]>([])
 const deploymentRuntimeVersions = ref<DeploymentRuntimeVersion[]>([])
 const versionSyncing = ref('')
+const runtimeVersionDialogVisible = ref(false)
+const runtimeVersionDialogTitle = ref('')
+const runtimeVersionDialogDetails = ref<RuntimeVersionDetail[]>([])
+const runtimeVersionDialogJson = ref('')
 
 // Pods
 const pods = ref<any[]>([])
@@ -320,7 +324,7 @@ type RuntimeVersionDetail = {
 }
 
 function parseRuntimeVersionJson(value?: string) {
-  if (!value) return '-'
+  if (!value) return null
   try {
     return JSON.parse(value)
   } catch (e) {
@@ -338,15 +342,6 @@ function runtimeCommitId(data: any) {
   const idValue = data?.git?.commit?.id
   if (typeof idValue === 'object') return idValue.abbrev || idValue.full || '-'
   return idValue || data?.git?.commit?.id?.abbrev || data?.commit || '-'
-}
-
-function formatRuntimeVersionSummary(value?: string) {
-  const data = parseRuntimeVersionJson(value)
-  if (!data || typeof data !== 'object') return value || '-'
-  if (data.git) {
-    return `${data.git.branch || '-'} / ${runtimeCommitId(data)}`
-  }
-  return `${data.version || '-'} / ${data.branch || '-'} / ${data.commit || '-'}`
 }
 
 function formatRuntimeVersionDetails(value?: string): RuntimeVersionDetail[] {
@@ -378,13 +373,123 @@ function formatRuntimeVersionJson(value?: string) {
   return JSON.stringify(data, null, 2)
 }
 
-function deploymentVersionSummary(deploymentName: string) {
-  const rows = runtimeVersionsForDeployment(deploymentName)
-  if (!rows.length) return '未采集'
-  const main = rows.find(row => row.appName === deploymentName) || rows[0]
-  const childCount = rows.filter(row => row.deploymentName === 'web-main' && row.appName !== 'web-main').length
-  const suffix = childCount > 0 ? `，子应用 ${childCount} 个` : ''
-  return `${formatRuntimeVersionSummary(main.businessVersionJson)}${suffix}`
+function runtimeVersionParts(value?: string) {
+  const data = parseRuntimeVersionJson(value)
+  if (!data || typeof data !== 'object') {
+    return { version: value || '-', branch: '-', commit: '-', time: '-' }
+  }
+  if (data.git) {
+    return {
+      version: versionText(data.version),
+      branch: versionText(data.git.branch),
+      commit: versionText(runtimeCommitId(data)),
+      time: versionText(data.git.commit?.time),
+    }
+  }
+  return {
+    version: versionText(data.version),
+    branch: versionText(data.branch),
+    commit: versionText(data.commit),
+    time: versionText(data.date),
+  }
+}
+
+function runtimeAppIdentifier(versionRow: DeploymentRuntimeVersion | undefined, deploymentName: string) {
+  if (!versionRow) return deploymentName
+  if (deploymentName !== 'web-main') return deploymentName
+  if (versionRow.appName === 'web-main' || versionRow.vueRole === 'main') return 'web-main'
+  const pathMatch = versionRow.runtimeVersionPath?.match(/\/apps\/([^/]+)\/config\.json$/)
+  return versionRow.appCode || pathMatch?.[1] || versionRow.appName || '-'
+}
+
+function sortedRuntimeVersions(deploymentName: string) {
+  return runtimeVersionsForDeployment(deploymentName).slice().sort((a, b) => {
+    const aId = runtimeAppIdentifier(a, deploymentName)
+    const bId = runtimeAppIdentifier(b, deploymentName)
+    if (aId === 'web-main') return -1
+    if (bId === 'web-main') return 1
+    return aId.localeCompare(bId, 'zh-Hans-CN', { numeric: true })
+  })
+}
+
+type DeploymentTableRow = {
+  rowKey: string
+  deployment: any
+  deploymentName: string
+  runtimeVersion?: DeploymentRuntimeVersion
+  appIdentifier: string
+  businessAppName: string
+  version: string
+  branch: string
+  commit: string
+  versionTime: string
+}
+
+const deploymentTableRows = computed<DeploymentTableRow[]>(() => deployments.value.flatMap((deployment) => {
+  const deploymentName = deployment.metadata?.name || '-'
+  const versions = sortedRuntimeVersions(deploymentName)
+  if (!versions.length) {
+    return [{
+      rowKey: `deployment-${deploymentName}`,
+      deployment,
+      deploymentName,
+      appIdentifier: deploymentName,
+      businessAppName: '-',
+      version: '未采集',
+      branch: '-',
+      commit: '-',
+      versionTime: '-',
+    }]
+  }
+  const visibleVersions = deploymentName === 'web-main'
+    ? versions
+    : [versions.find(item => item.appName === deploymentName) || versions[0]]
+  return visibleVersions.map((runtimeVersion) => {
+    const parts = runtimeVersionParts(runtimeVersion.businessVersionJson)
+    return {
+      rowKey: `deployment-${deploymentName}-${runtimeVersion.id || runtimeVersion.appName || runtimeVersion.runtimeVersionPath}`,
+      deployment,
+      deploymentName,
+      runtimeVersion,
+      appIdentifier: runtimeAppIdentifier(runtimeVersion, deploymentName),
+      businessAppName: runtimeVersion.appName || '-',
+      version: parts.version,
+      branch: parts.branch,
+      commit: parts.commit,
+      versionTime: parts.time,
+    }
+  })
+}))
+
+const deploymentMergedColumnIndexes = new Set([0, 1, 2, 11, 12])
+
+function deploymentTableSpanMethod({ rowIndex, columnIndex }: { rowIndex: number; columnIndex: number }) {
+  if (!deploymentMergedColumnIndexes.has(columnIndex)) return { rowspan: 1, colspan: 1 }
+  const rows = deploymentTableRows.value
+  const current = rows[rowIndex]
+  if (!current) return { rowspan: 1, colspan: 1 }
+  if (rowIndex > 0 && rows[rowIndex - 1]?.deploymentName === current.deploymentName) {
+    return { rowspan: 0, colspan: 0 }
+  }
+  let rowspan = 1
+  for (let i = rowIndex + 1; i < rows.length; i++) {
+    if (rows[i].deploymentName !== current.deploymentName) break
+    rowspan++
+  }
+  return { rowspan, colspan: 1 }
+}
+
+function deploymentRowClassName({ row }: { row: DeploymentTableRow }) {
+  if (row.deploymentName !== 'web-main') return ''
+  return row.appIdentifier === 'web-main' ? 'web-main-main-row' : 'web-main-child-row'
+}
+
+function openRuntimeVersionDialog(row: DeploymentTableRow) {
+  if (!row.runtimeVersion) return
+  runtimeVersionDialogTitle.value = `${row.deploymentName} / ${row.appIdentifier} / ${row.businessAppName}`
+  runtimeVersionDialogDetails.value = formatRuntimeVersionDetails(row.runtimeVersion.businessVersionJson)
+  runtimeVersionDialogJson.value = formatRuntimeVersionJson(row.runtimeVersion.businessVersionJson)
+  runtimeVersionDialogVisible.value = true
 }
 
 async function handleSyncRuntimeVersions(deploymentName?: string) {
@@ -462,78 +567,84 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
 
       <!-- Deployments -->
       <div v-if="activeTab === 'deployments'">
-        <el-table :data="deployments" stripe size="small" border>
-          <el-table-column label="名称" min-width="200">
-            <template #default="{ row }">{{ row.metadata?.name }}</template>
+        <el-table
+          :data="deploymentTableRows"
+          stripe
+          size="small"
+          border
+          table-layout="auto"
+          row-key="rowKey"
+          :span-method="deploymentTableSpanMethod"
+          :row-class-name="deploymentRowClassName"
+        >
+          <el-table-column label="Deployment" min-width="180">
+            <template #default="{ row }">
+              <strong class="deployment-name">{{ row.deploymentName }}</strong>
+            </template>
           </el-table-column>
           <el-table-column label="就绪" width="100">
             <template #default="{ row }">
-              <el-tag :type="(row.status?.readyReplicas || 0) === (row.spec?.replicas || 0) ? 'success' : 'warning'" size="small">
-                {{ depReady(row) }}
+              <el-tag :type="(row.deployment.status?.readyReplicas || 0) === (row.deployment.spec?.replicas || 0) ? 'success' : 'warning'" size="small">
+                {{ depReady(row.deployment) }}
               </el-tag>
             </template>
           </el-table-column>
           <el-table-column label="镜像" min-width="300">
             <template #default="{ row }">
-              <span style="font-size: 12px; color: #606266;">{{ row.spec?.template?.spec?.containers?.[0]?.image || '-' }}</span>
+              <span class="image-text">{{ row.deployment.spec?.template?.spec?.containers?.[0]?.image || '-' }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="版本" min-width="320">
+          <el-table-column label="web-main/子系统ID" width="150">
             <template #default="{ row }">
-              <el-popover
-                v-if="runtimeVersionsForDeployment(row.metadata?.name).length"
-                placement="left"
-                trigger="hover"
-                width="720"
-              >
-                <template #reference>
-                  <div class="runtime-version-summary">
-                    {{ deploymentVersionSummary(row.metadata?.name) }}
-                  </div>
-                </template>
-                <div class="runtime-version-popover">
-                  <div
-                    v-for="versionRow in runtimeVersionsForDeployment(row.metadata?.name)"
-                    :key="versionRow.id || `${versionRow.deploymentName}-${versionRow.appName}-${versionRow.runtimeVersionPath}`"
-                    class="runtime-version-card"
-                  >
-                    <div class="runtime-version-card-head">
-                      <strong>{{ versionRow.appName || versionRow.deploymentName }}</strong>
-                      <el-tag :type="runtimeVersionStatusType(versionRow.status)" size="small">
-                        {{ runtimeVersionStatusText(versionRow.status) }}
-                      </el-tag>
-                    </div>
-                    <div class="runtime-version-path">{{ versionRow.runtimeVersionPath || '-' }}</div>
-                    <div class="runtime-version-detail-grid">
-                      <div v-for="detail in formatRuntimeVersionDetails(versionRow.businessVersionJson)" :key="detail.label">
-                        <span>{{ detail.label }}</span>
-                        <strong>{{ detail.value }}</strong>
-                      </div>
-                    </div>
-                    <div class="runtime-version-json-title">完整版本数据</div>
-                    <pre class="runtime-version-json">{{ formatRuntimeVersionJson(versionRow.businessVersionJson) }}</pre>
-                    <div v-if="versionRow.errorMessage" class="runtime-version-error">{{ versionRow.errorMessage }}</div>
-                  </div>
-                </div>
-              </el-popover>
+              <span :class="['app-identifier', row.appIdentifier === 'web-main' ? 'main-app' : '']">{{ row.appIdentifier }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="业务应用" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span class="business-app-name">{{ row.businessAppName }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="version" label="版本" width="110" show-overflow-tooltip />
+          <el-table-column prop="branch" label="分支" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="commit" label="Commit" min-width="130" show-overflow-tooltip />
+          <el-table-column prop="versionTime" label="版本时间" min-width="160" show-overflow-tooltip />
+          <el-table-column label="采集状态" width="100">
+            <template #default="{ row }">
+              <el-tag v-if="row.runtimeVersion" :type="runtimeVersionStatusType(row.runtimeVersion.status)" size="small">
+                {{ runtimeVersionStatusText(row.runtimeVersion.status) }}
+              </el-tag>
               <span v-else class="runtime-version-empty">未采集</span>
             </template>
           </el-table-column>
+          <el-table-column label="版本数据" width="100">
+            <template #default="{ row }">
+              <el-button
+                v-if="row.runtimeVersion"
+                type="primary"
+                link
+                size="small"
+                @click="openRuntimeVersionDialog(row)"
+              >
+                完整数据
+              </el-button>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
           <el-table-column label="创建时间" width="170">
-            <template #default="{ row }">{{ row.metadata?.creationTimestamp?.replace('T', ' ').replace('Z', '') || '-' }}</template>
+            <template #default="{ row }">{{ row.deployment.metadata?.creationTimestamp?.replace('T', ' ').replace('Z', '') || '-' }}</template>
           </el-table-column>
           <el-table-column label="操作" width="330">
             <template #default="{ row }">
-              <el-button type="primary" link size="small" @click="handleRestart(row.metadata?.name)">重启</el-button>
-              <el-button type="primary" link size="small" @click="handleScale(row.metadata?.name, row.spec?.replicas || 1)">扩缩容</el-button>
-              <el-button type="primary" link size="small" @click="handleUpdateImage(row)">回滚</el-button>
-              <el-button type="primary" link size="small" @click="handleUpdateResources(row)">资源</el-button>
+              <el-button type="primary" link size="small" @click="handleRestart(row.deploymentName)">重启</el-button>
+              <el-button type="primary" link size="small" @click="handleScale(row.deploymentName, row.deployment.spec?.replicas || 1)">扩缩容</el-button>
+              <el-button type="primary" link size="small" @click="handleUpdateImage(row.deployment)">回滚</el-button>
+              <el-button type="primary" link size="small" @click="handleUpdateResources(row.deployment)">资源</el-button>
               <el-button
                 type="primary"
                 link
                 size="small"
-                :loading="versionSyncing === row.metadata?.name"
-                @click="handleSyncRuntimeVersions(row.metadata?.name)"
+                :loading="versionSyncing === row.deploymentName"
+                @click="handleSyncRuntimeVersions(row.deploymentName)"
               >
                 同步版本
               </el-button>
@@ -786,6 +897,17 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
         <el-button type="primary" @click="handleSaveConfigMap">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="runtimeVersionDialogVisible" :title="runtimeVersionDialogTitle || '完整版本数据'" width="760px">
+      <div class="runtime-dialog-grid">
+        <div v-for="detail in runtimeVersionDialogDetails" :key="detail.label">
+          <span>{{ detail.label }}</span>
+          <strong>{{ detail.value }}</strong>
+        </div>
+      </div>
+      <div class="runtime-version-json-title">完整版本数据</div>
+      <pre class="runtime-version-json">{{ runtimeVersionDialogJson }}</pre>
+    </el-dialog>
   </div>
 </template>
 
@@ -815,15 +937,32 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
 .section-card { background: #fff; border-radius: 8px; border: 1px solid #ebeef5; padding: 16px; }
 .section-title { font-size: 14px; font-weight: 600; color: #303133; margin: 0 0 12px 0; }
 
-.runtime-version-summary {
-  max-width: 520px;
+.deployment-name {
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.image-text {
   color: #606266;
   font-size: 12px;
   line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: default;
+  word-break: break-all;
+}
+
+.app-identifier {
+  display: inline-flex;
+  align-items: center;
+  min-width: 42px;
+  color: #606266;
+  font-weight: 600;
+}
+
+.app-identifier.main-app {
+  color: #1f2937;
+}
+
+.business-app-name {
+  color: #303133;
 }
 
 .runtime-version-empty {
@@ -831,61 +970,26 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
   font-size: 12px;
 }
 
-.runtime-version-popover {
-  max-height: 520px;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.runtime-version-card {
-  border: 1px solid #ebeef5;
-  border-radius: 4px;
-  padding: 10px;
-  background: #fff;
-}
-
-.runtime-version-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.runtime-version-card-head strong {
-  color: #1f2937;
-  font-size: 13px;
-}
-
-.runtime-version-path {
-  margin-top: 6px;
-  color: #8a9099;
-  font-size: 12px;
-  word-break: break-all;
-}
-
-.runtime-version-detail-grid {
+.runtime-dialog-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px 12px;
-  margin-top: 10px;
 }
 
-.runtime-version-detail-grid > div {
+.runtime-dialog-grid > div {
   min-width: 0;
   border: 1px solid #f0f2f5;
   background: #fafafa;
   padding: 6px 8px;
 }
 
-.runtime-version-detail-grid span {
+.runtime-dialog-grid span {
   display: block;
   color: #8a9099;
   font-size: 11px;
 }
 
-.runtime-version-detail-grid strong {
+.runtime-dialog-grid strong {
   display: block;
   margin-top: 3px;
   color: #303133;
@@ -917,10 +1021,16 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
   word-break: break-word;
 }
 
-.runtime-version-error {
-  margin-top: 8px;
-  color: #f56c6c;
-  font-size: 12px;
+:deep(.web-main-main-row) td {
+  background: #f5f9ff !important;
+}
+
+:deep(.web-main-child-row) td {
+  background: #fbfdff !important;
+}
+
+:deep(.web-main-child-row .app-identifier) {
+  padding-left: 12px;
 }
 
 .log-content {
