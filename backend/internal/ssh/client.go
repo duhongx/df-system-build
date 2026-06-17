@@ -11,6 +11,7 @@ import (
 	"df-build-server/pkg/crypto"
 	"df-build-server/pkg/logger"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -127,6 +128,14 @@ func (c *Client) Close() error {
 		return c.conn.Close()
 	}
 	return nil
+}
+
+// NewRawSFTPClient creates a package sftp client over the existing SSH connection.
+func (c *Client) NewRawSFTPClient() (*sftp.Client, error) {
+	if c.conn == nil {
+		return nil, fmt.Errorf("SSH 连接未初始化")
+	}
+	return sftp.NewClient(c.conn)
 }
 
 // TestConnection attempts to connect and run a simple command

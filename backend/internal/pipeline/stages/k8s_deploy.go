@@ -11,6 +11,7 @@ import (
 	"df-build-server/internal/model"
 	"df-build-server/internal/pipeline/types"
 	"df-build-server/internal/repository"
+	"df-build-server/internal/service"
 	"df-build-server/pkg/logger"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -49,7 +50,7 @@ func resolvePlan(pCtx *types.PipelineContext) templatePlan {
 	case "vue":
 		switch pCtx.VueRole {
 		case "sub":
-			plan.skipAll = true
+			plan.deploymentCode = "deployment-web"
 		case "main":
 			plan.deploymentCode = "deployment-web"
 			plan.serviceCode = "service-web"
@@ -91,21 +92,33 @@ func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 
 	plan := resolvePlan(pCtx)
 
-	// Vue sub apps merge into web-main image; nothing to deploy.
+	// Vue sub apps merge into web-main image and still need to roll web-main.
 	if plan.skipAll {
 		pCtx.OnLog(pCtx.PipelineID, 0, "Vue 子应用，已合并到 web-main 镜像，无需独立部署 ✓", "stdout")
 		return &types.StageResult{ExitCode: 0}, nil
 	}
 
-	// Determine deployment name: vue main keeps the shared deployment name
+	// Determine deployment name: vue main/sub both update the shared web-main deployment.
 	deploymentName := pCtx.AppName
-	if pCtx.AppType == "vue" && pCtx.VueRole == "main" {
+	if pCtx.AppType == "vue" && (pCtx.VueRole == "main" || pCtx.VueRole == "sub") {
 		deploymentName = "web-main"
 	}
 
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("K8s 命名空间: %s", namespace), "stdout")
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Deployment: %s", deploymentName), "stdout")
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("目标镜像: %s", pCtx.ImageName), "stdout")
+
+	reader := service.NewK8sRuntimeVersionReader()
+	beforeImage, imageErr := service.CurrentDeploymentImage(ctx, namespace, deploymentName)
+	if imageErr == nil {
+		if err := service.CaptureBeforeDeployVersions(ctx, pCtx.PipelineID, deploymentName, beforeImage, reader); err != nil {
+			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("记录更新前版本失败: %v", err), "stderr")
+		} else if beforeImage != "" {
+			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("已记录更新前镜像: %s", beforeImage), "stdout")
+		}
+	} else {
+		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("未读取到更新前镜像: %v", imageErr), "stdout")
+	}
 
 	// 1) ConfigMap (vue main or standalone)
 	if plan.configMapCode != "" {
@@ -132,9 +145,11 @@ func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
 	}
 
-	// 3) Service (always alongside Deployment)
-	if err := s.applyService(ctx, cs, pCtx, namespace, deploymentName, plan.serviceCode); err != nil {
-		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	// 3) Service (when this app owns a service)
+	if plan.serviceCode != "" {
+		if err := s.applyService(ctx, cs, pCtx, namespace, deploymentName, plan.serviceCode); err != nil {
+			return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+		}
 	}
 
 	// 4) Ingress (zero, one, or many)
@@ -168,6 +183,12 @@ func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 	pCtx.OnLog(pCtx.PipelineID, 0, "等待 Deployment 滚动更新完成...", "stdout")
 	if err := s.waitForRollout(ctx, cs, namespace, deploymentName, pCtx); err != nil {
 		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
+
+	if err := service.CaptureAfterDeployVersions(ctx, pCtx.PipelineID, deploymentName, pCtx.ImageName, reader); err != nil {
+		errMsg := fmt.Sprintf("业务版本校验失败: %v", err)
+		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
+		return &types.StageResult{ExitCode: 1, Error: errMsg}, fmt.Errorf("%s", errMsg)
 	}
 
 	pCtx.OnLog(pCtx.PipelineID, 0, "K8s 部署完成 ✓", "stdout")
@@ -233,7 +254,7 @@ func (s *K8sDeployStage) renderResource(pCtx *types.PipelineContext, namespace, 
 }
 
 // applyDeployment creates or updates the Deployment for an application.
-func (s *K8sDeployStage) applyDeployment(ctx context.Context, cs *kubernetes.Clientset, pCtx *types.PipelineContext, namespace, deploymentName, templateCode string) error {
+func (s *K8sDeployStage) applyDeployment(ctx context.Context, cs kubernetes.Interface, pCtx *types.PipelineContext, namespace, deploymentName, templateCode string) error {
 	pCtx.OnLog(pCtx.PipelineID, 0, "检查 Deployment 是否存在...", "stdout")
 	_, err := cs.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
 	if err == nil {
@@ -274,7 +295,16 @@ func (s *K8sDeployStage) applyDeployment(ctx context.Context, cs *kubernetes.Cli
 
 // applyService creates or updates the Service. When NodePort==0 the rendered
 // YAML is post-processed into a ClusterIP service.
-func (s *K8sDeployStage) applyService(ctx context.Context, cs *kubernetes.Clientset, pCtx *types.PipelineContext, namespace, deploymentName, templateCode string) error {
+func (s *K8sDeployStage) applyService(ctx context.Context, cs kubernetes.Interface, pCtx *types.PipelineContext, namespace, deploymentName, templateCode string) error {
+	if _, err := cs.CoreV1().Services(namespace).Get(ctx, deploymentName, metav1.GetOptions{}); err == nil {
+		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Service %s 已存在，跳过", deploymentName), "stdout")
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		errMsg := fmt.Sprintf("查询 Service 失败: %v", err)
+		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
+		return fmt.Errorf("%s", errMsg)
+	}
+
 	yamlContent, err := s.renderResource(pCtx, namespace, deploymentName, templateCode, nil)
 	if err != nil {
 		return err
@@ -292,37 +322,27 @@ func (s *K8sDeployStage) applyService(ctx context.Context, cs *kubernetes.Client
 	}
 	svc.Namespace = namespace
 
-	existing, err := cs.CoreV1().Services(namespace).Get(ctx, svc.Name, metav1.GetOptions{})
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			errMsg := fmt.Sprintf("查询 Service 失败: %v", err)
-			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-			return fmt.Errorf("%s", errMsg)
-		}
-		if _, err := cs.CoreV1().Services(namespace).Create(ctx, &svc, metav1.CreateOptions{}); err != nil {
-			errMsg := fmt.Sprintf("创建 Service 失败: %v", err)
-			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-			return fmt.Errorf("%s", errMsg)
-		}
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Service %s 已创建", svc.Name), "stdout")
-		return nil
-	}
-
-	// Update spec while preserving cluster-assigned fields
-	svc.ResourceVersion = existing.ResourceVersion
-	svc.Spec.ClusterIP = existing.Spec.ClusterIP
-	svc.Spec.ClusterIPs = existing.Spec.ClusterIPs
-	if _, err := cs.CoreV1().Services(namespace).Update(ctx, &svc, metav1.UpdateOptions{}); err != nil {
-		errMsg := fmt.Sprintf("更新 Service 失败: %v", err)
+	if _, err := cs.CoreV1().Services(namespace).Create(ctx, &svc, metav1.CreateOptions{}); err != nil {
+		errMsg := fmt.Sprintf("创建 Service 失败: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return fmt.Errorf("%s", errMsg)
 	}
-	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Service %s 已更新", svc.Name), "stdout")
+	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Service %s 已创建", svc.Name), "stdout")
 	return nil
 }
 
 // applyConfigMap creates or updates a ConfigMap from the configured template.
-func (s *K8sDeployStage) applyConfigMap(ctx context.Context, cs *kubernetes.Clientset, pCtx *types.PipelineContext, namespace, templateCode string) error {
+func (s *K8sDeployStage) applyConfigMap(ctx context.Context, cs kubernetes.Interface, pCtx *types.PipelineContext, namespace, templateCode string) error {
+	configMapName := pCtx.AppName
+	if _, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{}); err == nil {
+		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("ConfigMap %s 已存在，跳过", configMapName), "stdout")
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		errMsg := fmt.Sprintf("查询 ConfigMap 失败: %v", err)
+		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
+		return fmt.Errorf("%s", errMsg)
+	}
+
 	yamlContent, err := s.renderResource(pCtx, namespace, pCtx.AppName, templateCode, nil)
 	if err != nil {
 		return err
@@ -336,35 +356,27 @@ func (s *K8sDeployStage) applyConfigMap(ctx context.Context, cs *kubernetes.Clie
 	}
 	cm.Namespace = namespace
 
-	existing, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, cm.Name, metav1.GetOptions{})
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			errMsg := fmt.Sprintf("查询 ConfigMap 失败: %v", err)
-			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-			return fmt.Errorf("%s", errMsg)
-		}
-		if _, err := cs.CoreV1().ConfigMaps(namespace).Create(ctx, &cm, metav1.CreateOptions{}); err != nil {
-			errMsg := fmt.Sprintf("创建 ConfigMap 失败: %v", err)
-			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-			return fmt.Errorf("%s", errMsg)
-		}
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("ConfigMap %s 已创建", cm.Name), "stdout")
-		return nil
-	}
-
-	cm.ResourceVersion = existing.ResourceVersion
-	if _, err := cs.CoreV1().ConfigMaps(namespace).Update(ctx, &cm, metav1.UpdateOptions{}); err != nil {
-		errMsg := fmt.Sprintf("更新 ConfigMap 失败: %v", err)
+	if _, err := cs.CoreV1().ConfigMaps(namespace).Create(ctx, &cm, metav1.CreateOptions{}); err != nil {
+		errMsg := fmt.Sprintf("创建 ConfigMap 失败: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return fmt.Errorf("%s", errMsg)
 	}
-	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("ConfigMap %s 已更新", cm.Name), "stdout")
+	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("ConfigMap %s 已创建", cm.Name), "stdout")
 	return nil
 }
 
 // applyIngress renders the shared ingress template with per-ingress name
 // and host overrides, then creates or updates the Ingress.
-func (s *K8sDeployStage) applyIngress(ctx context.Context, cs *kubernetes.Clientset, pCtx *types.PipelineContext, namespace, serviceName, ingressName, host string) error {
+func (s *K8sDeployStage) applyIngress(ctx context.Context, cs kubernetes.Interface, pCtx *types.PipelineContext, namespace, serviceName, ingressName, host string) error {
+	if _, err := cs.NetworkingV1().Ingresses(namespace).Get(ctx, ingressName, metav1.GetOptions{}); err == nil {
+		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Ingress %s 已存在，跳过", ingressName), "stdout")
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		errMsg := fmt.Sprintf("查询 Ingress 失败: %v", err)
+		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
+		return fmt.Errorf("%s", errMsg)
+	}
+
 	overrides := map[string]string{
 		"ingressName": ingressName,
 		"appName":     ingressName, // backwards-compat for templates referencing ${appName}
@@ -400,29 +412,12 @@ func (s *K8sDeployStage) applyIngress(ctx context.Context, cs *kubernetes.Client
 		}
 	}
 
-	existing, err := cs.NetworkingV1().Ingresses(namespace).Get(ctx, ingressName, metav1.GetOptions{})
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			errMsg := fmt.Sprintf("查询 Ingress 失败: %v", err)
-			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-			return fmt.Errorf("%s", errMsg)
-		}
-		if _, err := cs.NetworkingV1().Ingresses(namespace).Create(ctx, &ing, metav1.CreateOptions{}); err != nil {
-			errMsg := fmt.Sprintf("创建 Ingress 失败: %v", err)
-			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-			return fmt.Errorf("%s", errMsg)
-		}
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Ingress %s -> %s 已创建", ingressName, host), "stdout")
-		return nil
-	}
-
-	ing.ResourceVersion = existing.ResourceVersion
-	if _, err := cs.NetworkingV1().Ingresses(namespace).Update(ctx, &ing, metav1.UpdateOptions{}); err != nil {
-		errMsg := fmt.Sprintf("更新 Ingress 失败: %v", err)
+	if _, err := cs.NetworkingV1().Ingresses(namespace).Create(ctx, &ing, metav1.CreateOptions{}); err != nil {
+		errMsg := fmt.Sprintf("创建 Ingress 失败: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return fmt.Errorf("%s", errMsg)
 	}
-	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Ingress %s -> %s 已更新", ingressName, host), "stdout")
+	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Ingress %s -> %s 已创建", ingressName, host), "stdout")
 	return nil
 }
 

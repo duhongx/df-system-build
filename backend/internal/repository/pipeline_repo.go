@@ -57,7 +57,7 @@ func (r *PipelineRepo) List(params PipelineListParams) ([]model.Pipeline, int64,
 	}
 	offset := (params.Page - 1) * params.PageSize
 
-	err := DB.Order("id DESC").Offset(offset).Limit(params.PageSize).Find(&list).Error
+	err := query.Order("id DESC").Offset(offset).Limit(params.PageSize).Find(&list).Error
 	return list, total, err
 }
 

@@ -72,6 +72,11 @@ func main() {
 	} else if n > 0 {
 		logger.Log.Infof("finalized %d orphaned deployment run(s) as FAILED", n)
 	}
+	if n, err := handler.FinalizeOrphanedDownloadJobs(repository.DB); err != nil {
+		logger.Log.Warnf("failed to finalize orphaned download job(s): %v", err)
+	} else if n > 0 {
+		logger.Log.Infof("finalized %d orphaned download job(s) as FAILED", n)
+	}
 	// Seed deployment-management defaults (settings, enabled components, and
 	// component default parameters) so rendering produces complete config.
 	if err := deployrepo.SeedDeploymentDefaults(repository.DB); err != nil {

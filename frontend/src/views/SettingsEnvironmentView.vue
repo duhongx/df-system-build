@@ -26,6 +26,11 @@ const form = ref<Record<string, string>>({
   nacos_password: '',
   skywalking_oap_url: '',
   skywalking_graphql_url: '',
+  package_download_host: '',
+  package_download_user: 'root',
+  package_download_password: '',
+  package_download_key: '',
+  package_download_path: '/',
   postgresql_host: '',
   postgresql_port: '5432',
   postgresql_admin_password: '',
@@ -100,6 +105,15 @@ async function testConnection(type: string) {
       config = {
         skywalking_oap_url: form.value.skywalking_oap_url,
         skywalking_graphql_url: form.value.skywalking_graphql_url,
+      }
+      break
+    case 'package-download':
+      config = {
+        package_download_host: form.value.package_download_host,
+        package_download_user: form.value.package_download_user,
+        package_download_password: form.value.package_download_password,
+        package_download_key: form.value.package_download_key,
+        package_download_path: form.value.package_download_path,
       }
       break
     case 'postgresql':
@@ -314,6 +328,45 @@ onMounted(() => {
       </el-form>
     </el-card>
 
+    <!-- 软件包下载服务器 -->
+    <el-card shadow="never" style="margin-bottom: 20px;">
+      <template #header>
+        <div class="section-header">
+          <span class="section-title">软件包下载服务器</span>
+          <el-button
+            size="small"
+            :loading="testingType === 'package-download'"
+            @click="testConnection('package-download')"
+          >测试</el-button>
+        </div>
+      </template>
+      <el-form label-width="160px">
+        <el-form-item label="服务器地址">
+          <el-input v-model="form.package_download_host" placeholder="如 192.168.199.100 或 192.168.199.100:22" />
+          <div class="form-hint">不填写端口时默认使用 22</div>
+        </el-form-item>
+        <el-form-item label="用户名">
+          <el-input v-model="form.package_download_user" placeholder="root" />
+        </el-form-item>
+        <el-form-item label="密码">
+          <el-input v-model="form.package_download_password" type="password" show-password placeholder="服务器登录密码" />
+        </el-form-item>
+        <el-form-item label="Key">
+          <el-input
+            v-model="form.package_download_key"
+            type="textarea"
+            :rows="6"
+            placeholder="可选，粘贴 SSH 私钥内容"
+          />
+          <div class="form-hint">填写 Key 时优先使用 Key 登录；不填则使用密码登录</div>
+        </el-form-item>
+        <el-form-item label="软件包路径">
+          <el-input v-model="form.package_download_path" placeholder="/root/DFHIS/his-release" />
+          <div class="form-hint">批量部署的「服务器下载」会从该目录开始浏览</div>
+        </el-form-item>
+      </el-form>
+    </el-card>
+
     <!-- PostgreSQL -->
     <el-card shadow="never" style="margin-bottom: 20px;">
       <template #header>
@@ -357,7 +410,8 @@ onMounted(() => {
 
 <style scoped>
 .settings-environment {
-  max-width: 800px;
+  width: 100%;
+  max-width: 1080px;
 }
 
 .section-header {

@@ -189,6 +189,8 @@ func (h *SettingsHandler) TestConnection(c *gin.Context) {
 		success, message = h.testSkyWalking(req.Config)
 	case "postgresql":
 		success, message = h.testPostgreSQL(req.Config)
+	case "package-download":
+		success, message = h.testPackageDownload(req.Config)
 	default:
 		response.Fail(c, 10905, "不支持的测试类型: "+req.Type)
 		return
@@ -199,6 +201,29 @@ func (h *SettingsHandler) TestConnection(c *gin.Context) {
 	} else {
 		response.Fail(c, 10905, message)
 	}
+}
+
+func (h *SettingsHandler) testPackageDownload(config map[string]string) (bool, string) {
+	sftpClient, sshClient, err := connectPackageDownloadSFTPWithConfig(
+		config["package_download_host"],
+		config["package_download_user"],
+		config["package_download_password"],
+		config["package_download_key"],
+	)
+	if err != nil {
+		return false, fmt.Sprintf("软件包下载服务器连接失败: %v", err)
+	}
+	defer sftpClient.Close()
+	defer sshClient.Close()
+
+	packagePath := strings.TrimSpace(config["package_download_path"])
+	if packagePath == "" {
+		packagePath = "/"
+	}
+	if _, err := sftpClient.ReadDir(packagePath); err != nil {
+		return false, fmt.Sprintf("软件包路径不可访问: %v", err)
+	}
+	return true, "软件包下载服务器连接成功"
 }
 
 func (h *SettingsHandler) testRegistry(config map[string]string) (bool, string) {

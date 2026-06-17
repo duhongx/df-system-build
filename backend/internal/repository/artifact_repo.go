@@ -10,6 +10,10 @@ func (r *ArtifactRepo) Create(a *model.Artifact) error {
 	return DB.Create(a).Error
 }
 
+func (r *ArtifactRepo) ClearLatest(appName string) error {
+	return DB.Model(&model.Artifact{}).Where("app_name = ? AND is_latest = ?", appName, true).Update("is_latest", false).Error
+}
+
 func (r *ArtifactRepo) List(page, pageSize int, search string) ([]model.Artifact, int64, error) {
 	var list []model.Artifact
 	var total int64

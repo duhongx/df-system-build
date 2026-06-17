@@ -1,4 +1,4 @@
-# DF 构建发布系统
+# CloudHIS智能管理平台
 
 替代 Jenkins + Python 脚本的自研构建发布平台，面向 DF-HIS 系列微服务。支持 Java / Vue 项目的多阶段流水线构建、Docker 容器化编译、SSH/SFTP 产物上传、远程同步与打包、钉钉/企业微信通知。
 

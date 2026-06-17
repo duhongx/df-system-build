@@ -1,4 +1,4 @@
-# DF 构建平台 - 前端
+# CloudHIS智能管理平台 - 前端
 
 Vue 3 + Vite + TypeScript + Element Plus。详见[项目根 README](../README.md)。
 

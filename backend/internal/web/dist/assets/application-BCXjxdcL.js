@@ -1,0 +1,1 @@
+import{r as p}from"./index-DQ6egI-0.js";function e(t){return p.get("/applications",{params:t})}function i(){return p.get("/applications/all")}function s(t){return p.post("/applications",t)}function r(t,a){return p.put(`/applications/${t}`,a)}function l(t){return p.delete(`/applications/${t}`)}export{e as a,s as c,l as d,i as l,r as u};

@@ -1,40 +1,40 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getBuildQueue, cancelQueued, deployPipeline, listPipelines, type Pipeline } from '../api/pipeline'
+import { getBuildQueue, cancelQueued, deployPipeline, type Pipeline } from '../api/pipeline'
+import {
+  getArtifactDeployBatch,
+  listArtifactDeployBatches,
+  type ArtifactDeployBatch,
+  type ArtifactDeployRecord,
+} from '../api/batch-deploy'
 import { formatTime } from '../utils/time'
 
 const router = useRouter()
 const runningTasks = ref<Pipeline[]>([])
 const queuedTasks = ref<Pipeline[]>([])
-const imageReadyTasks = ref<Pipeline[]>([])
+const deployBatches = ref<ArtifactDeployBatch[]>([])
+const selectedBatch = ref<ArtifactDeployBatch | null>(null)
+const selectedRecords = ref<ArtifactDeployRecord[]>([])
+const batchDrawerVisible = ref(false)
 const loading = ref(true)
 let refreshTimer: any = null
+const imageReadyBatches = computed(() => deployBatches.value.filter(batch => batch.deployMode === 'cutover' && batch.status === 'image_ready'))
 
 async function load() {
   try {
-    const [queueData, imageReadyData] = await Promise.all([
+    const [queueData, batchData] = await Promise.all([
       getBuildQueue(),
-      listPipelines({ status: 'IMAGE_READY', pageSize: 50 }),
+      listArtifactDeployBatches('image_ready'),
     ])
     runningTasks.value = queueData.running || []
     queuedTasks.value = queueData.pending || []
-
-    // Deduplicate: only keep the latest IMAGE_READY pipeline per app
-    const allReady = imageReadyData.list || []
-    const latestByApp = new Map<string, any>()
-    for (const p of allReady) {
-      const existing = latestByApp.get(p.appName)
-      if (!existing || p.id > existing.id) {
-        latestByApp.set(p.appName, p)
-      }
-    }
-    imageReadyTasks.value = Array.from(latestByApp.values())
+    deployBatches.value = batchData.batches || []
   } catch (e) {
     runningTasks.value = []
     queuedTasks.value = []
-    imageReadyTasks.value = []
+    deployBatches.value = []
   } finally {
     loading.value = false
   }
@@ -78,15 +78,39 @@ async function handleCancel(task: Pipeline) {
   }
 }
 
-async function handleDeploy(task: Pipeline) {
-  await ElMessageBox.confirm(`确定开始部署 "${task.pipelineNo}" 吗？`, '确认部署', { type: 'info' })
+async function showBatchDetail(batch: ArtifactDeployBatch) {
+  selectedBatch.value = batch
+  selectedRecords.value = []
+  batchDrawerVisible.value = true
   try {
-    await deployPipeline(task.id)
-    ElMessage.success('部署已触发')
+    const result = await getArtifactDeployBatch(batch.deployBatchNo)
+    selectedBatch.value = result.batch
+    selectedRecords.value = result.records || []
+  } catch (e) {
+    // handled
+  }
+}
+
+async function handleDeployBatch(batch: ArtifactDeployBatch) {
+  await ElMessageBox.confirm(`确定开始部署版本 "${batch.versionNo}" 吗？将触发该版本中已构建镜像的 Deployment 更新。`, '确认批次部署', { type: 'info' })
+  try {
+    const result = await getArtifactDeployBatch(batch.deployBatchNo)
+    const pipelineIds = Array.from(new Set((result.records || []).map(record => record.pipelineId).filter(Boolean)))
+    for (const pipelineId of pipelineIds) {
+      await deployPipeline(pipelineId)
+    }
+    ElMessage.success(`已触发 ${pipelineIds.length} 个部署任务`)
     await load()
   } catch (e) {
     // handled
   }
+}
+
+function batchStatusText(status: string) {
+  if (status === 'image_ready') return '镜像已就绪'
+  if (status === 'deployed') return '已部署'
+  if (status === 'failed') return '失败'
+  return status || '-'
 }
 </script>
 
@@ -155,25 +179,60 @@ async function handleDeploy(task: Pipeline) {
         <div class="section-header">
           <span class="section-title">
             <el-icon color="#e6a23c"><WarningFilled /></el-icon>
-            等待部署 ({{ imageReadyTasks.length }})
+            等待部署批次 ({{ imageReadyBatches.length }})
           </span>
         </div>
       </template>
 
-      <el-table :data="imageReadyTasks" @row-click="goToDetail" style="cursor: pointer;" v-if="imageReadyTasks.length">
-        <el-table-column prop="pipelineNo" label="任务编号" width="180" />
-        <el-table-column prop="appName" label="应用" width="160" />
-        <el-table-column prop="gitBranch" label="分支" width="200" show-overflow-tooltip />
-        <el-table-column prop="triggerUser" label="触发人" width="100" />
-        <el-table-column label="构建时间" width="180"><template #default="{ row }">{{ formatTime(row.createdAt) }}</template></el-table-column>
-        <el-table-column label="操作" width="120">
+      <el-table :data="imageReadyBatches" v-if="imageReadyBatches.length">
+        <el-table-column prop="versionNo" label="版本号" min-width="220" show-overflow-tooltip />
+        <el-table-column prop="namespace" label="命名空间" width="110" />
+        <el-table-column prop="totalCount" label="应用数" width="90" />
+        <el-table-column label="镜像状态" width="120">
           <template #default="{ row }">
-            <el-button type="warning" link size="small" @click.stop="handleDeploy(row)">开始部署</el-button>
+            <el-tag type="success" size="small">{{ batchStatusText(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="triggerUser" label="创建人" width="100" />
+        <el-table-column label="创建时间" width="180">
+          <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="220" fixed="right">
+          <template #default="{ row }">
+            <el-button type="primary" link size="small" @click="showBatchDetail(row)">详情</el-button>
+            <el-button type="warning" link size="small" @click="handleDeployBatch(row)">开始部署</el-button>
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-else description="暂无等待部署的任务" :image-size="60" />
+      <el-empty v-else description="暂无等待卡点部署的批次" :image-size="60" />
     </el-card>
+
+    <el-drawer v-model="batchDrawerVisible" size="56%" title="等待部署批次详情">
+      <template v-if="selectedBatch">
+        <div class="batch-summary">
+          <div><span>版本号</span>{{ selectedBatch.versionNo }}</div>
+          <div><span>应用数</span>{{ selectedBatch.totalCount }}</div>
+          <div><span>状态</span>{{ batchStatusText(selectedBatch.status) }}</div>
+          <div><span>创建人</span>{{ selectedBatch.triggerUser || '-' }}</div>
+        </div>
+        <el-table :data="selectedRecords" border stripe size="small">
+          <el-table-column prop="appName" label="应用" min-width="140" show-overflow-tooltip />
+          <el-table-column prop="fileName" label="制品" min-width="150" show-overflow-tooltip />
+          <el-table-column prop="deploymentName" label="Deployment" min-width="130" show-overflow-tooltip />
+          <el-table-column prop="afterImage" label="新镜像" min-width="220" show-overflow-tooltip />
+          <el-table-column label="状态" width="110">
+            <template #default="{ row }">
+              <el-tag type="warning" size="small">{{ row.status === 'image_ready' ? '等待部署' : row.status }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="100">
+            <template #default="{ row }">
+              <el-button type="primary" link size="small" @click="goToDetail({ id: row.pipelineId } as Pipeline)">详情</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+    </el-drawer>
   </div>
 </template>
 
@@ -196,5 +255,34 @@ async function handleDeploy(task: Pipeline) {
   font-size: 15px;
   font-weight: 600;
   color: #303133;
+}
+
+.batch-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.batch-summary div {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  background: #f8fafc;
+  font-size: 12px;
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-summary span {
+  color: #909399;
+  margin-right: 8px;
+}
+
+.batch-alert {
+  margin-bottom: 12px;
 }
 </style>

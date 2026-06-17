@@ -58,7 +58,7 @@ const quickActions = [
     <div class="welcome-banner">
       <div class="welcome-left">
         <h2 class="welcome-title">欢迎回来，开始今天的构建任务</h2>
-        <p class="welcome-desc">DF-HIS 制品发布平台 · 当前共 {{ stats.totalApps || 0 }} 个注册应用，今日已构建 {{ stats.todayReleases || 0 }} 次</p>
+        <p class="welcome-desc">CloudHIS智能管理平台 · 当前共 {{ stats.totalApps || 0 }} 个注册应用，今日已构建 {{ stats.todayReleases || 0 }} 次</p>
       </div>
     </div>
 

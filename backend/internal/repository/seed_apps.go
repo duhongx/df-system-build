@@ -41,12 +41,16 @@ func SeedApplications() {
 		"web-yewugymk":       "gymk",
 	}
 
-	// Main apps (vue but not sub-apps)
+	// Main apps are full web-main bundles. Only web-main should drive the
+	// web-main image composition path.
 	mainApps := map[string]bool{
-		"web-main":       true,
-		"web-cdr":        true,
-		"web-opm":        true,
-		"web-biaodanbjq": true,
+		"web-main": true,
+	}
+
+	// Standalone Vue apps deploy as their own web deployments.
+	standaloneApps := map[string]bool{
+		"web-cdr": true,
+		"web-opm": true,
 	}
 
 	type appEntry struct {
@@ -138,7 +142,6 @@ func SeedApplications() {
 		{"web-chuanranbingbk", "ssh://git@192.168.1.206/df-his-frontend/ylgl/df-web-chuanranbingbk.git"},
 		{"web-yaoku", "ssh://git@192.168.1.206/df-his-frontend/ykf/df-web-yaoku.git"},
 		{"web-biaodangl", "ssh://git@192.168.1.206/df-his-frontend/base/df-web-biaodangl.git"},
-		{"web-biaodanbjq", "ssh://git@192.168.1.206/df-his-frontend/base/df-web-biaodanbjq.git"},
 		{"web-buliangsj", "ssh://git@192.168.1.206/df-his-frontend/ylgl/df-web-buliangsj.git"},
 		{"web-bingangl", "ssh://git@192.168.1.206/df-his-frontend/ylgl/df-web-bingangl.git"},
 		{"web-main", "ssh://git@192.168.1.206/df-his-frontend/base/df-web-main.git"},
@@ -184,12 +187,13 @@ func SeedApplications() {
 			// Determine vue role
 			if mainApps[e.Name] {
 				app.VueRole = "main"
+			} else if standaloneApps[e.Name] {
+				app.VueRole = "standalone"
 			} else if code, ok := zipNameMap[e.Name]; ok {
 				app.VueRole = "sub"
 				app.AppCode = code
 			} else {
-				// Unknown web-* app not in zip_name_map, default to main
-				app.VueRole = "main"
+				app.VueRole = "standalone"
 			}
 		} else {
 			app.AppType = "java"

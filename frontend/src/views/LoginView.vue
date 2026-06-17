@@ -78,8 +78,7 @@ async function handleLogin() {
     <div class="login-form-side">
       <!-- Brand at top -->
       <div class="brand-top">
-        <img src="/logo.svg" alt="logo" class="brand-logo" />
-        <h1 class="brand-name">DF 构建平台</h1>
+        <img src="/brand-logo.svg" alt="CloudHIS智能管理平台" class="brand-logo" />
       </div>
 
       <!-- Form centered -->
@@ -119,7 +118,7 @@ async function handleLogin() {
         </el-form>
 
         <div class="form-footer">
-          DF-HIS v1.0 · 制品发布与构建管理系统
+          CloudHIS v1.0 · 智能管理平台
         </div>
       </div>
     </div>
@@ -273,7 +272,8 @@ async function handleLogin() {
 .brand-top {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: center;
+  width: 100%;
 }
 
 .visual-edge {
@@ -288,15 +288,9 @@ async function handleLogin() {
 }
 
 .brand-logo {
-  width: 42px;
-  height: 42px;
-}
-
-.brand-name {
-  font-size: 26px;
-  font-weight: 700;
-  color: #303133;
-  margin: 0;
+  width: 220px;
+  height: 66px;
+  display: block;
 }
 
 .brand-desc {
@@ -347,10 +341,6 @@ html.dark .login-form-side {
 
 html.dark .visual-edge {
   background: linear-gradient(180deg, #1a1a1a 0%, #1e2430 50%, #1a2030 100%);
-}
-
-html.dark .brand-name {
-  color: #ffffffd9;
 }
 
 html.dark .welcome-text {

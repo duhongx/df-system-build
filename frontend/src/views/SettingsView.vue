@@ -49,8 +49,6 @@ async function handleSaveGeneral() {
   } catch (e) { /* handled */ }
 }
 
-
-
 // Notifications
 const notifications = ref<NotificationWebhook[]>([])
 const notifyDialogVisible = ref(false)
@@ -263,6 +261,7 @@ onMounted(() => {
         <el-button type="primary" @click="handleSaveNotify">保存</el-button>
       </template>
     </el-dialog>
+
   </div>
 </template>
 

@@ -34,6 +34,7 @@ export interface Pipeline {
   uploadPath?: string
   uploadTargets?: string
   batchId?: string
+  deployMode?: string
   startTime?: string | null
   endTime?: string | null
   durationSeconds?: number | null
@@ -109,6 +110,13 @@ export interface Artifact {
   gitCommitHash?: string
   uploadPath: string
   uploadTargets: string
+  sourceType?: string
+  sourcePath?: string
+  storagePath?: string
+  sha256?: string
+  batchId?: string
+  isLatest?: boolean
+  fileSizeBytes?: number
   durationSeconds: number
   createdAt: string
 }

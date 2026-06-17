@@ -63,6 +63,23 @@ INSERT INTO settings (key, value, description) VALUES ('postgresql_admin_passwor
 INSERT INTO settings (key, value, description) VALUES ('postgresql_database', '', 'PostgreSQL 数据库') ON CONFLICT (key) DO NOTHING;
 `,
 	},
+	{
+		Version:     5,
+		Description: "Classify independent Vue apps as standalone",
+		SQL: `
+UPDATE applications
+SET vue_role = 'standalone',
+    app_code = '',
+    artifact_name = app_name || '.zip'
+WHERE app_name IN ('web-cdr', 'web-opm');
+
+UPDATE applications
+SET vue_role = 'main',
+    app_code = '',
+    artifact_name = 'web-main.zip'
+WHERE app_name = 'web-main';
+`,
+	},
 }
 
 // RunMigrations executes pending migrations based on the current schema version

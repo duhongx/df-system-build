@@ -1,232 +1,393 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import { matchArtifacts, executeBatchDeploy, listLocalDir, type MatchResult } from '../api/batch-deploy'
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, type TableInstance } from 'element-plus'
+import {
+  executeBatchDeploy,
+  getArtifactVersion,
+  listArtifactVersions,
+  type ArtifactVersion,
+  type ArtifactVersionItem,
+  type MatchResult,
+} from '../api/batch-deploy'
 import { useSettingsStore } from '../stores/settings'
+import { isDeployableMatch, selectedDeployableFileNames } from '../utils/batch-deploy-selection'
+import type { DeployMode } from '../utils/batch-deploy-flow'
 
+const route = useRoute()
 const router = useRouter()
 const settingsStore = useSettingsStore()
-const step = ref(1)
+
 const loading = ref(false)
-
-// Step 1: Source selection
-const sourceType = ref<'upload' | 'local'>('upload')
-const localPath = ref('')
-const uploadedFiles = ref<string[]>([])
-const sourceDir = ref('')
+const executing = ref(false)
 const batchId = ref('')
+const sourceType = ref('')
+const sourceDir = ref('')
 const namespace = ref('')
-
-// Step 2: Match results
+const deployMode = ref<DeployMode>('immediate')
 const matchResults = ref<MatchResult[]>([])
-const matchedCount = ref(0)
+const selectedFiles = ref<string[]>([])
+const matchTableRef = ref<TableInstance>()
+const versions = ref<ArtifactVersion[]>([])
+const currentVersion = ref<ArtifactVersion | null>(null)
+
+const deployableResults = computed(() => {
+  const selected = new Set(selectedFiles.value)
+  return matchResults.value.filter(result => selected.has(result.fileName) && isDeployableMatch(result))
+})
+const matchedCount = computed(() => matchResults.value.filter(result => result.matched && result.valid && !result.skipped).length)
+const invalidCount = computed(() => matchResults.value.filter(result => !result.valid).length)
+const unmatchedCount = computed(() => matchResults.value.filter(result => !result.matched && !result.skipped).length)
+const skippedCount = computed(() => matchResults.value.filter(result => result.skipped).length)
+const hasVersion = computed(() => Boolean(currentVersion.value || batchId.value))
+const readyVersions = computed(() => versions.value.filter(isVersionReady))
 
 onMounted(async () => {
   if (!settingsStore.loaded) {
     await settingsStore.fetchSettings()
   }
   namespace.value = settingsStore.k8sNamespace
+  batchId.value = String(route.query.batchId || '')
+  sourceType.value = String(route.query.sourceType || '')
+  sourceDir.value = String(route.query.sourceDir || '')
+
+  await loadVersions()
+  if (batchId.value) {
+    await loadVersionDetail(batchId.value)
+  }
 })
 
-// Upload handler
-async function handleUpload(event: Event) {
-  const input = event.target as HTMLInputElement
-  if (!input.files?.length) return
-
-  const formData = new FormData()
-  for (let i = 0; i < input.files.length; i++) {
-    formData.append('files', input.files[i])
-  }
-
+async function loadVersions() {
   loading.value = true
   try {
-    const resp = await fetch('/api/batch-deploy/upload', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('df-token') || ''}` },
-      body: formData,
-    })
-    const data = await resp.json()
-    if (data.code === 0) {
-      uploadedFiles.value = data.data.success || data.data.files || []
-      sourceDir.value = data.data.uploadDir
-      batchId.value = data.data.batchId || ''
-      ElMessage.success(`已上传 ${data.data.count} 个文件`)
-      await doMatch(uploadedFiles.value)
-    } else {
-      ElMessage.error(data.message || '上传失败')
-    }
-  } catch (e) {
-    ElMessage.error('上传失败')
-  } finally {
-    loading.value = false
-    input.value = ''
-  }
-}
-
-async function handleLoadLocalDir() {
-  if (!localPath.value.trim()) { ElMessage.warning('请输入目录路径'); return }
-  loading.value = true
-  try {
-    const result = await listLocalDir(localPath.value, batchId.value)
-    uploadedFiles.value = result.files
-    sourceDir.value = result.path
-    ElMessage.success(`找到 ${result.count} 个制品文件`)
-    await doMatch(uploadedFiles.value)
-  } catch (e) {
-    ElMessage.error('读取目录失败')
+    const result = await listArtifactVersions(true)
+    versions.value = result.versions || []
   } finally {
     loading.value = false
   }
 }
 
-async function doMatch(files: string[]) {
-  if (files.length === 0) return
-  try {
-    const result = await matchArtifacts(files, sourceDir.value, batchId.value)
-    matchResults.value = result.results
-    matchedCount.value = result.matched
-    step.value = 2
-    // Show warning for invalid files
-    const invalidCount = result.invalid || 0
-    if (invalidCount > 0) {
-      ElMessage.warning(`${invalidCount} 个文件异常（已标记），请检查后重新上传`)
-    }
-  } catch (e) { /* handled */ }
+function isVersionReady(version: ArtifactVersion) {
+  return (version.status === 'available' || version.status === 'ready' || version.status === 'success') && version.deployableCount > 0
 }
 
-async function handleExecute() {
-  const items = matchResults.value
-    .filter(r => r.matched)
-    .map(r => ({ fileName: r.fileName, appId: r.appId }))
+function versionStatusType(version: ArtifactVersion) {
+  if (isVersionReady(version)) return 'success'
+  if (version.status === 'failed') return 'danger'
+  return 'warning'
+}
 
-  if (items.length === 0) {
-    ElMessage.warning('没有匹配成功的应用')
+function versionStatusText(version: ArtifactVersion) {
+  if (isVersionReady(version)) return '可部署'
+  if (version.status === 'failed') return '失败'
+  if (version.status === 'collecting' || version.status === 'running') return '导入中'
+  if (version.deployableCount === 0) return '无可部署制品'
+  return version.status || '未知'
+}
+
+async function selectVersion(version: ArtifactVersion) {
+  if (!isVersionReady(version)) {
+    ElMessage.warning('请选择可部署的更新版本')
     return
   }
-
-  loading.value = true
-  try {
-    const result = await executeBatchDeploy(sourceDir.value, items, namespace.value.trim(), batchId.value)
-    ElMessage.success(`已创建 ${result.pipelines.length} 个构建任务`)
-    if (result.errors?.length) {
-      ElMessage.warning(`${result.errors.length} 个失败: ${result.errors.join(', ')}`)
-    }
-    router.push('/build-queue')
-  } catch (e) { /* handled */ }
-  finally { loading.value = false }
+  const dir = version.targetPath || version.localDir
+  if (!dir) {
+    ElMessage.error('更新版本缺少本机目录，无法部署')
+    return
+  }
+  batchId.value = version.versionNo
+  sourceType.value = version.sourceType
+  sourceDir.value = dir
+  await router.replace({
+    path: '/batch-deploy',
+    query: { batchId: version.versionNo, sourceType: version.sourceType, sourceDir: dir },
+  })
+  await loadVersionDetail(version.versionNo)
 }
 
-function handleReset() {
-  step.value = 1
-  uploadedFiles.value = []
-  matchResults.value = []
-  matchedCount.value = 0
-  sourceDir.value = ''
+async function loadVersionDetail(versionNo: string) {
+  loading.value = true
+  try {
+    const result = await getArtifactVersion(versionNo)
+    currentVersion.value = result.version
+    batchId.value = result.version.versionNo
+    sourceType.value = result.version.sourceType
+    sourceDir.value = result.version.targetPath || result.version.localDir || sourceDir.value
+    matchResults.value = (result.items || []).map(versionItemToMatchResult)
+    selectedFiles.value = selectedDeployableFileNames(matchResults.value)
+    await nextTick()
+    for (const row of matchResults.value) {
+      if (isDeployableMatch(row)) {
+        matchTableRef.value?.toggleRowSelection(row, true)
+      }
+    }
+    if (selectedFiles.value.length === 0) {
+      ElMessage.warning('当前版本没有可部署制品')
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+function versionItemToMatchResult(item: ArtifactVersionItem): MatchResult {
+  return {
+    fileName: item.fileName,
+    appName: item.appName,
+    appType: item.appType,
+    appId: item.appId,
+    matched: item.matchStatus === 'matched',
+    valid: item.validateStatus === 'valid',
+    skipped: item.matchStatus === 'skipped',
+    matchReason: item.statusReason,
+  }
+}
+
+function sourceTypeText(type: string) {
+  if (type === 'upload') return '本地上传'
+  if (type === 'download') return '服务器下载'
+  if (type === 'artifact') return '制品库选择'
+  return type || '-'
+}
+
+function resultStatus(result: MatchResult) {
+  if (result.skipped) return { type: 'info', text: '忽略' }
+  if (!result.valid) return { type: 'danger', text: '不可读' }
+  if (!result.matched) return { type: 'warning', text: '未匹配' }
+  return { type: 'success', text: '可部署' }
+}
+
+function resetSelection() {
+  currentVersion.value = null
   batchId.value = ''
-  namespace.value = settingsStore.k8sNamespace
+  sourceDir.value = ''
+  sourceType.value = ''
+  matchResults.value = []
+  selectedFiles.value = []
+  router.replace('/batch-deploy')
+}
+
+async function executeDeploy() {
+  if (deployableResults.value.length === 0) {
+    ElMessage.warning('没有可部署制品')
+    return
+  }
+  const items = deployableResults.value.map(result => ({ fileName: result.fileName, appId: result.appId }))
+  executing.value = true
+  try {
+    const result = await executeBatchDeploy(sourceDir.value, items, namespace.value.trim(), batchId.value, deployMode.value)
+    const errors = result.errors || []
+    if (errors.length > 0) {
+      ElMessage.warning(`已创建 ${result.pipelines?.length || 0} 个任务，${errors.length} 个失败`)
+    } else {
+      ElMessage.success(`已创建 ${result.pipelines?.length || 0} 个构建任务`)
+    }
+    router.push(deployMode.value === 'cutover' ? '/build-queue' : '/release')
+  } finally {
+    executing.value = false
+  }
 }
 </script>
 
 <template>
   <div class="batch-deploy-page">
     <div class="page-header">
-      <h4 class="page-title">批量部署</h4>
-      <el-button v-if="step === 2" size="small" @click="handleReset">重新选择</el-button>
+      <div>
+        <h4>批量部署</h4>
+        <p>从已导入的更新版本创建构建任务；制品上传和服务器下载在制品管理中处理。</p>
+      </div>
+      <el-button @click="router.push('/artifacts/import')">进入制品管理</el-button>
     </div>
 
-    <!-- Step 1: Upload -->
-    <div v-if="step === 1" class="content-card">
-      <div class="step-title">选择制品来源</div>
-      <el-radio-group v-model="sourceType" style="margin-bottom: 16px;">
-        <el-radio value="upload">本地上传</el-radio>
-        <el-radio value="local">服务器目录</el-radio>
-      </el-radio-group>
-
-      <div v-if="sourceType === 'upload'" class="upload-area">
-        <label class="upload-zone">
-          <div class="upload-icon"><el-icon :size="40"><Upload /></el-icon></div>
-          <div class="upload-text">点击或拖拽上传制品文件</div>
-          <div class="upload-hint">支持 .jar / .zip 文件，可多选</div>
-          <input type="file" multiple accept=".jar,.zip" style="display: none;" @change="handleUpload" />
-        </label>
-      </div>
-
-      <div v-if="sourceType === 'local'" class="local-dir-area">
-        <div style="display: flex; gap: 8px;">
-          <el-input v-model="localPath" placeholder="批量上传工作区内的制品目录路径" style="flex: 1;" />
-          <el-button type="primary" :loading="loading" @click="handleLoadLocalDir">读取目录</el-button>
+    <el-card v-if="!hasVersion" shadow="never" class="table-card" v-loading="loading">
+      <template #header>
+        <div class="table-header">
+          <div>
+            <strong>选择更新版本</strong>
+            <span>{{ readyVersions.length }} 个可部署版本</span>
+          </div>
+          <el-button :loading="loading" @click="loadVersions">刷新</el-button>
         </div>
-        <div class="dir-hint">仅允许读取 df-build-server 工作区 workspaces/batch-upload 下的目录</div>
-      </div>
-    </div>
-
-    <!-- Step 2: Match Results -->
-    <div v-if="step === 2" class="content-card">
-      <div class="step-title">
-        匹配结果
-        <el-tag type="success" size="small" style="margin-left: 8px;">{{ matchedCount }} 个匹配成功</el-tag>
-        <el-tag v-if="matchResults.length - matchedCount > 0" type="danger" size="small" style="margin-left: 4px;">
-          {{ matchResults.length - matchedCount }} 个未匹配
-        </el-tag>
-      </div>
-
-      <el-table :data="matchResults" stripe size="small" border>
-        <el-table-column label="文件名" min-width="200" prop="fileName" />
-        <el-table-column label="匹配应用" width="180">
+      </template>
+      <el-table :data="readyVersions" border stripe height="620" table-layout="auto">
+        <el-table-column prop="versionNo" label="版本号" min-width="210" show-overflow-tooltip />
+        <el-table-column label="来源" width="110">
+          <template #default="{ row }">{{ sourceTypeText(row.sourceType) }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <span v-if="row.matched" style="color: #67c23a;">{{ row.appName }}</span>
-            <span v-else style="color: #f56c6c;">—</span>
+            <el-tag :type="versionStatusType(row)" size="small">{{ versionStatusText(row) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="类型" width="80">
+        <el-table-column prop="count" label="制品数" width="86" />
+        <el-table-column prop="deployableCount" label="可部署" width="86" />
+        <el-table-column prop="invalidCount" label="不可读" width="86" />
+        <el-table-column prop="unmatchedCount" label="未匹配" width="86" />
+        <el-table-column label="本机目录" min-width="260" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.targetPath || row.localDir || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="更新时间" width="170">
+          <template #default="{ row }">{{ row.updatedAt ? new Date(row.updatedAt).toLocaleString() : '-' }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="96" fixed="right">
           <template #default="{ row }">
-            <el-tag v-if="row.matched" :type="row.appType === 'java' ? 'danger' : 'success'" size="small">{{ row.appType }}</el-tag>
+            <el-button link type="primary" @click="selectVersion(row)">选择</el-button>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="120">
-          <template #default="{ row }">
-            <el-tag v-if="!row.valid" type="danger" size="small">文件异常</el-tag>
-            <el-tag v-else-if="row.matched" type="success" size="small">匹配成功</el-tag>
-            <el-tag v-else type="warning" size="small">未匹配</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="说明" min-width="200" prop="matchReason" />
       </el-table>
+    </el-card>
+
+    <template v-else>
+      <el-card shadow="never" class="selected-card">
+        <div class="selected-grid">
+          <div><span>版本号</span><strong>{{ batchId || '-' }}</strong></div>
+          <div><span>来源</span><strong>{{ sourceTypeText(sourceType) }}</strong></div>
+          <div><span>可部署</span><strong>{{ matchedCount }}</strong></div>
+          <div><span>异常</span><strong>{{ invalidCount + unmatchedCount }}</strong></div>
+          <div class="path-cell"><span>目录</span><strong>{{ sourceDir || '-' }}</strong></div>
+        </div>
+        <el-button @click="resetSelection">更换版本</el-button>
+      </el-card>
+
+      <el-card shadow="never" class="table-card" v-loading="loading">
+        <template #header>
+          <div class="table-header">
+            <div>
+              <strong>应用匹配</strong>
+              <span>默认勾选可部署制品；不可读、未匹配和 SQL 包不会进入部署。</span>
+            </div>
+            <div class="status-tags">
+              <el-tag type="success">可部署 {{ matchedCount }}</el-tag>
+              <el-tag type="danger">不可读 {{ invalidCount }}</el-tag>
+              <el-tag type="warning">未匹配 {{ unmatchedCount }}</el-tag>
+              <el-tag type="info">忽略 {{ skippedCount }}</el-tag>
+            </div>
+          </div>
+        </template>
+        <el-table
+          ref="matchTableRef"
+          :data="matchResults"
+          border
+          stripe
+          height="520"
+          table-layout="auto"
+          @selection-change="(rows: MatchResult[]) => selectedFiles = rows.map(row => row.fileName)"
+        >
+          <el-table-column type="selection" width="46" :selectable="isDeployableMatch" />
+          <el-table-column prop="fileName" label="制品文件" min-width="210" show-overflow-tooltip />
+          <el-table-column prop="appName" label="匹配应用" min-width="150" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.appName || '-' }}</template>
+          </el-table-column>
+          <el-table-column prop="appType" label="类型" width="90">
+            <template #default="{ row }">{{ row.appType || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="resultStatus(row).type" size="small">{{ resultStatus(row).text }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="matchReason" label="说明" min-width="230" show-overflow-tooltip />
+        </el-table>
+      </el-card>
 
       <div class="action-bar">
-        <el-input v-model="namespace" placeholder="K8s Namespace（留空使用默认）" class="namespace-input" />
-        <el-button type="primary" size="large" :loading="loading" :disabled="matchedCount === 0" @click="handleExecute">
-          <el-icon style="margin-right: 4px;"><VideoPlay /></el-icon>
-          开始构建镜像 ({{ matchedCount }} 个应用)
+        <div class="deploy-options">
+          <el-input v-model="namespace" placeholder="Namespace" class="namespace-input" />
+          <el-segmented v-model="deployMode" :options="[
+            { label: '立即部署', value: 'immediate' },
+            { label: '卡点部署', value: 'cutover' },
+          ]" />
+          <span>{{ deployMode === 'cutover' ? '只构建并推送镜像，维护窗口再更新 Deployment。' : '镜像构建成功后自动更新 Deployment。' }}</span>
+        </div>
+        <el-button type="primary" :disabled="deployableResults.length === 0" :loading="executing" @click="executeDeploy">
+          创建 {{ deployableResults.length }} 个构建任务
         </el-button>
       </div>
-    </div>
+    </template>
   </div>
 </template>
 
 <style scoped>
 .batch-deploy-page { display: flex; flex-direction: column; gap: 12px; }
-.page-header { display: flex; align-items: center; justify-content: space-between; }
-.page-title { font-size: 15px; font-weight: 600; color: #303133; margin: 0; }
-.content-card { background: #fff; border-radius: 8px; border: 1px solid #ebeef5; padding: 24px; }
-.step-title { font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 16px; }
-
-.upload-area { display: flex; justify-content: center; }
-.upload-zone {
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  width: 100%; max-width: 500px; height: 200px;
-  border: 2px dashed #dcdfe6; border-radius: 8px; cursor: pointer;
-  transition: all 0.2s;
+.page-header,
+.selected-card,
+.table-card,
+.action-bar {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
 }
-.upload-zone:hover { border-color: #409eff; background: #f5f7fa; }
-.upload-icon { color: #c0c4cc; margin-bottom: 8px; }
-.upload-text { font-size: 14px; color: #606266; }
-.upload-hint { font-size: 12px; color: #909399; margin-top: 4px; }
-
-.local-dir-area { max-width: 600px; }
-.dir-hint { font-size: 12px; color: #909399; margin-top: 8px; }
-
-.action-bar { margin-top: 20px; display: flex; justify-content: center; gap: 12px; align-items: center; }
-.namespace-input { width: 240px; }
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px;
+}
+.page-header h4 { margin: 0 0 6px; font-size: 16px; color: #1f2937; }
+.page-header p { margin: 0; color: #8a9099; }
+.table-card { border-radius: 4px; }
+.table-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.table-header strong { display: block; color: #1f2937; margin-bottom: 4px; }
+.table-header span { color: #8a9099; }
+.status-tags { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.selected-card :deep(.el-card__body) {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.selected-grid {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 220px 120px 90px 90px minmax(260px, 1fr);
+  gap: 8px;
+}
+.selected-grid > div {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #e5e7eb;
+  background: #f8fafc;
+}
+.selected-grid span {
+  display: block;
+  font-size: 12px;
+  color: #8a9099;
+  margin-bottom: 4px;
+}
+.selected-grid strong {
+  display: block;
+  color: #1f2937;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.action-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  box-shadow: 0 -6px 18px rgba(15, 23, 42, 0.05);
+}
+.deploy-options {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #606266;
+}
+.namespace-input { width: 180px; }
+@media (max-width: 1280px) {
+  .selected-grid { grid-template-columns: 1fr 1fr; }
+  .path-cell { grid-column: 1 / -1; }
+  .action-bar,
+  .deploy-options { align-items: stretch; flex-direction: column; }
+  .namespace-input { width: 100%; }
+}
 </style>

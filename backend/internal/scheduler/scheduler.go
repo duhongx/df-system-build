@@ -15,6 +15,7 @@ import (
 	"df-build-server/internal/pipeline"
 	"df-build-server/internal/pipeline/types"
 	"df-build-server/internal/repository"
+	"df-build-server/internal/service"
 	"df-build-server/pkg/logger"
 	"df-build-server/pkg/sse"
 )
@@ -199,11 +200,12 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 			// Cancel any existing IMAGE_READY pipelines for the same app (keep only latest)
 			s.pipelineRepo.CancelOldImageReady(p.ApplicationID, p.ID)
 
-			p.Status = "IMAGE_READY"
-			p.EndTime = nil
-			p.DurationSeconds = nil
-			s.pipelineRepo.Update(p)
-			sse.DefaultHub.Publish(pipelineID, sse.Event{Type: "image_ready", Data: "镜像已就绪，等待确认部署"})
+				p.Status = "IMAGE_READY"
+				p.EndTime = nil
+				p.DurationSeconds = nil
+				s.pipelineRepo.Update(p)
+				service.MarkPipelineImageReady(p.ID, p.ImageName)
+				sse.DefaultHub.Publish(pipelineID, sse.Event{Type: "image_ready", Data: "镜像已就绪，等待确认部署"})
 			// Create notification
 			notifyRepo := repository.NewNotificationMsgRepo()
 			notifyRepo.Create(&model.NotificationMsg{
@@ -218,10 +220,11 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 		if latest != nil && latest.Status == "CANCELED" {
 			p.Status = "CANCELED"
 			p.ErrorMessage = "构建已取消"
-		} else {
-			p.Status = "FAILED"
-			p.ErrorMessage = execErr.Error()
-		}
+			} else {
+				p.Status = "FAILED"
+				p.ErrorMessage = execErr.Error()
+				service.MarkPipelineFailed(p.ID, p.ErrorMessage)
+			}
 	} else {
 		p.Status = "SUCCESS"
 	}

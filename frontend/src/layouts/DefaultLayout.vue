@@ -15,7 +15,10 @@ const route = useRoute()
 const router = useRouter()
 const isCollapsed = ref(false)
 
-const activeMenu = computed(() => route.path)
+const activeMenu = computed(() => {
+  if (route.path.startsWith('/artifacts/versions/')) return '/artifacts/versions'
+  return route.path
+})
 
 const toggleCollapse = () => {
   isCollapsed.value = !isCollapsed.value
@@ -270,11 +273,9 @@ async function handleSavePassword() {
   <div class="layout-wrapper">
     <!-- Sidebar -->
     <aside class="sidebar" :style="{ width: sidebarWidth }">
-      <div class="sidebar-logo">
-        <img src="/logo.svg" alt="logo" class="logo-img" />
-        <transition name="fade">
-          <span v-show="!isCollapsed" class="logo-text">DF 构建平台</span>
-        </transition>
+      <div class="sidebar-logo" :class="{ collapsed: isCollapsed }">
+        <img v-if="isCollapsed" src="/logo.svg" alt="CloudHIS" class="logo-icon" />
+        <img v-else src="/brand-logo.svg" alt="CloudHIS智能管理平台" class="brand-logo-img" />
       </div>
 
       <el-menu
@@ -319,10 +320,15 @@ async function handleSavePassword() {
           <el-menu-item index="/release">构建历史</el-menu-item>
         </el-sub-menu>
 
-        <el-menu-item index="/artifacts">
-          <el-icon><Box /></el-icon>
-          <template #title>制品记录</template>
-        </el-menu-item>
+        <el-sub-menu index="artifact-center">
+          <template #title>
+            <el-icon><Box /></el-icon>
+            <span>制品管理</span>
+          </template>
+          <el-menu-item index="/artifacts/import">制品导入</el-menu-item>
+          <el-menu-item index="/artifacts/versions">更新版本</el-menu-item>
+          <el-menu-item index="/artifacts/latest">最新制品库</el-menu-item>
+        </el-sub-menu>
 
         <el-sub-menu index="postgresql-center">
           <template #title>
@@ -558,23 +564,27 @@ async function handleSavePassword() {
   height: 48px;
   display: flex;
   align-items: center;
-  padding: 0 16px;
+  padding: 0 12px;
   border-bottom: 1px solid #f0f0f0;
   overflow: hidden;
 }
 
-.logo-img {
-  width: 22px;
-  height: 22px;
+.sidebar-logo.collapsed {
+  justify-content: center;
+  padding: 0;
+}
+
+.logo-icon {
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
 }
 
-.logo-text {
-  font-size: 14px;
-  font-weight: 700;
-  color: #303133;
-  margin-left: 10px;
-  white-space: nowrap;
+.brand-logo-img {
+  width: 144px;
+  height: 40px;
+  display: block;
+  flex-shrink: 0;
 }
 
 .sidebar-menu {

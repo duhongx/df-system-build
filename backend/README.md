@@ -1,4 +1,4 @@
-# DF 构建平台 - 后端
+# CloudHIS智能管理平台 - 后端
 
 Go 1.22 + Gin + GORM。详见[项目根 README](../README.md)。
 

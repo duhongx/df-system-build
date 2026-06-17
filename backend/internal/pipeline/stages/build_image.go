@@ -16,7 +16,10 @@ import (
 	"df-build-server/internal/repository"
 	"df-build-server/pkg/logger"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/remotecommand"
 )
 
@@ -180,28 +183,14 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 		// Updating web-main: preserve apps/, replace everything else
 		if podCopied {
 			pCtx.OnLog(pCtx.PipelineID, 0, "更新主应用: 保留 apps/ 目录，替换其他文件", "stdout")
-			// Save apps directory
-			appsDir := filepath.Join(htmlDir, "apps")
-			appsTmp := filepath.Join(dockerDir, "apps-backup")
-			if _, err := os.Stat(appsDir); err == nil {
-				os.Rename(appsDir, appsTmp)
-			}
-			// Clear html dir and extract new main
-			os.RemoveAll(htmlDir)
-			os.MkdirAll(htmlDir, 0755)
-			if err := s.extractZip(pCtx, filepath.Join(sourceDir, pCtx.ArtifactName), htmlDir); err != nil {
+			if err := replaceWebMainPackagePreservingApps(pCtx, filepath.Join(sourceDir, pCtx.ArtifactName), htmlDir, dockerDir); err != nil {
 				return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
 			}
-			// Restore apps
-			if _, err := os.Stat(appsTmp); err == nil {
-				os.Rename(appsTmp, filepath.Join(htmlDir, "apps"))
-				pCtx.OnLog(pCtx.PipelineID, 0, "apps/ 目录已恢复", "stdout")
-			}
+			s.bundleSubApps(pCtx, sourceDir, htmlDir)
 		} else {
 			// First deploy or pod not found: extract main + bundle sub-apps from source dir
 			pCtx.OnLog(pCtx.PipelineID, 0, "首次部署或 Pod 不存在，解压主应用", "stdout")
-			os.MkdirAll(htmlDir, 0755)
-			if err := s.extractZip(pCtx, filepath.Join(sourceDir, pCtx.ArtifactName), htmlDir); err != nil {
+			if err := replaceWebMainPackagePreservingApps(pCtx, filepath.Join(sourceDir, pCtx.ArtifactName), htmlDir, dockerDir); err != nil {
 				return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
 			}
 
@@ -209,7 +198,7 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 			s.bundleSubApps(pCtx, sourceDir, htmlDir)
 		}
 	} else if pCtx.VueRole == "sub" {
-		// Updating a sub-app: replace only apps/{appCode}/
+		// Updating sub-apps: replace apps/{appCode}/ for every sub-app zip in this batch.
 		appCode := pCtx.AppCode
 		if appCode == "" {
 			errMsg := "子应用 appCode 为空，无法确定目标目录"
@@ -218,14 +207,11 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 		}
 
 		if podCopied {
-			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("更新子应用: 清理 apps/%s/ 并替换", appCode), "stdout")
-			// Clear the sub-app directory
-			subAppDir := filepath.Join(htmlDir, "apps", appCode)
-			os.RemoveAll(subAppDir)
-			os.MkdirAll(subAppDir, 0755)
-			// Extract sub-app zip into apps/{appCode}/
-			if err := s.extractZip(pCtx, filepath.Join(sourceDir, pCtx.ArtifactName), subAppDir); err != nil {
-				return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+			pCtx.OnLog(pCtx.PipelineID, 0, "更新子应用: 合并本批次子应用到 apps/ 目录", "stdout")
+			if bundled := s.bundleSubApps(pCtx, sourceDir, htmlDir); bundled == 0 {
+				errMsg := "未找到可合并的子应用 zip"
+				pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
+				return &types.StageResult{ExitCode: 1, Error: errMsg}, fmt.Errorf("%s", errMsg)
 			}
 		} else {
 			// Pod doesn't exist - can't update sub-app without existing html
@@ -260,16 +246,31 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 		return false
 	}
 
-	// Find web-main pod
-	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app=web-main",
-	})
-	if err != nil || len(pods.Items) == 0 {
-		pCtx.OnLog(pCtx.PipelineID, 0, "未找到 web-main Pod (可能是首次部署)", "stdout")
+	deployment, err := cs.AppsV1().Deployments(namespace).Get(ctx, "web-main", metav1.GetOptions{})
+	if err != nil {
+		pCtx.OnLog(pCtx.PipelineID, 0, "未找到 web-main Deployment (可能是首次部署)", "stdout")
 		return false
 	}
 
-	podName := pods.Items[0].Name
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("web-main Deployment selector 无效: %v", err), "stderr")
+		return false
+	}
+
+	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil || len(pods.Items) == 0 {
+		pCtx.OnLog(pCtx.PipelineID, 0, "未找到 web-main Ready Pod (可能是首次部署)", "stdout")
+		return false
+	}
+
+	pod, ok := selectReadyPodForDeployment(deployment, pods.Items)
+	if !ok {
+		pCtx.OnLog(pCtx.PipelineID, 0, "未找到 web-main Ready Pod", "stdout")
+		return false
+	}
+
+	podName := pod.Name
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("找到 Pod: %s", podName), "stdout")
 
 	// Use exec to run tar inside the pod and pipe to local
@@ -291,8 +292,8 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 		Param("command", "cf").
 		Param("command", "-").
 		Param("command", "-C").
-		Param("command", "/usr/share/nginx").
-		Param("command", "html").
+		Param("command", "/usr/share/nginx/html").
+		Param("command", ".").
 		Param("stdout", "true").
 		Param("stderr", "true")
 
@@ -325,9 +326,53 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 	return true
 }
 
+func selectReadyPodForDeployment(deployment *appsv1.Deployment, pods []corev1.Pod) (*corev1.Pod, bool) {
+	if deployment == nil || deployment.Spec.Selector == nil {
+		return nil, false
+	}
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		return nil, false
+	}
+
+	var selected *corev1.Pod
+	for i := range pods {
+		pod := &pods[i]
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		if !selector.Matches(labelsSet(pod.Labels)) {
+			continue
+		}
+		if !isPodReady(pod) {
+			continue
+		}
+		if selected == nil || pod.CreationTimestamp.After(selected.CreationTimestamp.Time) {
+			selected = pod
+		}
+	}
+	return selected, selected != nil
+}
+
+func labelsSet(podLabels map[string]string) labels.Set {
+	if podLabels == nil {
+		return labels.Set{}
+	}
+	return labels.Set(podLabels)
+}
+
+func isPodReady(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
 // extractZip extracts a zip file to a target directory using Go standard library
 func (s *BuildImageStage) extractZip(pCtx *types.PipelineContext, zipPath, targetDir string) error {
-	if err := Unzip(zipPath, targetDir); err != nil {
+	if err := extractWebZip(pCtx, zipPath, targetDir); err != nil {
 		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("解压失败: %v", err), "stderr")
 		return fmt.Errorf("解压 %s 失败: %v", filepath.Base(zipPath), err)
 	}
@@ -337,7 +382,7 @@ func (s *BuildImageStage) extractZip(pCtx *types.PipelineContext, zipPath, targe
 
 // bundleSubApps looks for sub-app zip files in sourceDir and extracts them into html/apps/{appCode}/
 // This is used during first deploy when web-main.zip and sub-app zips are uploaded together.
-func (s *BuildImageStage) bundleSubApps(pCtx *types.PipelineContext, sourceDir, htmlDir string) {
+func (s *BuildImageStage) bundleSubApps(pCtx *types.PipelineContext, sourceDir, htmlDir string) int {
 	// Load all sub-apps from database
 	appRepo := repository.NewApplicationRepo()
 	apps, _, _ := appRepo.List(repository.AppListParams{PageSize: 1000, AppType: "vue"})
@@ -358,8 +403,7 @@ func (s *BuildImageStage) bundleSubApps(pCtx *types.PipelineContext, sourceDir, 
 
 		// Extract to html/apps/{appCode}/
 		subDir := filepath.Join(appsDir, app.AppCode)
-		os.MkdirAll(subDir, 0755)
-		if err := Unzip(zipPath, subDir); err != nil {
+		if err := replaceWebZip(pCtx, zipPath, subDir); err != nil {
 			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("子应用 %s 解压失败: %v", app.AppCode, err), "stderr")
 			continue
 		}
@@ -370,6 +414,112 @@ func (s *BuildImageStage) bundleSubApps(pCtx *types.PipelineContext, sourceDir, 
 	if bundled > 0 {
 		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("共打包 %d 个子应用", bundled), "stdout")
 	}
+	return bundled
+}
+
+func replaceWebMainPackagePreservingApps(pCtx *types.PipelineContext, zipPath, htmlDir, dockerDir string) error {
+	appsDir := filepath.Join(htmlDir, "apps")
+	appsBackupDir := filepath.Join(dockerDir, "apps-backup")
+	if err := os.RemoveAll(appsBackupDir); err != nil {
+		return err
+	}
+
+	hasExistingApps := false
+	if info, err := os.Stat(appsDir); err == nil && info.IsDir() {
+		if err := os.MkdirAll(dockerDir, 0755); err != nil {
+			return err
+		}
+		if err := os.Rename(appsDir, appsBackupDir); err != nil {
+			return err
+		}
+		hasExistingApps = true
+	}
+
+	if err := replaceWebZip(pCtx, zipPath, htmlDir); err != nil {
+		if hasExistingApps {
+			_ = os.MkdirAll(htmlDir, 0755)
+			_ = os.Rename(appsBackupDir, appsDir)
+		}
+		return err
+	}
+
+	if hasExistingApps {
+		// The new web-main package must not keep any embedded apps/ directory.
+		// Existing apps are restored first, then this batch's sub-app zips replace
+		// their own apps/{appCode}/ directories.
+		if err := os.RemoveAll(appsDir); err != nil {
+			return err
+		}
+		if err := os.Rename(appsBackupDir, appsDir); err != nil {
+			return err
+		}
+		if pCtx != nil && pCtx.OnLog != nil {
+			pCtx.OnLog(pCtx.PipelineID, 0, "apps/ 目录已恢复", "stdout")
+		}
+	}
+
+	return nil
+}
+
+func replaceWebZip(pCtx *types.PipelineContext, zipPath, targetDir string) error {
+	return extractWebZip(pCtx, zipPath, targetDir)
+}
+
+func extractWebZip(_ *types.PipelineContext, zipPath, targetDir string) error {
+	parent := filepath.Dir(targetDir)
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return err
+	}
+	tmpDir, err := os.MkdirTemp(parent, ".webzip-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := Unzip(zipPath, tmpDir); err != nil {
+		return err
+	}
+
+	sourceDir := tmpDir
+	distDir := filepath.Join(tmpDir, "dist")
+	if info, err := os.Stat(distDir); err == nil && info.IsDir() {
+		sourceDir = distDir
+	}
+
+	if err := os.RemoveAll(targetDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return err
+	}
+	return copyDirContents(sourceDir, targetDir)
+}
+
+func copyDirContents(sourceDir, targetDir string) error {
+	return filepath.WalkDir(sourceDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		targetPath := filepath.Join(targetDir, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode())
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			return err
+		}
+		return copyFile(path, targetPath)
+	})
 }
 
 // copyScripts copies app.sh and delete_app.sh from config items
@@ -390,13 +540,13 @@ func (s *BuildImageStage) copyScripts(pCtx *types.PipelineContext, dockerDir, re
 				scriptName = "delete_app.sh"
 			}
 			scriptContent := renderTemplate(scriptItem.Content, map[string]string{
-				"registryUrl":     registryURL,
-				"appName":         pCtx.AppName,
-				"branch":          pCtx.GitBranch,
-				"artifactName":    pCtx.ArtifactName,
+				"registryUrl":      registryURL,
+				"appName":          pCtx.AppName,
+				"branch":           pCtx.GitBranch,
+				"artifactName":     pCtx.ArtifactName,
 				"skywalkingOapUrl": skywalkingOapUrl,
-				"nacosUser":       nacosUser,
-				"nacosPass":       nacosPass,
+				"nacosUser":        nacosUser,
+				"nacosPass":        nacosPass,
 			})
 			os.WriteFile(filepath.Join(dockerDir, scriptName), []byte(scriptContent), 0755)
 			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("脚本 %s 已生成", scriptName), "stdout")
