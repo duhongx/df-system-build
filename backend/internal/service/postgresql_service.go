@@ -24,6 +24,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type PostgreSQLService struct {
@@ -495,12 +496,18 @@ func (s *PostgreSQLService) ExportSQLViewDependencyPlan(id uint) (string, error)
 	if err != nil {
 		return "", err
 	}
+	if err := ensureSQLViewDependencyTaskHasPlan(*task, items); err != nil {
+		return "", err
+	}
 	return BuildSQLViewDependencyManualPlan(*task, items), nil
 }
 
 func (s *PostgreSQLService) ExportSQLViewDependencyRestorePlan(id uint) (string, error) {
 	task, items, err := s.GetSQLViewDependencyTask(id)
 	if err != nil {
+		return "", err
+	}
+	if err := ensureSQLViewDependencyTaskHasPlan(*task, items); err != nil {
 		return "", err
 	}
 	return BuildSQLViewDependencyRestorePlan(*task, items), nil
@@ -534,6 +541,10 @@ func (s *PostgreSQLService) PrecheckSQLViewDependencyTask(ctx context.Context, i
 		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", msg, username)
 		return nil, nil, errors.New(msg)
 	}
+	if err := s.validateCurrentViewDependencyBackup(precheckCtx, db, *task, items); err != nil {
+		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", err.Error(), username)
+		return nil, nil, err
+	}
 	msg := fmt.Sprintf("预检通过，依赖视图 %d 个；短锁执行将使用 lock_timeout=%s", len(items), task.LockTimeout)
 	updated, err := markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_PASSED", msg, username)
 	if err != nil {
@@ -543,22 +554,23 @@ func (s *PostgreSQLService) PrecheckSQLViewDependencyTask(ctx context.Context, i
 }
 
 func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id uint, username string) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
-	task, items, err := s.GetSQLViewDependencyTask(id)
+	task, items, err := s.markSQLViewDependencyTaskRunning(id, "EXECUTING", "开始短锁事务执行", username, ensureSQLViewDependencyTaskCanExecute)
 	if err != nil {
 		return nil, nil, err
-	}
-	if len(items) == 0 {
-		return nil, nil, fmt.Errorf("请先分析依赖并生成备份计划")
 	}
 	db, err := s.getDB()
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := markSQLViewDependencyTaskStatus(task.ID, "EXECUTING", "开始短锁事务执行", username); err != nil {
-		return nil, nil, err
+	if err := s.validateCurrentViewDependencyBackup(ctx, db, *task, items); err != nil {
+		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", err.Error(), username)
+		if saveErr != nil {
+			return nil, nil, saveErr
+		}
+		return updated, items, err
 	}
 	steps := BuildSQLViewDependencyTransactionalSteps(*task, items)
-	err = s.runSQLViewDependencyStepsOnDB(ctx, db, steps)
+	err = s.runSQLViewDependencyStepsOnDB(ctx, db, task.ID, steps)
 	if err != nil {
 		msg := "短锁事务执行失败，事务已回滚；如仍存在缺失视图，请使用恢复 SQL: " + err.Error()
 		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "FAILED", msg, username)
@@ -579,22 +591,16 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 }
 
 func (s *PostgreSQLService) RestoreSQLViewDependencyTask(ctx context.Context, id uint, username string) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
-	task, items, err := s.GetSQLViewDependencyTask(id)
+	task, items, err := s.markSQLViewDependencyTaskRunning(id, "RESTORING", "开始恢复视图", username, ensureSQLViewDependencyTaskHasPlan)
 	if err != nil {
 		return nil, nil, err
-	}
-	if len(items) == 0 {
-		return nil, nil, fmt.Errorf("没有可恢复的视图备份")
 	}
 	db, err := s.getDB()
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := markSQLViewDependencyTaskStatus(task.ID, "RESTORING", "开始恢复视图", username); err != nil {
-		return nil, nil, err
-	}
 	steps := BuildSQLViewDependencyRestoreTransactionalSteps(*task, items)
-	err = s.runSQLViewDependencyStepsOnDB(ctx, db, steps)
+	err = s.runSQLViewDependencyStepsOnDB(ctx, db, task.ID, steps)
 	if err != nil {
 		msg := "恢复视图失败，请导出恢复 SQL 人工处理: " + err.Error()
 		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "RESTORE_FAILED", msg, username)
@@ -620,13 +626,168 @@ func (e sqlConnViewDependencyExecutor) Exec(sqlText string) error {
 	return err
 }
 
-func (s *PostgreSQLService) runSQLViewDependencyStepsOnDB(ctx context.Context, db *sql.DB, steps []string) error {
+func (s *PostgreSQLService) runSQLViewDependencyStepsOnDB(ctx context.Context, db *sql.DB, taskID uint, steps []string) error {
+	stepModels, err := replaceSQLViewDependencySteps(taskID, steps)
+	if err != nil {
+		return err
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	return runSQLViewDependencySteps(sqlConnViewDependencyExecutor{ctx: ctx, conn: conn}, steps)
+	executor := sqlConnViewDependencyExecutor{ctx: ctx, conn: conn}
+	inTx := false
+	for idx, step := range steps {
+		if idx < len(stepModels) {
+			_ = markSQLViewDependencyStepRunning(stepModels[idx].ID)
+		}
+		if err := executor.Exec(step); err != nil {
+			if idx < len(stepModels) {
+				_ = markSQLViewDependencyStepFinished(stepModels[idx].ID, "FAILED", err.Error())
+			}
+			if inTx {
+				_ = executor.Exec("ROLLBACK;")
+				_ = appendSQLViewDependencyRollbackStep(taskID)
+			}
+			return err
+		}
+		if idx < len(stepModels) {
+			_ = markSQLViewDependencyStepFinished(stepModels[idx].ID, "SUCCESS", "")
+		}
+		switch strings.ToUpper(strings.TrimSpace(step)) {
+		case "BEGIN;":
+			inTx = true
+		case "COMMIT;", "ROLLBACK;":
+			inTx = false
+		}
+	}
+	return nil
+}
+
+func (s *PostgreSQLService) validateCurrentViewDependencyBackup(ctx context.Context, db *sql.DB, task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) error {
+	current, err := s.loadViewDependencySnapshots(ctx, db, task.SchemaName, task.TableName, task.ColumnName)
+	if err != nil {
+		return err
+	}
+	return validateViewDependencyBackupFresh(items, current)
+}
+
+func (s *PostgreSQLService) markSQLViewDependencyTaskRunning(id uint, status, message, username string, validate func(model.SQLViewDependencyTask, []model.SQLViewDependencyItem) error) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
+	var task model.SQLViewDependencyTask
+	var items []model.SQLViewDependencyItem
+	err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("is_deleted = ?", false).First(&task, id).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("task_id = ?", id).Order("drop_order ASC, id ASC").Find(&items).Error; err != nil {
+			return err
+		}
+		if task.Status == "EXECUTING" || task.Status == "RESTORING" {
+			return fmt.Errorf("任务正在执行中，请勿重复提交")
+		}
+		if validate != nil {
+			if err := validate(task, items); err != nil {
+				return err
+			}
+		}
+		task.Status = status
+		task.ExecuteMessage = message
+		task.Operator = strings.TrimSpace(username)
+		return tx.Save(&task).Error
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return &task, items, nil
+}
+
+func replaceSQLViewDependencySteps(taskID uint, steps []string) ([]model.SQLViewDependencyStep, error) {
+	stepModels := make([]model.SQLViewDependencyStep, 0, len(steps))
+	err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("task_id = ?", taskID).Delete(&model.SQLViewDependencyStep{}).Error; err != nil {
+			return err
+		}
+		for idx, step := range steps {
+			stepModel := model.SQLViewDependencyStep{
+				TaskID:     taskID,
+				StepName:   inferSQLViewDependencyStepName(step),
+				StepOrder:  idx + 1,
+				SQLContent: step,
+				Status:     "PENDING",
+			}
+			if err := tx.Create(&stepModel).Error; err != nil {
+				return err
+			}
+			stepModels = append(stepModels, stepModel)
+		}
+		return nil
+	})
+	return stepModels, err
+}
+
+func inferSQLViewDependencyStepName(step string) string {
+	upper := strings.ToUpper(strings.TrimSpace(step))
+	switch {
+	case upper == "BEGIN;":
+		return "BEGIN"
+	case strings.HasPrefix(upper, "SET LOCAL "):
+		return "SET_LOCAL"
+	case strings.HasPrefix(upper, "DROP "):
+		return "DROP_DEPENDENCY"
+	case strings.HasPrefix(upper, "ALTER TABLE "):
+		return "ALTER_TABLE"
+	case strings.HasPrefix(upper, "CREATE "):
+		return "RESTORE_OBJECT"
+	case strings.HasPrefix(upper, "REFRESH MATERIALIZED VIEW "):
+		return "REFRESH_MATERIALIZED_VIEW"
+	case strings.HasPrefix(upper, "COMMENT ON "):
+		return "RESTORE_COMMENT"
+	case strings.HasPrefix(upper, "GRANT "):
+		return "RESTORE_GRANT"
+	case strings.HasPrefix(upper, "DO $$"):
+		return "VERIFY"
+	case upper == "COMMIT;":
+		return "COMMIT"
+	case upper == "ROLLBACK;":
+		return "ROLLBACK"
+	default:
+		return "SQL"
+	}
+}
+
+func markSQLViewDependencyStepRunning(id uint) error {
+	now := time.Now()
+	return repository.DB.Model(&model.SQLViewDependencyStep{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"status":        "RUNNING",
+		"started_at":    &now,
+		"error_message": "",
+	}).Error
+}
+
+func markSQLViewDependencyStepFinished(id uint, status, message string) error {
+	now := time.Now()
+	return repository.DB.Model(&model.SQLViewDependencyStep{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"status":        status,
+		"finished_at":   &now,
+		"error_message": message,
+	}).Error
+}
+
+func appendSQLViewDependencyRollbackStep(taskID uint) error {
+	now := time.Now()
+	var maxOrder int
+	_ = repository.DB.Model(&model.SQLViewDependencyStep{}).Where("task_id = ?", taskID).Select("COALESCE(MAX(step_order), 0)").Scan(&maxOrder).Error
+	return repository.DB.Create(&model.SQLViewDependencyStep{
+		TaskID:       taskID,
+		StepName:     "ROLLBACK",
+		StepOrder:    maxOrder + 1,
+		SQLContent:   "ROLLBACK;",
+		Status:       "SUCCESS",
+		StartedAt:    &now,
+		FinishedAt:   &now,
+		ErrorMessage: "",
+	}).Error
 }
 
 func markSQLViewDependencyTaskStatus(id uint, status, message, username string) (*model.SQLViewDependencyTask, error) {
@@ -748,6 +909,14 @@ ORDER BY max(t.depth) DESC, t.object_schema, t.object_name`, schemaName, tableNa
 		if err != nil {
 			return nil, err
 		}
+		ruleSQL, err := loadViewRuleSQL(ctx, db, row.schema, row.name)
+		if err != nil {
+			return nil, err
+		}
+		triggerSQL, err := loadViewTriggerSQL(ctx, db, row.schema, row.name)
+		if err != nil {
+			return nil, err
+		}
 		additionalSQL, optionsJSON := buildViewOptionsBackupSQL(row.schema, row.name, row.kind, row.reloptions)
 		snapshots = append(snapshots, viewDependencySnapshot{
 			Schema:        row.schema,
@@ -759,6 +928,8 @@ ORDER BY max(t.depth) DESC, t.object_schema, t.object_name`, schemaName, tableNa
 			GrantSQL:      grantSQL,
 			CommentSQL:    commentSQL,
 			IndexSQL:      indexSQL,
+			RuleSQL:       ruleSQL,
+			TriggerSQL:    triggerSQL,
 			OptionsJSON:   optionsJSON,
 			DropOrder:     idx + 1,
 			RestoreOrder:  total - idx,
@@ -856,6 +1027,54 @@ ORDER BY indexname`, schemaName, viewName)
 		indexes = append(indexes, ensureSQLSemicolon(indexSQL))
 	}
 	return indexes, rows.Err()
+}
+
+func loadViewRuleSQL(ctx context.Context, db *sql.DB, schemaName, viewName string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT definition
+FROM pg_rules
+WHERE schemaname = $1
+  AND tablename = $2
+  AND rulename <> '_RETURN'
+ORDER BY rulename`, schemaName, viewName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rules []string
+	for rows.Next() {
+		var ruleSQL string
+		if err := rows.Scan(&ruleSQL); err != nil {
+			return nil, err
+		}
+		rules = append(rules, ensureSQLSemicolon(ruleSQL))
+	}
+	return rules, rows.Err()
+}
+
+func loadViewTriggerSQL(ctx context.Context, db *sql.DB, schemaName, viewName string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT pg_get_triggerdef(t.oid, true)
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1
+  AND c.relname = $2
+  AND NOT t.tgisinternal
+ORDER BY t.tgname`, schemaName, viewName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var triggers []string
+	for rows.Next() {
+		var triggerSQL string
+		if err := rows.Scan(&triggerSQL); err != nil {
+			return nil, err
+		}
+		triggers = append(triggers, ensureSQLSemicolon(triggerSQL))
+	}
+	return triggers, rows.Err()
 }
 
 func buildViewOptionsBackupSQL(schemaName, viewName, kind, reloptions string) ([]string, string) {

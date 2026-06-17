@@ -51,6 +51,14 @@ func TestValidateViewDependencyAlterSQLRejectsUnsafeSQL(t *testing.T) {
 			name: "not alter column type",
 			req:  SQLViewDependencyTaskRequest{SchemaName: "his", TableName: "patient", ColumnName: "code", AlterSQL: "ALTER TABLE his.patient ADD COLUMN memo text;"},
 		},
+		{
+			name: "compound alter drops another column",
+			req:  SQLViewDependencyTaskRequest{SchemaName: "his", TableName: "patient", ColumnName: "code", AlterSQL: "ALTER TABLE his.patient ALTER COLUMN code TYPE text, DROP COLUMN name;"},
+		},
+		{
+			name: "compound alter changes another column",
+			req:  SQLViewDependencyTaskRequest{SchemaName: "his", TableName: "patient", ColumnName: "code", AlterSQL: "ALTER TABLE his.patient ALTER COLUMN code TYPE text, ALTER COLUMN name TYPE text;"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -85,6 +93,25 @@ func TestCreateSQLViewDependencyTaskPersistsValidatedTask(t *testing.T) {
 	}
 	if got.SchemaName != "his" || got.TableName != "patient" || got.ColumnName != "code" {
 		t.Fatalf("unexpected persisted task: %+v", got)
+	}
+}
+
+func TestExportSQLViewDependencyPlanRequiresAnalyzedItems(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	svc := NewPostgreSQLService()
+
+	task, err := svc.CreateSQLViewDependencyTask(SQLViewDependencyTaskRequest{
+		SchemaName: "his",
+		TableName:  "patient",
+		ColumnName: "code",
+		AlterSQL:   "ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(64);",
+	}, "tester")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	if _, err := svc.ExportSQLViewDependencyPlan(task.ID); err == nil {
+		t.Fatalf("expected export to require dependency analysis")
 	}
 }
 
@@ -161,6 +188,8 @@ func TestBuildSQLViewDependencyItemFromSnapshotPreservesBackupSQL(t *testing.T) 
 		GrantSQL:      []string{`GRANT SELECT ON "his"."v_patient" TO "app";`},
 		CommentSQL:    []string{`COMMENT ON VIEW "his"."v_patient" IS 'patient view';`},
 		IndexSQL:      []string{`CREATE INDEX idx_v_patient_code ON his.v_patient(code);`},
+		RuleSQL:       []string{`CREATE RULE v_patient_log AS ON UPDATE TO "his"."v_patient" DO ALSO NOTIFY patient_changed;`},
+		TriggerSQL:    []string{`CREATE TRIGGER v_patient_instead_update INSTEAD OF UPDATE ON "his"."v_patient" FOR EACH ROW EXECUTE FUNCTION his.sync_patient();`},
 		OptionsJSON:   `{"security_barrier":true}`,
 		DropOrder:     2,
 		RestoreOrder:  1,
@@ -192,14 +221,85 @@ func TestBuildSQLViewDependencyItemFromSnapshotPreservesBackupSQL(t *testing.T) 
 	if !strings.Contains(item.IndexesJSON, "idx_v_patient_code") {
 		t.Fatalf("missing index backup JSON: %s", item.IndexesJSON)
 	}
+	if !strings.Contains(item.RulesJSON, "v_patient_log") {
+		t.Fatalf("missing rule backup JSON: %s", item.RulesJSON)
+	}
+	if !strings.Contains(item.TriggersJSON, "v_patient_instead_update") {
+		t.Fatalf("missing trigger backup JSON: %s", item.TriggersJSON)
+	}
+	if !strings.Contains(item.RestoreRulesSQL, "CREATE RULE v_patient_log") {
+		t.Fatalf("missing rule restore SQL: %s", item.RestoreRulesSQL)
+	}
+	if !strings.Contains(item.RestoreTriggersSQL, "CREATE TRIGGER v_patient_instead_update") {
+		t.Fatalf("missing trigger restore SQL: %s", item.RestoreTriggersSQL)
+	}
 	if item.OptionsJSON != `{"security_barrier":true}` {
 		t.Fatalf("missing options backup JSON: %s", item.OptionsJSON)
+	}
+	if item.BackupHash == "" {
+		t.Fatalf("expected backup hash")
 	}
 	if !strings.Contains(item.VerifySQL, `to_regclass('"his"."v_patient"')`) {
 		t.Fatalf("unexpected verify SQL: %s", item.VerifySQL)
 	}
 	if !strings.Contains(item.VerifySQL, `RAISE EXCEPTION`) {
 		t.Fatalf("verify SQL must fail when restored object is missing: %s", item.VerifySQL)
+	}
+}
+
+func TestBuildSQLViewDependencyMaterializedItemRefreshesAfterCreate(t *testing.T) {
+	item := buildSQLViewDependencyItemFromSnapshot(42, viewDependencySnapshot{
+		Schema:       "his",
+		Name:         "mv_patient",
+		Kind:         "m",
+		Depth:        1,
+		Definition:   "SELECT code FROM his.patient",
+		DropOrder:    1,
+		RestoreOrder: 1,
+		Materialized: true,
+	})
+
+	if !strings.Contains(item.CreateSQL, "WITH NO DATA") {
+		t.Fatalf("expected materialized view to be created without data first: %s", item.CreateSQL)
+	}
+	if !strings.Contains(item.RestoreRefreshSQL, `REFRESH MATERIALIZED VIEW "his"."mv_patient";`) {
+		t.Fatalf("expected materialized view refresh SQL, got %s", item.RestoreRefreshSQL)
+	}
+
+	steps := BuildSQLViewDependencyTransactionalSteps(model.SQLViewDependencyTask{
+		AlterSQL: "ALTER TABLE his.patient ALTER COLUMN code TYPE text;",
+	}, []model.SQLViewDependencyItem{item})
+	joined := strings.Join(steps, "\n")
+	if strings.Index(joined, item.CreateSQL) > strings.Index(joined, item.RestoreRefreshSQL) {
+		t.Fatalf("materialized view refresh must run after create:\n%s", joined)
+	}
+}
+
+func TestValidateViewDependencyBackupFreshDetectsChangedDefinition(t *testing.T) {
+	item := buildSQLViewDependencyItemFromSnapshot(42, viewDependencySnapshot{
+		Schema:       "his",
+		Name:         "v_patient",
+		Kind:         "v",
+		Depth:        1,
+		Definition:   "SELECT code FROM his.patient",
+		DropOrder:    1,
+		RestoreOrder: 1,
+	})
+
+	err := validateViewDependencyBackupFresh([]model.SQLViewDependencyItem{item}, []viewDependencySnapshot{
+		{Schema: "his", Name: "v_patient", Kind: "v", Definition: "SELECT code, name FROM his.patient"},
+	})
+	if err == nil {
+		t.Fatalf("expected changed view definition to make backup stale")
+	}
+}
+
+func TestEnsureSQLViewDependencyTaskCanExecuteRequiresPrecheck(t *testing.T) {
+	if err := ensureSQLViewDependencyTaskCanExecute(model.SQLViewDependencyTask{Status: "ANALYZED"}, []model.SQLViewDependencyItem{{ID: 1}}); err == nil {
+		t.Fatalf("expected execution to require PRECHECK_PASSED")
+	}
+	if err := ensureSQLViewDependencyTaskCanExecute(model.SQLViewDependencyTask{Status: "PRECHECK_PASSED"}, []model.SQLViewDependencyItem{{ID: 1}}); err != nil {
+		t.Fatalf("expected prechecked task to execute: %v", err)
 	}
 }
 

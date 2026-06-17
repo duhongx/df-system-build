@@ -80,6 +80,19 @@ async function handleOpenTask(task: SQLViewDependencyTask) {
   }
 }
 
+async function refreshCurrentTask() {
+  if (!currentTask.value) return
+  const data = await getSQLViewDependencyTask(currentTask.value.id)
+  currentTask.value = data.task
+  items.value = data.items || []
+  await loadTasks()
+}
+
+function showOperationError(err: unknown) {
+  const message = err instanceof Error ? err.message : '操作失败'
+  ElMessage.error(message)
+}
+
 async function handleAnalyze() {
   if (!currentTask.value) {
     ElMessage.warning('请先创建或选择任务')
@@ -93,6 +106,9 @@ async function handleAnalyze() {
     planPreview.value = ''
     ElMessage.success(`分析完成，依赖视图 ${items.value.length} 个`)
     await loadTasks()
+  } catch (err) {
+    await refreshCurrentTask()
+    showOperationError(err)
   } finally {
     analyzing.value = false
   }
@@ -110,6 +126,9 @@ async function handlePrecheck() {
     items.value = data.items || []
     ElMessage.success(data.task.executeMessage || '预检通过')
     await loadTasks()
+  } catch (err) {
+    await refreshCurrentTask()
+    showOperationError(err)
   } finally {
     prechecking.value = false
   }
@@ -132,6 +151,9 @@ async function handleExecute() {
     items.value = data.items || []
     ElMessage.success(data.task.executeMessage || '执行完成')
     await loadTasks()
+  } catch (err) {
+    await refreshCurrentTask()
+    showOperationError(err)
   } finally {
     executing.value = false
   }
@@ -150,6 +172,9 @@ async function handleRestore() {
     items.value = data.items || []
     ElMessage.success(data.task.executeMessage || '恢复完成')
     await loadTasks()
+  } catch (err) {
+    await refreshCurrentTask()
+    showOperationError(err)
   } finally {
     restoring.value = false
   }

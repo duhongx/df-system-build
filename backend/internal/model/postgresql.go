@@ -106,13 +106,19 @@ type SQLViewDependencyItem struct {
 	GrantsJSON         string    `gorm:"type:text" json:"grantsJson"`
 	CommentsJSON       string    `gorm:"type:text" json:"commentsJson"`
 	IndexesJSON        string    `gorm:"type:text" json:"indexesJson"`
+	RulesJSON          string    `gorm:"type:text" json:"rulesJson"`
+	TriggersJSON       string    `gorm:"type:text" json:"triggersJson"`
 	OptionsJSON        string    `gorm:"type:text" json:"optionsJson"`
+	BackupHash         string    `gorm:"size:128;index" json:"backupHash"`
 	DropSQL            string    `gorm:"type:text" json:"dropSql"`
 	CreateSQL          string    `gorm:"type:text" json:"createSql"`
+	RestoreRefreshSQL  string    `gorm:"type:text" json:"restoreRefreshSql"`
 	RestoreOwnerSQL    string    `gorm:"type:text" json:"restoreOwnerSql"`
 	RestoreGrantsSQL   string    `gorm:"type:text" json:"restoreGrantsSql"`
 	RestoreCommentsSQL string    `gorm:"type:text" json:"restoreCommentsSql"`
 	RestoreIndexesSQL  string    `gorm:"type:text" json:"restoreIndexesSql"`
+	RestoreRulesSQL    string    `gorm:"type:text" json:"restoreRulesSql"`
+	RestoreTriggersSQL string    `gorm:"type:text" json:"restoreTriggersSql"`
 	VerifySQL          string    `gorm:"type:text" json:"verifySql"`
 	Status             string    `gorm:"size:32;index" json:"status"`
 	ErrorMessage       string    `gorm:"type:text" json:"errorMessage"`

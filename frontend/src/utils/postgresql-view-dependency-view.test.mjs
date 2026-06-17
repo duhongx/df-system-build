@@ -30,3 +30,5 @@ assert.match(view, /导出恢复 SQL/, 'page should expose restore SQL export ac
 assert.match(view, /schemaName/, 'page should collect schema name')
 assert.match(view, /columnName/, 'page should collect column name')
 assert.match(view, /高风险确认/, 'short-lock execution should require explicit risk confirmation')
+assert.match(view, /refreshCurrentTask/, 'page should refresh selected task after backend state changes')
+assert.match(view, /catch \(err\)/, 'page should handle failed execution responses explicitly')

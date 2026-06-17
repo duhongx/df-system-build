@@ -1,6 +1,7 @@
 package service
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -42,6 +43,8 @@ type viewDependencySnapshot struct {
 	GrantSQL      []string
 	CommentSQL    []string
 	IndexSQL      []string
+	RuleSQL       []string
+	TriggerSQL    []string
 	OptionsJSON   string
 	DropOrder     int
 	RestoreOrder  int
@@ -88,18 +91,10 @@ func validateViewDependencyAlterSQL(req SQLViewDependencyTaskRequest) (alterColu
 	if err := validateSchemaName(req.SchemaName); err != nil {
 		return alterColumnRef{}, err
 	}
-	tree, err := pg_query.Parse(req.AlterSQL)
+	ref, err := parseSingleAlterColumnTypeRef(req.AlterSQL)
 	if err != nil {
-		return alterColumnRef{}, fmt.Errorf("ALTER SQL 解析失败: %w", err)
+		return alterColumnRef{}, err
 	}
-	if len(tree.GetStmts()) != 1 {
-		return alterColumnRef{}, fmt.Errorf("只允许一条 ALTER TABLE 语句")
-	}
-	analysis := AnalyzeSQLRisk(req.AlterSQL)
-	if analysis.SQLType != "ALTER_COLUMN_TYPE" {
-		return alterColumnRef{}, fmt.Errorf("只支持 ALTER TABLE 修改字段类型语句")
-	}
-	ref := parseAlterColumnTypeRef(req.AlterSQL, "")
 	if ref.schema == "" {
 		return alterColumnRef{}, fmt.Errorf("ALTER SQL 必须显式指定 schema.table")
 	}
@@ -107,6 +102,35 @@ func validateViewDependencyAlterSQL(req SQLViewDependencyTaskRequest) (alterColu
 		return alterColumnRef{}, fmt.Errorf("ALTER SQL 目标字段与入参不一致")
 	}
 	return ref, nil
+}
+
+func parseSingleAlterColumnTypeRef(sqlText string) (alterColumnRef, error) {
+	tree, err := pg_query.Parse(sqlText)
+	if err != nil {
+		return alterColumnRef{}, fmt.Errorf("ALTER SQL 解析失败: %w", err)
+	}
+	if len(tree.GetStmts()) != 1 {
+		return alterColumnRef{}, fmt.Errorf("只允许一条 ALTER TABLE 语句")
+	}
+	stmt := tree.GetStmts()[0].GetStmt()
+	alterStmt := stmt.GetAlterTableStmt()
+	if alterStmt == nil || alterStmt.GetRelation() == nil {
+		return alterColumnRef{}, fmt.Errorf("只支持 ALTER TABLE 修改字段类型语句")
+	}
+	cmds := alterStmt.GetCmds()
+	if len(cmds) != 1 {
+		return alterColumnRef{}, fmt.Errorf("视图依赖变更只允许单个字段类型变更，不允许在同一 ALTER TABLE 中包含其他操作")
+	}
+	cmd := cmds[0].GetAlterTableCmd()
+	if cmd == nil || cmd.GetSubtype() != pg_query.AlterTableType_AT_AlterColumnType {
+		return alterColumnRef{}, fmt.Errorf("只支持 ALTER TABLE 修改字段类型语句")
+	}
+	relation := alterStmt.GetRelation()
+	return alterColumnRef{
+		schema: strings.TrimSpace(relation.GetSchemaname()),
+		table:  strings.TrimSpace(relation.GetRelname()),
+		column: strings.TrimSpace(cmd.GetName()),
+	}, nil
 }
 
 func BuildSQLViewDependencyManualPlan(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) string {
@@ -137,6 +161,9 @@ func BuildSQLViewDependencyManualPlan(task model.SQLViewDependencyTask, items []
 	b.WriteString("\n-- Restore dependent views\n")
 	for _, item := range restoreItems {
 		writeSQLLine(&b, item.CreateSQL)
+		writeSQLLine(&b, item.RestoreRefreshSQL)
+		writeSQLLine(&b, item.RestoreRulesSQL)
+		writeSQLLine(&b, item.RestoreTriggersSQL)
 		writeSQLLine(&b, item.RestoreOwnerSQL)
 		writeSQLLine(&b, item.RestoreGrantsSQL)
 		writeSQLLine(&b, item.RestoreCommentsSQL)
@@ -157,6 +184,9 @@ func BuildSQLViewDependencyRestorePlan(task model.SQLViewDependencyTask, items [
 	b.WriteString("-- Restore dependent views\n")
 	for _, item := range restoreItems {
 		writeSQLLine(&b, item.CreateSQL)
+		writeSQLLine(&b, item.RestoreRefreshSQL)
+		writeSQLLine(&b, item.RestoreRulesSQL)
+		writeSQLLine(&b, item.RestoreTriggersSQL)
 		writeSQLLine(&b, item.RestoreOwnerSQL)
 		writeSQLLine(&b, item.RestoreGrantsSQL)
 		writeSQLLine(&b, item.RestoreCommentsSQL)
@@ -208,6 +238,9 @@ func buildSQLViewDependencyTransactionPrefix(task model.SQLViewDependencyTask) [
 func appendSQLViewDependencyRestoreSteps(steps *[]string, items []model.SQLViewDependencyItem) {
 	for _, item := range orderedViewDependencyRestoreItems(items) {
 		appendSQLStep(steps, item.CreateSQL)
+		appendSQLStep(steps, item.RestoreRefreshSQL)
+		appendSQLStep(steps, item.RestoreRulesSQL)
+		appendSQLStep(steps, item.RestoreTriggersSQL)
 		appendSQLStep(steps, item.RestoreOwnerSQL)
 		appendSQLStep(steps, item.RestoreGrantsSQL)
 		appendSQLStep(steps, item.RestoreCommentsSQL)
@@ -311,9 +344,15 @@ func buildSQLViewDependencyItemFromSnapshot(taskID uint, snapshot viewDependency
 	grantsJSON := mustMarshalStringSlice(snapshot.GrantSQL)
 	commentsJSON := mustMarshalStringSlice(snapshot.CommentSQL)
 	indexesJSON := mustMarshalStringSlice(snapshot.IndexSQL)
+	rulesJSON := mustMarshalStringSlice(snapshot.RuleSQL)
+	triggersJSON := mustMarshalStringSlice(snapshot.TriggerSQL)
 	optionsJSON := strings.TrimSpace(snapshot.OptionsJSON)
 	if optionsJSON == "" && len(snapshot.AdditionalSQL) > 0 {
 		optionsJSON = mustMarshalStringSlice(snapshot.AdditionalSQL)
+	}
+	restoreRefreshSQL := ""
+	if kind == "m" {
+		restoreRefreshSQL = fmt.Sprintf("REFRESH MATERIALIZED VIEW %s;", qualifiedName)
 	}
 	return model.SQLViewDependencyItem{
 		TaskID:             taskID,
@@ -328,16 +367,102 @@ func buildSQLViewDependencyItemFromSnapshot(taskID uint, snapshot viewDependency
 		GrantsJSON:         grantsJSON,
 		CommentsJSON:       commentsJSON,
 		IndexesJSON:        indexesJSON,
+		RulesJSON:          rulesJSON,
+		TriggersJSON:       triggersJSON,
 		OptionsJSON:        optionsJSON,
+		BackupHash:         viewDependencySnapshotHash(snapshot),
 		DropSQL:            plan.DropSQL,
 		CreateSQL:          strings.TrimSpace(plan.CreateSQL + "\n" + strings.Join(snapshot.AdditionalSQL, "\n")),
+		RestoreRefreshSQL:  restoreRefreshSQL,
 		RestoreOwnerSQL:    restoreOwnerSQL,
 		RestoreGrantsSQL:   strings.Join(snapshot.GrantSQL, "\n"),
 		RestoreCommentsSQL: strings.Join(snapshot.CommentSQL, "\n"),
 		RestoreIndexesSQL:  strings.Join(snapshot.IndexSQL, "\n"),
+		RestoreRulesSQL:    strings.Join(snapshot.RuleSQL, "\n"),
+		RestoreTriggersSQL: strings.Join(snapshot.TriggerSQL, "\n"),
 		VerifySQL:          buildViewDependencyVerifySQL(qualifiedName),
 		Status:             "PLANNED",
 	}
+}
+
+func viewDependencySnapshotHash(snapshot viewDependencySnapshot) string {
+	fingerprint := struct {
+		Schema        string   `json:"schema"`
+		Name          string   `json:"name"`
+		Kind          string   `json:"kind"`
+		Definition    string   `json:"definition"`
+		Owner         string   `json:"owner"`
+		GrantSQL      []string `json:"grantSql"`
+		CommentSQL    []string `json:"commentSql"`
+		IndexSQL      []string `json:"indexSql"`
+		RuleSQL       []string `json:"ruleSql"`
+		TriggerSQL    []string `json:"triggerSql"`
+		OptionsJSON   string   `json:"optionsJson"`
+		AdditionalSQL []string `json:"additionalSql"`
+	}{
+		Schema:        strings.TrimSpace(snapshot.Schema),
+		Name:          strings.TrimSpace(snapshot.Name),
+		Kind:          strings.TrimSpace(snapshot.Kind),
+		Definition:    normalizeSQL(snapshot.Definition),
+		Owner:         strings.TrimSpace(snapshot.Owner),
+		GrantSQL:      sortedStrings(snapshot.GrantSQL),
+		CommentSQL:    sortedStrings(snapshot.CommentSQL),
+		IndexSQL:      sortedStrings(snapshot.IndexSQL),
+		RuleSQL:       sortedStrings(snapshot.RuleSQL),
+		TriggerSQL:    sortedStrings(snapshot.TriggerSQL),
+		OptionsJSON:   strings.TrimSpace(snapshot.OptionsJSON),
+		AdditionalSQL: sortedStrings(snapshot.AdditionalSQL),
+	}
+	data, _ := json.Marshal(fingerprint)
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func sortedStrings(items []string) []string {
+	copied := append([]string(nil), items...)
+	sort.Strings(copied)
+	return copied
+}
+
+func validateViewDependencyBackupFresh(items []model.SQLViewDependencyItem, current []viewDependencySnapshot) error {
+	currentByName := make(map[string]viewDependencySnapshot, len(current))
+	for _, snapshot := range current {
+		currentByName[viewDependencyObjectKey(snapshot.Schema, snapshot.Name, snapshot.Kind)] = snapshot
+	}
+	for _, item := range items {
+		if strings.TrimSpace(item.BackupHash) == "" {
+			return fmt.Errorf("视图 %s.%s 缺少备份指纹，请重新分析依赖", item.ObjectSchema, item.ObjectName)
+		}
+		snapshot, ok := currentByName[viewDependencyObjectKey(item.ObjectSchema, item.ObjectName, item.ObjectKind)]
+		if !ok {
+			return fmt.Errorf("视图 %s.%s 当前不存在或不再依赖目标字段，请重新分析依赖", item.ObjectSchema, item.ObjectName)
+		}
+		if item.BackupHash != viewDependencySnapshotHash(snapshot) {
+			return fmt.Errorf("视图 %s.%s 自上次分析后已变化，请重新分析依赖", item.ObjectSchema, item.ObjectName)
+		}
+	}
+	return nil
+}
+
+func viewDependencyObjectKey(schemaName, objectName, kind string) string {
+	return strings.ToLower(strings.TrimSpace(schemaName)) + "." + strings.ToLower(strings.TrimSpace(objectName)) + ":" + strings.ToLower(strings.TrimSpace(kind))
+}
+
+func ensureSQLViewDependencyTaskHasPlan(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) error {
+	if task.Status == "CREATED" || len(items) == 0 {
+		return fmt.Errorf("请先分析依赖并生成备份计划")
+	}
+	return nil
+}
+
+func ensureSQLViewDependencyTaskCanExecute(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) error {
+	if err := ensureSQLViewDependencyTaskHasPlan(task, items); err != nil {
+		return err
+	}
+	if task.Status != "PRECHECK_PASSED" {
+		return fmt.Errorf("请先执行预检，预检通过后再短锁执行")
+	}
+	return nil
 }
 
 func buildViewDependencyVerifySQL(qualifiedName string) string {

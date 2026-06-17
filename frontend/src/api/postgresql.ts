@@ -146,13 +146,19 @@ export interface SQLViewDependencyItem {
   grantsJson: string
   commentsJson: string
   indexesJson: string
+  rulesJson: string
+  triggersJson: string
   optionsJson: string
+  backupHash: string
   dropSql: string
   createSql: string
+  restoreRefreshSql: string
   restoreOwnerSql: string
   restoreGrantsSql: string
   restoreCommentsSql: string
   restoreIndexesSql: string
+  restoreRulesSql: string
+  restoreTriggersSql: string
   verifySql: string
   status: string
   errorMessage: string
