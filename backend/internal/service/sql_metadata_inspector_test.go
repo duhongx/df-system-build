@@ -260,6 +260,9 @@ func TestClassifyDMLAffectedRows(t *testing.T) {
 			if !strings.Contains(got.RiskReason, "EXPLAIN 估算影响行数") {
 				t.Fatalf("expected estimate reason, got %q", got.RiskReason)
 			}
+			if got.EstimatedRows != tc.rows {
+				t.Fatalf("expected estimated rows %d, got %d", tc.rows, got.EstimatedRows)
+			}
 		})
 	}
 }

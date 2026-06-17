@@ -32,6 +32,6 @@ fmt:
 lint:
 	golangci-lint run
 
-# Create data directory for SQLite
+# Create runtime directories
 init:
 	mkdir -p data workspaces logs

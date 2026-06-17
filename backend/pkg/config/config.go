@@ -5,12 +5,12 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Database DatabaseConfig `mapstructure:"database"`
-	JWT      JWTConfig      `mapstructure:"jwt"`
-	Docker   DockerConfig   `mapstructure:"docker"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Database  DatabaseConfig  `mapstructure:"database"`
+	JWT       JWTConfig       `mapstructure:"jwt"`
+	Docker    DockerConfig    `mapstructure:"docker"`
 	Workspace WorkspaceConfig `mapstructure:"workspace"`
-	Log      LogConfig      `mapstructure:"log"`
+	Log       LogConfig       `mapstructure:"log"`
 }
 
 type ServerConfig struct {
@@ -19,13 +19,12 @@ type ServerConfig struct {
 }
 
 type DatabaseConfig struct {
-	Driver       string `mapstructure:"driver"`
+	DSN          string `mapstructure:"dsn"`
 	Host         string `mapstructure:"host"`
 	Port         int    `mapstructure:"port"`
 	Name         string `mapstructure:"name"`
 	User         string `mapstructure:"user"`
 	Password     string `mapstructure:"password"`
-	SQLitePath   string `mapstructure:"sqlite_path"`
 	MaxOpenConns int    `mapstructure:"max_open_conns"`
 	MaxIdleConns int    `mapstructure:"max_idle_conns"`
 }
@@ -61,6 +60,7 @@ func Load(configPath string) (*Config, error) {
 	viper.BindEnv("database.name", "DB_NAME")
 	viper.BindEnv("database.user", "DB_USER")
 	viper.BindEnv("database.password", "DB_PASSWORD")
+	viper.BindEnv("database.dsn", "DATABASE_DSN")
 	viper.BindEnv("jwt.secret", "JWT_SECRET")
 	viper.BindEnv("server.port", "SERVER_PORT")
 	viper.BindEnv("log.level", "LOG_LEVEL")

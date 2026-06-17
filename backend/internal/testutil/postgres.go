@@ -38,7 +38,7 @@ func PostgresDSNFromEnv() (string, bool) {
 		" user=" + user +
 		" password=" + os.Getenv("TEST_DB_PASSWORD") +
 		" dbname=" + name +
-		" sslmode=disable search_path=devops", true
+		" sslmode=disable", true
 }
 
 func OpenGormPostgres(t *testing.T) *gorm.DB {

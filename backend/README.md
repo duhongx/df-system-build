@@ -9,7 +9,7 @@ make init      # 首次：创建 data/workspaces/logs 目录
 make run       # 启动 :8080
 ```
 
-默认使用 SQLite（`config/config.yaml` 中 `database.driver: sqlite`），启动时自动迁移表结构和种子数据。
+系统自身存储使用 PostgreSQL，启动时自动迁移表结构和种子数据。
 
 ## 构建
 
@@ -32,7 +32,8 @@ docker compose up -d    # 含 PostgreSQL
 |---|---|---|
 | `CONFIG_PATH` | `config/config.yaml` | 配置文件路径 |
 | `SERVER_PORT` | 8080 | 服务端口 |
-| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | SQLite | PostgreSQL 连接 |
+| `DATABASE_DSN` | 空 | PostgreSQL 完整连接串，设置后优先使用 |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | 空 | PostgreSQL 连接 |
 | `JWT_SECRET` | 见配置 | JWT 签名密钥（生产必改） |
 | `DF_ENCRYPT_KEY` | 见代码 | AES-256 凭据加密密钥（生产必改，32 字节） |
 | `LOG_LEVEL` | `debug` | debug / info / warn / error |

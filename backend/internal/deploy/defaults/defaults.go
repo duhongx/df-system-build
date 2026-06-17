@@ -6,7 +6,7 @@
 //
 // dfctl-web uses this package in two places:
 //
-//  1. On first install, the SQLite seed routine pre-populates the
+//  1. On first install, the PostgreSQL seed routine pre-populates the
 //     `component_overrides` table with these values so a fresh
 //     database can already render a complete custom.yml — without
 //     this seed, every ${redis.password} and ${docker.data_root}

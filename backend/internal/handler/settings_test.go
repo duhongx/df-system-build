@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"df-build-server/internal/repository"
-	"df-build-server/pkg/config"
+	"df-build-server/internal/testutil"
 	"df-build-server/pkg/logger"
 
 	"github.com/gin-gonic/gin"
@@ -19,8 +19,7 @@ import (
 func setupSettingsHandlerTestDB(t *testing.T) {
 	t.Helper()
 	logger.Init("error", "stdout", "")
-	dbPath := filepath.Join(t.TempDir(), "settings-handler-test.db")
-	if err := repository.InitDB(&config.DatabaseConfig{Driver: "sqlite", SQLitePath: dbPath}); err != nil {
+	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
 		t.Fatalf("init db: %v", err)
 	}
 	if err := repository.AutoMigrate(); err != nil {

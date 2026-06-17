@@ -6,17 +6,12 @@ import (
 
 	"df-build-server/internal/deploy/engine/store"
 	"df-build-server/internal/model"
-
-	"github.com/glebarez/sqlite"
-	"gorm.io/gorm"
+	"df-build-server/internal/testutil"
 )
 
 func newTestStore(t *testing.T) *GormStore {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
+	db := testutil.OpenGormPostgres(t)
 	if err := db.AutoMigrate(
 		&model.Server{},
 		&model.DeploymentComponentTarget{},

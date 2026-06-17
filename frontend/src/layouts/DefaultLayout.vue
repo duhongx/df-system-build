@@ -337,6 +337,7 @@ async function handleSavePassword() {
           </template>
           <el-menu-item index="/postgresql/instances">实例管理</el-menu-item>
           <el-menu-item index="/postgresql/sql-execution">SQL 执行</el-menu-item>
+          <el-menu-item index="/postgresql/view-dependency-change">视图依赖变更</el-menu-item>
         </el-sub-menu>
 
         <el-sub-menu index="settings-center">

@@ -73,6 +73,7 @@ export interface SQLChangeStatement {
   executeStatus: string
   executeMessage: string
   sqlState: string
+  estimatedRows: number
   affectedRows: number
   durationMs: number
   executeTime?: string
@@ -95,6 +96,17 @@ export interface SQLExecuteOptions {
   skipUniqueConstraint: boolean
   requireRiskConfirmation: boolean
   confirmWarnRisk: boolean
+  forceBlockedSql: boolean
+}
+
+export interface SQLForceWhitelistOption {
+  sqlType: string
+  label: string
+}
+
+export interface SQLForceWhitelistConfig {
+  available: SQLForceWhitelistOption[]
+  enabled: string[]
 }
 
 export interface ParseSQLBatchFile {
@@ -102,8 +114,88 @@ export interface ParseSQLBatchFile {
   content: string
 }
 
+export interface SQLViewDependencyTask {
+  id: number
+  schemaName: string
+  tableName: string
+  columnName: string
+  alterSql: string
+  status: string
+  riskLevel: string
+  riskReason: string
+  lockTimeout: string
+  statementTimeout: string
+  operator: string
+  executeMessage: string
+  analyzedAt?: string
+  executedAt?: string
+  createdAt: string
+}
+
+export interface SQLViewDependencyItem {
+  id: number
+  taskId: number
+  objectSchema: string
+  objectName: string
+  objectKind: string
+  depth: number
+  dropOrder: number
+  restoreOrder: number
+  definition: string
+  ownerName: string
+  grantsJson: string
+  commentsJson: string
+  indexesJson: string
+  optionsJson: string
+  dropSql: string
+  createSql: string
+  restoreOwnerSql: string
+  restoreGrantsSql: string
+  restoreCommentsSql: string
+  restoreIndexesSql: string
+  verifySql: string
+  status: string
+  errorMessage: string
+}
+
+export interface SQLViewDependencyTaskRequest {
+  schemaName: string
+  tableName: string
+  columnName: string
+  alterSql: string
+  lockTimeout?: string
+  statementTimeout?: string
+}
+
 export const getPostgreSQLInstance = () =>
   request.get<any, PostgreSQLInstanceInfo>('/postgresql/instance')
+
+export const getSQLForceWhitelist = () =>
+  request.get<any, SQLForceWhitelistConfig>('/postgresql/sql-force-whitelist')
+
+export const saveSQLForceWhitelist = (enabled: string[]) =>
+  request.put<any, SQLForceWhitelistConfig>('/postgresql/sql-force-whitelist', { enabled })
+
+export const listSQLViewDependencyTasks = (page = 1, pageSize = 20) =>
+  request.get<any, PageResult<SQLViewDependencyTask>>('/postgresql/view-dependency-tasks', { params: { page, pageSize } })
+
+export const createSQLViewDependencyTask = (data: SQLViewDependencyTaskRequest) =>
+  request.post<any, SQLViewDependencyTask>('/postgresql/view-dependency-tasks', data)
+
+export const getSQLViewDependencyTask = (id: number) =>
+  request.get<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}`)
+
+export const analyzeSQLViewDependencyTask = (id: number) =>
+  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/analyze`)
+
+export const precheckSQLViewDependencyTask = (id: number) =>
+  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/precheck`)
+
+export const executeSQLViewDependencyTask = (id: number) =>
+  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/execute`)
+
+export const restoreSQLViewDependencyTask = (id: number) =>
+  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/restore`)
 
 export const parseSQLFile = (data: ParseSQLRequest) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/parse', data)
@@ -161,6 +253,28 @@ export const importServerSQL = (filePath: string, overwrite = true) =>
 
 export const exportNotExecutableSQLUrl = (id: number) =>
   `/api/postgresql/sql-files/${id}/not-executable.sql`
+
+export const exportSQLViewDependencyPlanUrl = (id: number) =>
+  `/api/postgresql/view-dependency-tasks/${id}/plan.sql`
+
+export const exportSQLViewDependencyRestorePlanUrl = (id: number) =>
+  `/api/postgresql/view-dependency-tasks/${id}/restore.sql`
+
+export async function exportSQLViewDependencyRestorePlan(id: number) {
+  const res = await fetch(exportSQLViewDependencyRestorePlanUrl(id), {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  })
+  if (!res.ok) throw new Error('导出失败')
+  return await res.text()
+}
+
+export async function exportSQLViewDependencyPlan(id: number) {
+  const res = await fetch(exportSQLViewDependencyPlanUrl(id), {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  })
+  if (!res.ok) throw new Error('导出失败')
+  return await res.text()
+}
 
 export async function exportNotExecutableSQL(id: number) {
   const res = await fetch(exportNotExecutableSQLUrl(id), {

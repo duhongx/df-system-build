@@ -6,7 +6,7 @@
 
 ```
 df-build-system/
-├── backend/          Go 后端（Gin + GORM + SQLite/PostgreSQL）
+├── backend/          Go 后端（Gin + GORM + PostgreSQL）
 ├── frontend/         Vue 3 + Vite + Element Plus 前端
 └── .kiro/specs/      功能规划文档（requirements / design / tasks）
 ```

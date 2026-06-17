@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import JSZip from 'jszip'
 import {
   cancelSQLBatch,
   cancelSQLFile,
@@ -10,17 +11,20 @@ import {
   exportNotExecutableSQL,
   getSQLBatch,
   getSQLFile,
+  getSQLForceWhitelist,
   importServerSQL,
   listSQLBatches,
   listDoneSQLFiles,
   listTodoSQLFiles,
   parseSQLBatch,
   parseSQLFile,
+  saveSQLForceWhitelist,
   skipSQLFile,
   skipSQLStatement,
   type ParseSQLBatchFile,
   type SQLChangeBatch,
   type SQLChangeFile,
+  type SQLForceWhitelistOption,
   type SQLChangeStatement,
   type SQLExecuteOptions,
 } from '../api/postgresql'
@@ -31,17 +35,22 @@ const executing = ref(false)
 const importing = ref(false)
 const loadingTodo = ref(false)
 const loadingDone = ref(false)
+const whitelistSaving = ref(false)
 
 const selectedTab = ref('todo')
 const form = ref({ fileName: '', content: '', overwrite: true })
 const serverFilePath = ref('')
 const batchFiles = ref<ParseSQLBatchFile[]>([])
+const whitelistDialogVisible = ref(false)
+const forceWhitelistOptions = ref<SQLForceWhitelistOption[]>([])
+const forceWhitelistEnabled = ref<string[]>([])
 const options = ref<SQLExecuteOptions>({
   skipExistsColumn: true,
   skipExistsTable: true,
   skipUniqueConstraint: true,
   requireRiskConfirmation: true,
   confirmWarnRisk: false,
+  forceBlockedSql: false,
 })
 
 const currentBatch = ref<SQLChangeBatch | null>(null)
@@ -58,14 +67,17 @@ const batchPage = ref(1)
 const todoPage = ref(1)
 const donePage = ref(1)
 const pageSize = 15
+const ZIP_MAX_SQL_FILES = 500
+const ZIP_MAX_SQL_FILE_SIZE = 50 * 1024 * 1024
+const ZIP_MAX_TOTAL_SIZE = 50 * 1024 * 1024
 
 const totalCount = computed(() => statements.value.length)
 const successCount = computed(() => statements.value.filter(s => s.executeStatus === 'SUCCESS').length)
 const failedCount = computed(() => statements.value.filter(s => s.executeStatus === 'FAILED').length)
-const notExecutableCount = computed(() => statements.value.filter(s => s.executeStatus === 'NOT_EXECUTABLE' || s.riskLevel === 'BLOCKED').length)
+const notExecutableCount = computed(() => statements.value.filter(s => s.executeStatus === 'NOT_EXECUTABLE').length)
 const skippedCount = computed(() => statements.value.filter(s => s.executeStatus === 'SKIPPED').length)
 
-onMounted(() => { loadBatches(); loadTodo(); loadDone() })
+onMounted(() => { loadBatches(); loadTodo(); loadDone(); loadSQLForceWhitelistConfig() })
 
 async function loadBatches() {
   const data = await listSQLBatches(batchPage.value, pageSize)
@@ -82,16 +94,94 @@ async function loadDone() {
   finally { loadingDone.value = false }
 }
 
+async function loadSQLForceWhitelistConfig() {
+  const data = await getSQLForceWhitelist()
+  forceWhitelistOptions.value = data.available || []
+  forceWhitelistEnabled.value = data.enabled || []
+}
+
+async function handleSaveSQLForceWhitelist() {
+  whitelistSaving.value = true
+  try {
+    const data = await saveSQLForceWhitelist(forceWhitelistEnabled.value)
+    forceWhitelistOptions.value = data.available || []
+    forceWhitelistEnabled.value = data.enabled || []
+    whitelistDialogVisible.value = false
+    ElMessage.success('白名单配置已保存')
+  } finally {
+    whitelistSaving.value = false
+  }
+}
+
 async function handleFileChange(event: Event) {
-  const input = event.target as HTMLInputElement
-  const files = Array.from(input.files || [])
-  if (files.length === 0) return
-  const parsedFiles = await Promise.all(files.map(async file => ({ fileName: file.name, content: await file.text() })))
-  batchFiles.value = parsedFiles
-  form.value.fileName = parsedFiles[0].fileName
-  form.value.content = parsedFiles[0].content
-  if (parsedFiles.length > 1) ElMessage.success(`已选择 ${parsedFiles.length} 个 SQL 文件`)
-  input.value = ''
+	const input = event.target as HTMLInputElement
+	const files = Array.from(input.files || [])
+	if (files.length === 0) return
+	try {
+		const parsedFiles = (await Promise.all(files.map(readSQLUploadFile))).flat()
+		if (parsedFiles.length === 0) {
+			ElMessage.warning('未找到 SQL 文件')
+			return
+		}
+		batchFiles.value = parsedFiles
+		form.value.fileName = parsedFiles[0].fileName
+		form.value.content = parsedFiles[0].content
+		if (parsedFiles.length > 1) ElMessage.success(`已选择 ${parsedFiles.length} 个 SQL 文件`)
+	} catch (err: any) {
+		ElMessage.error(err?.message || '读取 SQL 文件失败')
+	} finally {
+		input.value = ''
+	}
+}
+
+async function readSQLUploadFile(file: File): Promise<ParseSQLBatchFile[]> {
+	const lowerName = file.name.toLowerCase()
+	if (lowerName.endsWith('.zip')) {
+		if (file.size > ZIP_MAX_TOTAL_SIZE) {
+			throw new Error('ZIP 文件超过大小限制 (50MB)')
+		}
+		let zip: JSZip
+		try {
+			zip = await JSZip.loadAsync(file)
+		} catch {
+			throw new Error('ZIP 文件解析失败，请确认文件未损坏')
+		}
+		const entries = Object.values(zip.files).filter(entry => !entry.dir && entry.name.toLowerCase().endsWith('.sql'))
+		if (entries.length > ZIP_MAX_SQL_FILES) {
+			throw new Error(`ZIP 内 SQL 文件数量超过限制 (${ZIP_MAX_SQL_FILES})`)
+		}
+		const seenNames = new Set<string>()
+		const duplicateNames = new Set<string>()
+		const parsed: ParseSQLBatchFile[] = []
+		let totalSize = 0
+		for (const entry of entries) {
+			const fileName = entry.name.split('/').pop() || entry.name
+			const normalizedName = fileName.toLowerCase()
+			if (seenNames.has(normalizedName)) duplicateNames.add(fileName)
+			seenNames.add(normalizedName)
+			const content = await entry.async('string')
+			const size = new Blob([content]).size
+			if (size > ZIP_MAX_SQL_FILE_SIZE) {
+				throw new Error(`SQL 文件 ${fileName} 超过大小限制 (50MB)`)
+			}
+			totalSize += size
+			if (totalSize > ZIP_MAX_TOTAL_SIZE) {
+				throw new Error('ZIP 内 SQL 文件总大小超过限制 (50MB)')
+			}
+			parsed.push({ fileName, content })
+		}
+		if (duplicateNames.size > 0) {
+			throw new Error(`ZIP 内存在同名 SQL 文件: ${Array.from(duplicateNames).slice(0, 5).join('、')}`)
+		}
+		return parsed
+	}
+	if (lowerName.endsWith('.sql')) {
+		if (file.size > ZIP_MAX_SQL_FILE_SIZE) {
+			throw new Error('SQL 文件超过大小限制 (50MB)')
+		}
+		return [{ fileName: file.name, content: await file.text() }]
+	}
+	return []
 }
 
 async function handleParse() {
@@ -145,6 +235,9 @@ async function handleExecuteFile(row = currentFile.value) {
 async function handleExecuteBatch(row = currentBatch.value) {
   if (!row) { ElMessage.warning('请选择 SQL 批次'); return }
   await ElMessageBox.confirm(`确定执行批次 "${row.batchName}" 吗？`, '确认', { type: 'warning' })
+  if (options.value.forceBlockedSql) {
+    await ElMessageBox.confirm('已开启强制执行阻断 SQL。只有白名单中的阻断类型会提交执行，MISSING_SCHEMA、语法错误和系统级硬阻断仍会被后端拦截。确认继续？', '高风险确认', { type: 'error', confirmButtonText: '强制执行' })
+  }
   executing.value = true
   try {
     const data = await executeSQLBatch(row.id, { ...options.value, confirmWarnRisk: true })
@@ -175,6 +268,10 @@ async function handleDeleteFile(row: SQLChangeFile) {
 }
 async function handleSkipStatement(row: SQLChangeStatement) {
   await skipSQLStatement(row.id); row.executeStatus = 'SKIPPED'; row.executeMessage = '手工跳过'; ElMessage.success('已跳过')
+  if (currentFile.value) {
+    await handleOpen(currentFile.value)
+    await Promise.all([loadTodo(), loadDone()])
+  }
 }
 async function handleImportServerSQL() {
   if (!serverFilePath.value.trim()) { ElMessage.warning('请输入文件路径'); return }
@@ -201,6 +298,14 @@ function statusTag(status: string) {
 }
 
 async function buildConfirmedOptions(targetStatements: SQLChangeStatement[]) {
+  const blockedStatements = targetStatements.filter(s => (s.riskLevel === 'BLOCKED' || s.executeStatus === 'NOT_EXECUTABLE') && s.executeStatus !== 'SUCCESS' && s.executeStatus !== 'SKIPPED')
+  if (options.value.forceBlockedSql && blockedStatements.length > 0) {
+    const forceableBlockedStatements = blockedStatements.filter(s => forceWhitelistEnabled.value.includes(s.sqlType))
+    const hardBlockedStatements = blockedStatements.filter(s => !forceWhitelistEnabled.value.includes(s.sqlType))
+    const forceableTypes = Array.from(new Set(forceableBlockedStatements.map(s => s.sqlType))).slice(0, 8).join('、') || '无'
+    const hardTypes = Array.from(new Set(hardBlockedStatements.map(s => s.sqlType))).slice(0, 8).join('、') || '无'
+    await ElMessageBox.confirm(`将强制提交白名单内阻断 SQL ${forceableBlockedStatements.length} 条：${forceableTypes}。仍会被后端阻断 ${hardBlockedStatements.length} 条：${hardTypes}。`, '高风险确认', { type: 'error', confirmButtonText: '强制执行' })
+  }
   const warnStatements = targetStatements.filter(s => s.riskLevel === 'WARN' && s.executeStatus !== 'SUCCESS' && s.executeStatus !== 'SKIPPED')
   if (warnStatements.length === 0) return { ...options.value, confirmWarnRisk: false }
   const riskTypes = Array.from(new Set(warnStatements.map(s => s.sqlType))).slice(0, 8).join('、')
@@ -272,7 +377,7 @@ function reasonText(row: SQLChangeStatement) {
 
       <div class="panel-footer">
         <label class="upload-btn">
-          <input type="file" accept=".sql,.txt" multiple @change="handleFileChange" />
+          <input type="file" accept=".sql,.zip" multiple @change="handleFileChange" />
           <el-button size="small" style="pointer-events: none;">上传 SQL</el-button>
         </label>
         <div class="import-row">
@@ -299,8 +404,10 @@ function reasonText(row: SQLChangeStatement) {
               <el-checkbox v-model="options.skipExistsColumn" size="small">字段已存在跳过</el-checkbox>
               <el-checkbox v-model="options.skipExistsTable" size="small">对象已存在跳过</el-checkbox>
               <el-checkbox v-model="options.skipUniqueConstraint" size="small">唯一冲突跳过</el-checkbox>
+              <el-checkbox v-model="options.forceBlockedSql" size="small">强制执行阻断 SQL</el-checkbox>
             </div>
           </el-popover>
+          <el-button size="small" link type="primary" @click="whitelistDialogVisible = true">白名单配置</el-button>
         </div>
         <el-input v-model="form.content" type="textarea" :rows="6" placeholder="粘贴 SQL 内容，或从左侧选择文件查看" class="sql-textarea" />
         <div class="editor-actions">
@@ -343,6 +450,8 @@ function reasonText(row: SQLChangeStatement) {
                 <el-tag :type="statusTag(row.executeStatus)" size="small">{{ row.executeStatus }}</el-tag>
               </template>
             </el-table-column>
+            <el-table-column prop="estimatedRows" label="预估行数" width="100" align="right" />
+            <el-table-column prop="affectedRows" label="影响行数" width="100" align="right" />
             <el-table-column prop="sqlContent" label="SQL" min-width="380" show-overflow-tooltip />
             <el-table-column label="原因" min-width="280" show-overflow-tooltip>
               <template #default="{ row }">{{ reasonText(row) }}</template>
@@ -357,6 +466,19 @@ function reasonText(row: SQLChangeStatement) {
         </div>
       </div>
     </main>
+
+    <el-dialog v-model="whitelistDialogVisible" title="强制执行白名单配置" width="560px">
+      <el-checkbox-group v-model="forceWhitelistEnabled" class="whitelist-options">
+        <el-checkbox v-for="item in forceWhitelistOptions" :key="item.sqlType" :label="item.sqlType">
+          <span class="whitelist-type">{{ item.sqlType }}</span>
+          <span class="whitelist-label">{{ item.label }}</span>
+        </el-checkbox>
+      </el-checkbox-group>
+      <template #footer>
+        <el-button @click="whitelistDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="whitelistSaving" @click="handleSaveSQLForceWhitelist">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -406,6 +528,10 @@ function reasonText(row: SQLChangeStatement) {
 .batch-files-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 14px; background: #fdf6ec; border: 1px solid #faecd8; border-radius: 6px; flex-shrink: 0; }
 .batch-label { font-size: 13px; font-weight: 500; color: #e6a23c; margin-right: 8px; }
 .batch-file-tag { cursor: pointer; }
+.whitelist-options { display: flex; flex-direction: column; gap: 8px; }
+.whitelist-options :deep(.el-checkbox) { height: auto; align-items: flex-start; margin-right: 0; }
+.whitelist-type { display: inline-block; min-width: 190px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; color: #303133; }
+.whitelist-label { font-size: 12px; color: #606266; }
 
 @media (max-width: 1200px) {
   .sql-page { flex-direction: column; height: auto; overflow: visible; }

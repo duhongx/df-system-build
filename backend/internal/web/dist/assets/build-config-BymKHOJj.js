@@ -1,0 +1,1 @@
+import{r as n}from"./index-lEyppYC2.js";function e(){return n.get("/build-configs")}function o(i){return n.post("/build-configs",i)}function r(i,u){return n.put(`/build-configs/${i}`,u)}function f(i){return n.delete(`/build-configs/${i}`)}export{o as c,f as d,e as l,r as u};

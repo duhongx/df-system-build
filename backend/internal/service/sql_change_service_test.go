@@ -1,13 +1,14 @@
 package service
 
 import (
-	"path/filepath"
+	"context"
+	"os"
 	"strings"
 	"testing"
 
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
-	"df-build-server/pkg/config"
+	"df-build-server/internal/testutil"
 	"df-build-server/pkg/logger"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -16,8 +17,7 @@ import (
 func setupSQLChangeServiceTestDB(t *testing.T) {
 	t.Helper()
 	logger.Init("error", "stdout", "")
-	dbPath := filepath.Join(t.TempDir(), "sql-change-service-test.db")
-	if err := repository.InitDB(&config.DatabaseConfig{Driver: "sqlite", SQLitePath: dbPath}); err != nil {
+	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
 		t.Fatalf("init db: %v", err)
 	}
 	if err := repository.AutoMigrate(); err != nil {
@@ -281,12 +281,14 @@ func TestGetSQLFileOrdersStatementsByLineNumber(t *testing.T) {
 	}
 }
 
-func TestSearchPathValueUsesExactSchemaName(t *testing.T) {
-	if got := searchPathValue("his"); got != `"his"` {
-		t.Fatalf("expected quoted schema, got %q", got)
+func TestPostgreSQLServiceDoesNotSetSearchPathForTargetSQL(t *testing.T) {
+	source, err := os.ReadFile("postgresql_service.go")
+	if err != nil {
+		t.Fatalf("read postgresql service source: %v", err)
 	}
-	if got := searchPathValue(`billing"prod`); got != `"billing""prod"` {
-		t.Fatalf("expected escaped quoted schema, got %q", got)
+	content := string(source)
+	if strings.Contains(content, "set_config('search_path'") || strings.Contains(content, "searchPathValue(") {
+		t.Fatalf("target SQL execution must not set search_path; SQL statements must use explicit schema.table")
 	}
 }
 
@@ -368,6 +370,87 @@ func TestSQLExecuteOptionsRequireWarnConfirmation(t *testing.T) {
 	err = requireWarnConfirmation(statements, SQLExecuteOptions{RequireRiskConfirmation: true, ConfirmWarnRisk: true})
 	if err != nil {
 		t.Fatalf("expected confirmed warn risk to pass, got %v", err)
+	}
+}
+
+func TestShouldBlockStatementAllowsForcedBlockedSQL(t *testing.T) {
+	stmt := model.SQLChangeStatement{
+		SQLType:       "UPDATE_WEAK_WHERE",
+		RiskLevel:     "BLOCKED",
+		ExecuteStatus: "NOT_EXECUTABLE",
+	}
+
+	if !shouldBlockStatement(stmt, SQLExecuteOptions{}) {
+		t.Fatalf("expected blocked statement to be skipped by default")
+	}
+	if !shouldBlockStatementWithWhitelist(stmt, SQLExecuteOptions{ForceBlockedSQL: true}, nil) {
+		t.Fatalf("expected force option without whitelist to keep blocked statement skipped")
+	}
+	if shouldBlockStatementWithWhitelist(stmt, SQLExecuteOptions{ForceBlockedSQL: true}, []string{"UPDATE_WEAK_WHERE"}) {
+		t.Fatalf("expected configured force whitelist to allow blocked statement execution")
+	}
+}
+
+func TestForceBlockedSQLWhitelistNeverAllowsHardBlockedTypes(t *testing.T) {
+	stmt := model.SQLChangeStatement{
+		SQLType:       "DROP_DATABASE",
+		RiskLevel:     "BLOCKED",
+		ExecuteStatus: "NOT_EXECUTABLE",
+	}
+
+	if !shouldBlockStatementWithWhitelist(stmt, SQLExecuteOptions{ForceBlockedSQL: true}, []string{"DROP_DATABASE"}) {
+		t.Fatalf("expected hard blocked SQL type to stay blocked even when forced")
+	}
+	if isForceableBlockedSQLType("DROP_DATABASE") {
+		t.Fatalf("DROP_DATABASE must not be forceable")
+	}
+	if !isForceableBlockedSQLType("UPDATE_WEAK_WHERE") {
+		t.Fatalf("UPDATE_WEAK_WHERE should be configurable as forceable")
+	}
+}
+
+func TestColumnTypeViewDependencyRiskWarnsWithoutBlockingExecution(t *testing.T) {
+	analysis := RiskAnalysis{
+		SQLType:    "ALTER_COLUMN_TYPE",
+		RiskLevel:  "WARN",
+		RiskReason: "字段类型变更可能触发表重写",
+	}
+	deps := []ViewDependency{{Schema: "public", View: "v_patient"}}
+
+	got := applyColumnTypeViewDependencyWarning(analysis, deps)
+
+	if got.RiskLevel != "WARN" {
+		t.Fatalf("expected view dependency to warn instead of block, got %+v", got)
+	}
+	if defaultStatementStatus(got) == "NOT_EXECUTABLE" {
+		t.Fatalf("view dependency warning should remain executable, got %+v", got)
+	}
+	if !strings.Contains(got.RiskReason, "解析阶段检测到当前库存在视图依赖") {
+		t.Fatalf("expected parse-time dependency warning, got %q", got.RiskReason)
+	}
+	if !strings.Contains(got.RiskReason, "public.v_patient") {
+		t.Fatalf("expected dependent view name in warning, got %q", got.RiskReason)
+	}
+}
+
+func TestCreateOrReplaceViewCompatibilityRiskWarnsWithoutBlockingExecution(t *testing.T) {
+	analysis := RiskAnalysis{SQLType: "CREATE_VIEW", RiskLevel: "LOW"}
+	compat := ViewCompatibilityResult{
+		Exists:     true,
+		Compatible: false,
+		Reason:     "视图输出列类型变化，CREATE OR REPLACE VIEW 可能不兼容",
+	}
+
+	got := applyCreateOrReplaceViewCompatibilityRisk(analysis, compat)
+
+	if got.RiskLevel != "WARN" {
+		t.Fatalf("expected incompatible CREATE OR REPLACE VIEW to warn instead of block, got %+v", got)
+	}
+	if defaultStatementStatus(got) == "NOT_EXECUTABLE" {
+		t.Fatalf("view compatibility warning should remain executable, got %+v", got)
+	}
+	if !strings.Contains(got.RiskReason, compat.Reason) {
+		t.Fatalf("expected compatibility reason, got %q", got.RiskReason)
 	}
 }
 
@@ -470,6 +553,71 @@ func TestParseSQLBatchCreatesOrderedFiles(t *testing.T) {
 	}
 }
 
+func TestParseSQLBatchRollsBackWhenOneFileFails(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	svc := NewPostgreSQLService()
+	if _, _, err := svc.ParseSQL(ParseSQLRequest{
+		FileName:  "002-existing.sql",
+		Content:   "SELECT 1;",
+		Overwrite: false,
+	}); err != nil {
+		t.Fatalf("create existing SQL file: %v", err)
+	}
+
+	_, _, err := svc.ParseSQLBatch(ParseSQLBatchRequest{
+		BatchName: "rollback-batch",
+		Overwrite: false,
+		Files: []ParseSQLBatchFile{
+			{FileName: "001-created-before-failure.sql", Content: "SELECT 1;"},
+			{FileName: "002-existing.sql", Content: "SELECT 2;"},
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected duplicate file to fail batch parse")
+	}
+
+	var batchCount int64
+	if err := repository.DB.Model(&model.SQLChangeBatch{}).Where("batch_name = ?", "rollback-batch").Count(&batchCount).Error; err != nil {
+		t.Fatalf("count batches: %v", err)
+	}
+	if batchCount != 0 {
+		t.Fatalf("expected failed batch parse to roll back batch row, got %d", batchCount)
+	}
+	var createdCount int64
+	if err := repository.DB.Model(&model.SQLChangeFile{}).Where("file_name = ?", "001-created-before-failure.sql").Count(&createdCount).Error; err != nil {
+		t.Fatalf("count files: %v", err)
+	}
+	if createdCount != 0 {
+		t.Fatalf("expected failed batch parse to roll back previously created file, got %d", createdCount)
+	}
+}
+
+func TestExecuteSQLBatchPersistsFileLevelErrors(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	batch := model.SQLChangeBatch{BatchName: "file-error", ExecuteStatus: "PENDING", TotalFiles: 1}
+	if err := repository.DB.Create(&batch).Error; err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	file := model.SQLChangeFile{BatchID: batch.ID, BatchSortNo: 1, FileName: "missing-config.sql", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	stmt := model.SQLChangeStatement{FileID: file.ID, LineNumber: 1, SQLContent: "SELECT 1", SQLType: "UNKNOWN", RiskLevel: "LOW", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&stmt).Error; err != nil {
+		t.Fatalf("create statement: %v", err)
+	}
+
+	_, _, _ = NewPostgreSQLService().ExecuteSQLBatch(context.Background(), batch.ID, "tester", SQLExecuteOptions{})
+
+	var got model.SQLChangeFile
+	if err := repository.DB.First(&got, file.ID).Error; err != nil {
+		t.Fatalf("reload file: %v", err)
+	}
+	if got.ExecuteStatus != "FAILED" || !strings.Contains(got.ExecuteMessage, "PostgreSQL 主机地址未配置") {
+		t.Fatalf("expected file-level error to be persisted, got %+v", got)
+	}
+}
+
 func TestExportNotExecutableSQLIncludesBlockedAndFailed(t *testing.T) {
 	statements := []SQLExportStatement{
 		{LineNumber: 1, SQLContent: "CREATE TABLE demo(id int)", ExecuteStatus: "SUCCESS"},
@@ -487,6 +635,90 @@ func TestExportNotExecutableSQLIncludesBlockedAndFailed(t *testing.T) {
 	}
 	if !strings.Contains(out, "Line 3") || !strings.Contains(out, "timeout") {
 		t.Fatalf("expected failed sql in export: %s", out)
+	}
+}
+
+func TestBuildNotExecutableSQLForFileIncludesPendingAfterFailure(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	file := model.SQLChangeFile{FileName: "partial.sql", ExecuteStatus: "PARTIAL_FAILED"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	statements := []model.SQLChangeStatement{
+		{FileID: file.ID, LineNumber: 1, SQLContent: "CREATE TABLE his.demo(id int)", ExecuteStatus: "SUCCESS"},
+		{FileID: file.ID, LineNumber: 2, SQLContent: "INSERT INTO his.demo VALUES (1)", ExecuteStatus: "FAILED", ExecuteMessage: "relation does not exist"},
+		{FileID: file.ID, LineNumber: 3, SQLContent: "UPDATE his.demo SET id = 2 WHERE id = 1", ExecuteStatus: "PENDING"},
+	}
+	if err := repository.DB.Create(&statements).Error; err != nil {
+		t.Fatalf("create statements: %v", err)
+	}
+
+	out, err := NewPostgreSQLService().BuildNotExecutableSQLForFile(file.ID)
+	if err != nil {
+		t.Fatalf("build export: %v", err)
+	}
+
+	if strings.Contains(out, "CREATE TABLE his.demo") {
+		t.Fatalf("success sql should not be exported: %s", out)
+	}
+	if !strings.Contains(out, "Line 2") || !strings.Contains(out, "relation does not exist") {
+		t.Fatalf("expected failed SQL in export: %s", out)
+	}
+	if !strings.Contains(out, "Line 3") || !strings.Contains(out, "前序 SQL 执行失败") {
+		t.Fatalf("expected pending SQL after failure in export: %s", out)
+	}
+}
+
+func TestSkipSQLFileMarksPendingStatementsSkipped(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	file := model.SQLChangeFile{FileName: "skip-file.sql", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	statements := []model.SQLChangeStatement{
+		{FileID: file.ID, LineNumber: 1, SQLContent: "SELECT 1", ExecuteStatus: "PENDING"},
+		{FileID: file.ID, LineNumber: 2, SQLContent: "SELECT 2", ExecuteStatus: "NOT_EXECUTABLE"},
+	}
+	if err := repository.DB.Create(&statements).Error; err != nil {
+		t.Fatalf("create statements: %v", err)
+	}
+
+	got, err := NewPostgreSQLService().SkipSQLFile(file.ID, "tester")
+	if err != nil {
+		t.Fatalf("skip file: %v", err)
+	}
+	if got.ExecuteStatus != "SKIPPED" {
+		t.Fatalf("expected file skipped, got %+v", got)
+	}
+	var pendingCount int64
+	if err := repository.DB.Model(&model.SQLChangeStatement{}).Where("file_id = ? AND execute_status <> ?", file.ID, "SKIPPED").Count(&pendingCount).Error; err != nil {
+		t.Fatalf("count statements: %v", err)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("expected skip file to mark all unfinished statements skipped, got %d unfinished", pendingCount)
+	}
+}
+
+func TestSkipSQLStatementRecomputesFileStatus(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	file := model.SQLChangeFile{FileName: "skip-statement.sql", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	stmt := model.SQLChangeStatement{FileID: file.ID, LineNumber: 1, SQLContent: "SELECT 1", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&stmt).Error; err != nil {
+		t.Fatalf("create statement: %v", err)
+	}
+
+	if _, err := NewPostgreSQLService().SkipSQLStatement(stmt.ID, "tester"); err != nil {
+		t.Fatalf("skip statement: %v", err)
+	}
+	var got model.SQLChangeFile
+	if err := repository.DB.First(&got, file.ID).Error; err != nil {
+		t.Fatalf("reload file: %v", err)
+	}
+	if got.ExecuteStatus != "SKIPPED" {
+		t.Fatalf("expected file status recomputed to SKIPPED, got %+v", got)
 	}
 }
 

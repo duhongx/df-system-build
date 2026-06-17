@@ -281,9 +281,10 @@ func jsonNumberToInt64(value any) (int64, bool) {
 }
 
 func classifyDMLAffectedRows(base RiskAnalysis, estimatedRows int64) RiskAnalysis {
-	if base.SQLType != "UPDATE" && base.SQLType != "DELETE" {
+	if !isDMLRiskWithAffectedRows(base.SQLType) {
 		return base
 	}
+	base.EstimatedRows = estimatedRows
 	base.RiskReason = appendRiskText(base.RiskReason, fmt.Sprintf("EXPLAIN 估算影响行数 %d", estimatedRows))
 	switch {
 	case estimatedRows > dmlAffectedRowsBlockThreshold:

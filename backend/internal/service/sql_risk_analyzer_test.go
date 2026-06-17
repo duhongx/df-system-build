@@ -511,10 +511,10 @@ func TestAnalyzeSQLRiskClassifiesObjectLevelRisks(t *testing.T) {
 		wantReason string
 	}{
 		{
-			name:       "drop column blocks",
+			name:       "drop column warns",
 			sql:        "ALTER TABLE his.patient DROP COLUMN mobile",
 			wantType:   "DROP_COLUMN",
-			wantLevel:  "BLOCKED",
+			wantLevel:  "WARN",
 			wantReason: "删除字段",
 		},
 		{
@@ -525,10 +525,10 @@ func TestAnalyzeSQLRiskClassifiesObjectLevelRisks(t *testing.T) {
 			wantReason: "删除约束",
 		},
 		{
-			name:       "set schema blocks",
+			name:       "set schema warns",
 			sql:        "ALTER TABLE his.patient SET SCHEMA archive",
 			wantType:   "ALTER_SET_SCHEMA",
-			wantLevel:  "BLOCKED",
+			wantLevel:  "WARN",
 			wantReason: "迁移 schema",
 		},
 		{
@@ -583,10 +583,10 @@ func TestAnalyzeSQLRiskClassifiesTriggerRisks(t *testing.T) {
 			wantReason: "触发器",
 		},
 		{
-			name:       "disable trigger blocks",
+			name:       "disable trigger warns",
 			sql:        "ALTER TABLE his.patient DISABLE TRIGGER ALL",
 			wantType:   "DISABLE_TRIGGER",
-			wantLevel:  "BLOCKED",
+			wantLevel:  "WARN",
 			wantReason: "禁用触发器",
 		},
 		{

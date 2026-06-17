@@ -16,35 +16,35 @@ const (
 
 // Package-level compiled regexes to avoid recompilation in hot paths
 var (
-	reDropDatabase             = regexp.MustCompile(`^DROP\s+DATABASE\b`)
-	reDropSchema               = regexp.MustCompile(`^DROP\s+SCHEMA\b`)
-	reDropOwned                = regexp.MustCompile(`^DROP\s+OWNED\b`)
-	reAlterSystem              = regexp.MustCompile(`^ALTER\s+SYSTEM\b`)
-	reCopyProgram              = regexp.MustCompile(`^COPY\b.*\bPROGRAM\b`)
-	reReindexDatabase          = regexp.MustCompile(`^REINDEX\s+DATABASE\b`)
-	reVacuumFull               = regexp.MustCompile(`^VACUUM\s+FULL\b`)
-	reCreateTable              = regexp.MustCompile(`^CREATE\s+TABLE\b`)
-	reCreateOrReplaceView      = regexp.MustCompile(`^CREATE\s+(OR\s+REPLACE\s+)?VIEW\b`)
-	reAlterTableAddColumn      = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bADD\s+COLUMN\b`)
-	reAlterTableAlterType      = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bALTER\s+COLUMN\b.*\bTYPE\b`)
-	reAlterTableSetNotNull     = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bSET\s+NOT\s+NULL\b`)
-	reAlterTableAddCheck       = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bADD\s+CHECK\b`)
-	reCreateIndexConcurrently  = regexp.MustCompile(`^CREATE\s+INDEX\s+CONCURRENTLY\b`)
-	reCreateIndex              = regexp.MustCompile(`^CREATE\s+INDEX\b`)
-	reTruncate                 = regexp.MustCompile(`^TRUNCATE\b`)
-	reDropTable                = regexp.MustCompile(`^DROP\s+TABLE\b`)
-	reAlterColumnUsing         = regexp.MustCompile(`(?i)\bTYPE\b[^;]*\bUSING\b`)
-	reAlterColumnTargetType    = regexp.MustCompile(`(?is)\bTYPE\s+([a-zA-Z_][\w. ]*(?:\s*\([^)]*\))?)`)
-	reAlterColumnUsingInType   = regexp.MustCompile(`(?i)\bUSING\b`)
-	reWhereClause              = regexp.MustCompile(`(?is)\bWHERE\s+(.+)$`)
-	reReturningClause          = regexp.MustCompile(`(?is)\bRETURNING\b.*$`)
-	reWhitespace               = regexp.MustCompile(`\s+`)
-	reIsNotNull                = regexp.MustCompile(`(?i)\bis\s+not\s+null\b`)
-	reBooleanCondition         = regexp.MustCompile(`(?i)\b[a-zA-Z_][\w.]*\s*=\s*(true|false)\b`)
-	reLikePrefix               = regexp.MustCompile(`(?i)\b(?:like|ilike)\s+'%`)
-	reTimeCondition            = regexp.MustCompile(`(?i)(<|<=|>|>=)\s*(now\s*\(\s*\)|current_timestamp\b)`)
-	reSetExpression            = regexp.MustCompile(`(?is)\bSET\s+(.+?)(?:\bWHERE\b|\bRETURNING\b|$)`)
-	reNotValid                 = regexp.MustCompile(`(?i)\bNOT\s+VALID\b`)
+	reDropDatabase            = regexp.MustCompile(`^DROP\s+DATABASE\b`)
+	reDropSchema              = regexp.MustCompile(`^DROP\s+SCHEMA\b`)
+	reDropOwned               = regexp.MustCompile(`^DROP\s+OWNED\b`)
+	reAlterSystem             = regexp.MustCompile(`^ALTER\s+SYSTEM\b`)
+	reCopyProgram             = regexp.MustCompile(`^COPY\b.*\bPROGRAM\b`)
+	reReindexDatabase         = regexp.MustCompile(`^REINDEX\s+DATABASE\b`)
+	reVacuumFull              = regexp.MustCompile(`^VACUUM\s+FULL\b`)
+	reCreateTable             = regexp.MustCompile(`^CREATE\s+TABLE\b`)
+	reCreateOrReplaceView     = regexp.MustCompile(`^CREATE\s+(OR\s+REPLACE\s+)?VIEW\b`)
+	reAlterTableAddColumn     = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bADD\s+COLUMN\b`)
+	reAlterTableAlterType     = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bALTER\s+COLUMN\b.*\bTYPE\b`)
+	reAlterTableSetNotNull    = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bSET\s+NOT\s+NULL\b`)
+	reAlterTableAddCheck      = regexp.MustCompile(`^ALTER\s+TABLE\b.*\bADD\s+CHECK\b`)
+	reCreateIndexConcurrently = regexp.MustCompile(`^CREATE\s+INDEX\s+CONCURRENTLY\b`)
+	reCreateIndex             = regexp.MustCompile(`^CREATE\s+INDEX\b`)
+	reTruncate                = regexp.MustCompile(`^TRUNCATE\b`)
+	reDropTable               = regexp.MustCompile(`^DROP\s+TABLE\b`)
+	reAlterColumnUsing        = regexp.MustCompile(`(?i)\bTYPE\b[^;]*\bUSING\b`)
+	reAlterColumnTargetType   = regexp.MustCompile(`(?is)\bTYPE\s+([a-zA-Z_][\w. ]*(?:\s*\([^)]*\))?)`)
+	reAlterColumnUsingInType  = regexp.MustCompile(`(?i)\bUSING\b`)
+	reWhereClause             = regexp.MustCompile(`(?is)\bWHERE\s+(.+)$`)
+	reReturningClause         = regexp.MustCompile(`(?is)\bRETURNING\b.*$`)
+	reWhitespace              = regexp.MustCompile(`\s+`)
+	reIsNotNull               = regexp.MustCompile(`(?i)\bis\s+not\s+null\b`)
+	reBooleanCondition        = regexp.MustCompile(`(?i)\b[a-zA-Z_][\w.]*\s*=\s*(true|false)\b`)
+	reLikePrefix              = regexp.MustCompile(`(?i)\b(?:like|ilike)\s+'%`)
+	reTimeCondition           = regexp.MustCompile(`(?i)(<|<=|>|>=)\s*(now\s*\(\s*\)|current_timestamp\b)`)
+	reSetExpression           = regexp.MustCompile(`(?is)\bSET\s+(.+?)(?:\bWHERE\b|\bRETURNING\b|$)`)
+	reNotValid                = regexp.MustCompile(`(?i)\bNOT\s+VALID\b`)
 )
 
 type blockedRule struct {
@@ -514,7 +514,7 @@ func isLargeTableSensitiveSQLType(sqlType string) bool {
 }
 
 func isDMLRiskWithAffectedRows(sqlType string) bool {
-	return sqlType == "UPDATE" || sqlType == "DELETE"
+	return strings.HasPrefix(sqlType, "UPDATE") || strings.HasPrefix(sqlType, "DELETE")
 }
 
 func isTemporaryOrBackupTableName(name string) bool {
@@ -630,7 +630,7 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 	case node.GetRenameStmt() != nil:
 		return RiskAnalysis{SQLType: "RENAME_OBJECT", RiskLevel: "WARN", RiskReason: "重命名数据库对象可能影响业务 SQL、视图或程序引用"}, true
 	case node.GetAlterObjectSchemaStmt() != nil:
-		return RiskAnalysis{SQLType: "ALTER_SET_SCHEMA", RiskLevel: "BLOCKED", RiskReason: "禁止通过普通入口迁移 schema，请导出并人工确认依赖范围"}, true
+		return RiskAnalysis{SQLType: "ALTER_SET_SCHEMA", RiskLevel: "WARN", RiskReason: "迁移 schema 会改变对象命名空间和依赖解析，请确认引用、权限和同名对象影响"}, true
 	case node.GetAlterTableStmt() != nil:
 		return analyzeAlterTableStmt(node.GetAlterTableStmt()), true
 	case node.GetIndexStmt() != nil:
@@ -981,13 +981,13 @@ func analyzeAlterTableStmt(stmt *pg_query.AlterTableStmt) RiskAnalysis {
 		case pg_query.AlterTableType_AT_DetachPartition, pg_query.AlterTableType_AT_DetachPartitionFinalize:
 			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DETACH_PARTITION", RiskLevel: "WARN", RiskReason: "分离分区可能影响查询路由和数据可见性"})
 		case pg_query.AlterTableType_AT_DropColumn:
-			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DROP_COLUMN", RiskLevel: "BLOCKED", RiskReason: "删除字段可能导致数据丢失或依赖对象失效，禁止直接执行"})
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DROP_COLUMN", RiskLevel: "WARN", RiskReason: "删除字段会造成数据丢失，并可能导致依赖对象失效"})
 		case pg_query.AlterTableType_AT_DropConstraint:
 			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DROP_CONSTRAINT", RiskLevel: "WARN", RiskReason: "删除约束可能破坏数据一致性，请确认约束类型和依赖范围"})
 		case pg_query.AlterTableType_AT_ChangeOwner:
 			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ALTER_OWNER", RiskLevel: "WARN", RiskReason: "修改 OWNER 可能影响权限、DDL 和后续维护"})
 		case pg_query.AlterTableType_AT_DisableTrig, pg_query.AlterTableType_AT_DisableTrigAll, pg_query.AlterTableType_AT_DisableTrigUser:
-			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DISABLE_TRIGGER", RiskLevel: "BLOCKED", RiskReason: "禁用触发器可能破坏审计、同步或数据一致性，禁止直接执行"})
+			risk = mergeRisk(risk, RiskAnalysis{SQLType: "DISABLE_TRIGGER", RiskLevel: "WARN", RiskReason: "禁用触发器可能破坏审计、同步或数据一致性，请确认执行窗口和恢复步骤"})
 		case pg_query.AlterTableType_AT_EnableTrig, pg_query.AlterTableType_AT_EnableTrigAll, pg_query.AlterTableType_AT_EnableTrigUser:
 			risk = mergeRisk(risk, RiskAnalysis{SQLType: "ENABLE_TRIGGER", RiskLevel: "WARN", RiskReason: "启用触发器会改变表写入行为，请确认业务影响"})
 		}

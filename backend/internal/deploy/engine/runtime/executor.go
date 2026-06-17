@@ -644,7 +644,7 @@ func (r *Runtime) failRun(ctx context.Context, dep *store.Deployment, reason str
 			Action:    "持久化任务终态失败",
 			Type:      "task_event",
 			Status:    "warning",
-			Detail:    "无法将任务标记为 failed: " + err.Error() + " (任务可能在列表中持续显示为 running,需手工排查 SQLite/磁盘)",
+			Detail:    "无法将任务标记为 failed: " + err.Error() + " (任务可能在列表中持续显示为 running,需手工排查 PostgreSQL/磁盘)",
 			IsError:   true,
 		})
 	}
@@ -670,7 +670,7 @@ func (r *Runtime) successRun(ctx context.Context, dep *store.Deployment) {
 			Action:    "持久化任务终态失败",
 			Type:      "task_event",
 			Status:    "warning",
-			Detail:    "无法将任务标记为 success: " + err.Error() + " (任务可能在列表中持续显示为 running,需手工排查 SQLite/磁盘)",
+			Detail:    "无法将任务标记为 success: " + err.Error() + " (任务可能在列表中持续显示为 running,需手工排查 PostgreSQL/磁盘)",
 			IsError:   true,
 		})
 	}

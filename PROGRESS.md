@@ -4,7 +4,7 @@
 
 替代原有 Jenkins + Python 脚本方案，将构建配置、执行、监控统一到单一平台。
 
-- **后端**: Go (Gin + GORM + SQLite)
+- **后端**: Go (Gin + GORM + PostgreSQL)
 - **前端**: Vue 3 + Vite + Element Plus
 - **执行器**: Docker 容器隔离编译
 - **调度**: FIFO 队列 + 并发槽位(默认5)
@@ -99,7 +99,7 @@
 - [x] `scripts/deploy_service.sh` — 一键部署脚本
 - [x] SPA 内嵌 (`backend/internal/web/embed.go`)
 - [x] 端口 8800
-- [x] CGO_ENABLED=0 (纯 Go SQLite)
+- [x] PostgreSQL 作为系统自身存储
 
 ---
 
@@ -136,7 +136,7 @@
 
 | 决策 | 选择 | 原因 |
 |------|------|------|
-| 数据库 | SQLite (glebarez/sqlite) | 单机部署, 无需额外服务, CGO_ENABLED=0 |
+| 数据库 | PostgreSQL | 系统自身存储 |
 | Docker 集成 | CLI (exec.Command) | 避免 SDK 依赖问题, arm64/x86_64 兼容 |
 | 前端框架 | Vue 3 + Element Plus | gin-vue-admin 风格, 用户熟悉 |
 | 认证 | JWT HS256 24h | 简单可靠 |

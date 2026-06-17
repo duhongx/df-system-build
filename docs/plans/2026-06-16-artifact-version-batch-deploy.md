@@ -6,7 +6,7 @@
 
 **Architecture:** Add `artifact_versions` as the version header table and `artifact_version_items` as the file-level result table. Upload/download creates or refreshes a version record; artifact management displays version details; batch deploy selects one available version and creates build/deploy tasks from its deployable items.
 
-**Tech Stack:** Go/Gin/GORM backend, SQLite/PostgreSQL-compatible models, Vue 3 + Element Plus frontend.
+**Tech Stack:** Go/Gin/GORM backend, PostgreSQL-backed models, Vue 3 + Element Plus frontend.
 
 ### Task 1: Backend Version Persistence
 

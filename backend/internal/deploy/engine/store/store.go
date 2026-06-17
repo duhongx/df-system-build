@@ -1,7 +1,5 @@
-// Package store is dfctl-web's business persistence layer. Schema is
-// applied automatically on Open; the Store interface keeps a single
-// surface area for both production (SQLite) and tests (in-memory or
-// temp-file SQLite).
+// Package store is dfctl-web's business persistence layer. The Store
+// interface keeps one surface area for production and tests.
 package store
 
 import (
@@ -33,8 +31,8 @@ type Store interface {
 
 	// UpdateGlobalConfig atomically applies a partial PUT against the
 	// deployment_settings + network_settings + env_settings tables in
-	// one SQLite transaction. Used by /api/global-config to avoid
-	// half-applied state when SQLite errors mid-flight.
+	// one database transaction. Used by /api/global-config to avoid
+	// half-applied state when persistence errors mid-flight.
 	UpdateGlobalConfig(ctx context.Context, u GlobalConfigUpdate) error
 
 	// Env (k-v map).
@@ -69,10 +67,10 @@ type Store interface {
 	// don't get overwritten.
 	ReplaceTargetsForOwner(ctx context.Context, component, ownerVC string, hostIDs []int64) error
 	// ReplaceTargetsForOwners writes several (component, owner_vc,
-	// host_ids) tuples in a single SQLite transaction. Used by the
+	// host_ids) tuples in a single database transaction. Used by the
 	// targets / deployment handlers when expanding one virtual
 	// component fans out to multiple pipeline rows — without this,
-	// a SQLite error halfway through could leave the targets table
+	// a persistence error halfway through could leave the targets table
 	// reflecting only some of the pipeline rows the operator
 	// intended.
 	ReplaceTargetsForOwners(ctx context.Context, batch []OwnerComponentHosts) error

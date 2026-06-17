@@ -24,6 +24,17 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g.Use(middleware.AuthRequired())
 	{
 		g.GET("/instance", h.Instance)
+		g.GET("/sql-force-whitelist", h.GetSQLForceWhitelist)
+		g.PUT("/sql-force-whitelist", h.SaveSQLForceWhitelist)
+		g.GET("/view-dependency-tasks", h.ListSQLViewDependencyTasks)
+		g.POST("/view-dependency-tasks", h.CreateSQLViewDependencyTask)
+		g.GET("/view-dependency-tasks/:id", h.GetSQLViewDependencyTask)
+		g.POST("/view-dependency-tasks/:id/analyze", h.AnalyzeSQLViewDependencyTask)
+		g.POST("/view-dependency-tasks/:id/precheck", h.PrecheckSQLViewDependencyTask)
+		g.POST("/view-dependency-tasks/:id/execute", h.ExecuteSQLViewDependencyTask)
+		g.POST("/view-dependency-tasks/:id/restore", h.RestoreSQLViewDependencyTask)
+		g.GET("/view-dependency-tasks/:id/plan.sql", h.ExportSQLViewDependencyPlan)
+		g.GET("/view-dependency-tasks/:id/restore.sql", h.ExportSQLViewDependencyRestorePlan)
 		g.GET("/sql-files", h.ListSQLFiles)
 		g.GET("/sql-files/todo", h.ListTodoSQLFiles)
 		g.GET("/sql-files/done", h.ListDoneSQLFiles)
@@ -53,6 +64,161 @@ func (h *PostgreSQLHandler) Instance(c *gin.Context) {
 		return
 	}
 	response.OK(c, info)
+}
+
+func (h *PostgreSQLHandler) GetSQLForceWhitelist(c *gin.Context) {
+	config, err := h.svc.GetSQLForceWhitelist()
+	if err != nil {
+		response.Fail(c, 14017, err.Error())
+		return
+	}
+	response.OK(c, config)
+}
+
+func (h *PostgreSQLHandler) SaveSQLForceWhitelist(c *gin.Context) {
+	var req struct {
+		Enabled []string `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 14017, "参数错误")
+		return
+	}
+	config, err := h.svc.SaveSQLForceWhitelist(req.Enabled)
+	if err != nil {
+		response.Fail(c, 14017, err.Error())
+		return
+	}
+	response.OK(c, config)
+}
+
+func (h *PostgreSQLHandler) ListSQLViewDependencyTasks(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	tasks, total, err := h.svc.ListSQLViewDependencyTasks(page, pageSize)
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	response.OKWithPage(c, tasks, total, page, pageSize)
+}
+
+func (h *PostgreSQLHandler) CreateSQLViewDependencyTask(c *gin.Context) {
+	var req service.SQLViewDependencyTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 14018, "参数错误")
+		return
+	}
+	task, err := h.svc.CreateSQLViewDependencyTask(req, middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	response.OK(c, task)
+}
+
+func (h *PostgreSQLHandler) GetSQLViewDependencyTask(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	task, items, err := h.svc.GetSQLViewDependencyTask(uint(id))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"task": task, "items": items})
+}
+
+func (h *PostgreSQLHandler) AnalyzeSQLViewDependencyTask(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	task, items, err := h.svc.AnalyzeSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"task": task, "items": items})
+}
+
+func (h *PostgreSQLHandler) PrecheckSQLViewDependencyTask(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	task, items, err := h.svc.PrecheckSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"task": task, "items": items})
+}
+
+func (h *PostgreSQLHandler) ExecuteSQLViewDependencyTask(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	task, items, err := h.svc.ExecuteSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"task": task, "items": items})
+}
+
+func (h *PostgreSQLHandler) RestoreSQLViewDependencyTask(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	task, items, err := h.svc.RestoreSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"task": task, "items": items})
+}
+
+func (h *PostgreSQLHandler) ExportSQLViewDependencyPlan(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	content, err := h.svc.ExportSQLViewDependencyPlan(uint(id))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+	c.Header("Content-Disposition", "attachment; filename=view-dependency-plan.sql")
+	c.String(http.StatusOK, content)
+}
+
+func (h *PostgreSQLHandler) ExportSQLViewDependencyRestorePlan(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	content, err := h.svc.ExportSQLViewDependencyRestorePlan(uint(id))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+	c.Header("Content-Disposition", "attachment; filename=view-dependency-restore.sql")
+	c.String(http.StatusOK, content)
 }
 
 func (h *PostgreSQLHandler) ParseSQL(c *gin.Context) {
