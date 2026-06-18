@@ -537,45 +537,46 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 
 <template>
   <div class="sql-execution-page">
-    <section class="page-header">
-      <div>
-        <h2>SQL 执行</h2>
-        <p>按批次导入 SQL，按文件切换查看，逐条执行、跳过和导出异常 SQL。</p>
-      </div>
-      <div class="page-header-actions">
-        <el-button @click="optionsDialogVisible = true">执行选项</el-button>
-        <el-button @click="whitelistDialogVisible = true">白名单配置</el-button>
-      </div>
-    </section>
-
-    <section class="batch-summary-toolbar">
-      <div class="batch-summary-left">
-        <div class="batch-title">批次 {{ activeBatchName }}</div>
+    <section class="sql-command-bar">
+      <div class="command-status">
+        <div class="command-title">
+          <strong>SQL 执行</strong>
+          <span>批次：{{ activeBatchName }}</span>
+        </div>
         <div class="summary-tags">
-          <el-tag type="primary" effect="plain">文件 {{ summaryFileCount }}</el-tag>
-          <el-tag type="info" effect="plain">SQL {{ totalCount }}</el-tag>
-          <el-tag type="success" effect="plain">成功 {{ successCount }}</el-tag>
-          <el-tag type="danger" effect="plain">失败 {{ failedCount }}</el-tag>
-          <el-tag type="danger" effect="plain">不可执行 {{ notExecutableCount }}</el-tag>
-          <el-tag type="warning" effect="plain">超时 {{ timeoutCount }}</el-tag>
-          <el-tag type="info" effect="plain">跳过 {{ skippedCount }}</el-tag>
-          <el-tag type="warning" effect="plain">待执行 {{ pendingCount }}</el-tag>
+          <span>文件 {{ summaryFileCount }}</span>
+          <span>SQL {{ totalCount }}</span>
+          <span class="ok">成功 {{ successCount }}</span>
+          <span class="danger">失败 {{ failedCount }}</span>
+          <span class="danger">不可执行 {{ notExecutableCount }}</span>
+          <span class="warn">超时 {{ timeoutCount }}</span>
+          <span>跳过 {{ skippedCount }}</span>
+          <span class="warn">待执行 {{ pendingCount }}</span>
         </div>
       </div>
-      <div class="batch-actions">
+      <div class="command-actions">
         <label class="upload-btn">
           <input type="file" accept=".sql,.zip" multiple @change="handleFileChange" />
-          <el-button style="pointer-events: none;">上传SQL/ZIP</el-button>
+          <el-button size="small" style="pointer-events: none;">上传SQL/ZIP</el-button>
         </label>
-        <el-input v-model="serverFilePath" clearable placeholder="服务器 .sql/.zip 路径" class="server-path-input" />
-        <el-button :loading="importing" @click="handleImportServerSQL">导入服务器SQL</el-button>
-        <el-button :loading="parsing" @click="handleParse">解析当前</el-button>
-        <el-button type="warning" :loading="executing" @click="handleExecuteContent">解析并执行</el-button>
-        <el-button type="primary" :disabled="!currentBatch" :loading="executing" @click="handleExecuteBatch()">执行全部待执行</el-button>
-        <el-button :disabled="!currentFile" :loading="executing" @click="handleRetryCurrentFile">重试异常</el-button>
-        <el-button :disabled="!currentFile" @click="handleCancelExecution">取消当前</el-button>
-        <el-button :disabled="!currentBatch" @click="handleCancelBatch">取消批次</el-button>
-        <el-button :disabled="!anomalyStatements.length" @click="handleExportAnomalySQL">导出异常SQL</el-button>
+        <el-input v-model="serverFilePath" clearable placeholder="服务器 .sql/.zip 路径" class="server-path-input" size="small" />
+        <el-button size="small" :loading="importing" @click="handleImportServerSQL">导入</el-button>
+        <el-button size="small" :loading="parsing" @click="handleParse">解析</el-button>
+        <el-button size="small" type="warning" :loading="executing" @click="handleExecuteContent">解析并执行</el-button>
+        <el-button size="small" type="primary" :disabled="!currentBatch" :loading="executing" @click="handleExecuteBatch()">执行批次</el-button>
+        <el-dropdown trigger="click">
+          <el-button size="small">更多</el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item :disabled="!currentFile" @click="handleRetryCurrentFile">重试异常</el-dropdown-item>
+              <el-dropdown-item :disabled="!currentFile" @click="handleCancelExecution">取消当前</el-dropdown-item>
+              <el-dropdown-item :disabled="!currentBatch" @click="handleCancelBatch">取消批次</el-dropdown-item>
+              <el-dropdown-item :disabled="!anomalyStatements.length" @click="handleExportAnomalySQL">导出异常SQL</el-dropdown-item>
+              <el-dropdown-item @click="optionsDialogVisible = true">执行选项</el-dropdown-item>
+              <el-dropdown-item @click="whitelistDialogVisible = true">白名单配置</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
     </section>
 
@@ -656,23 +657,18 @@ function isAnomalyStatement(row: SQLChangeStatement) {
       </aside>
 
       <main class="sql-main-panel">
-        <div class="current-file-header">
+        <div class="sql-context-row">
           <div>
             <div class="current-file-title">当前文件：{{ form.fileName || '-' }}</div>
-            <div class="current-file-subtitle">SQL 列表按语句展示；完整原文在“完整SQL”中查看。</div>
           </div>
           <div class="option-chips">
-            <el-tag type="primary" effect="plain">事务内执行</el-tag>
-            <el-tag type="warning" effect="plain">强制执行 {{ options.forceBlockedSql ? '开启' : '关闭' }}</el-tag>
-            <el-tag type="info" effect="plain">{{ forceWhitelistSummary }}</el-tag>
+            <span class="option-label">当前执行选项</span>
+            <span>{{ executeOptionSummary }}</span>
+            <span>强制执行 {{ options.forceBlockedSql ? '开启' : '关闭' }}</span>
+            <span>{{ forceWhitelistSummary }}</span>
+            <el-button size="small" link type="primary" @click="optionsDialogVisible = true">调整</el-button>
+            <el-button size="small" link type="primary" @click="whitelistDialogVisible = true">白名单</el-button>
           </div>
-        </div>
-
-        <div class="current-option-row">
-          <span class="option-label">当前执行选项</span>
-          <span>{{ executeOptionSummary }}</span>
-          <el-button size="small" link type="primary" @click="optionsDialogVisible = true">调整选项</el-button>
-          <el-button size="small" link type="primary" @click="whitelistDialogVisible = true">查看白名单</el-button>
         </div>
 
         <el-tabs v-model="sqlViewMode" class="sql-content-tabs">
@@ -743,25 +739,22 @@ function isAnomalyStatement(row: SQLChangeStatement) {
           </el-tab-pane>
         </el-tabs>
 
-        <section class="sql-detail-panel">
+        <section v-if="selectedStatement" class="sql-detail-panel">
           <div class="detail-header">
             <span>SQL详情</span>
-            <div v-if="selectedStatement" class="detail-actions">
+            <div class="detail-actions">
               <el-button size="small" @click="handleCopySelectedSQL">复制SQL</el-button>
               <el-button size="small" @click="handleExportSelectedSQL()">导出本条</el-button>
             </div>
           </div>
-          <template v-if="selectedStatement">
-            <div class="detail-meta">
-              <el-tag :type="statusTag(selectedStatement.executeStatus)" size="small">{{ statementStatusText(selectedStatement.executeStatus) }}</el-tag>
-              <span>行号 {{ selectedStatement.lineNumber }}</span>
-              <span>{{ selectedStatement.sqlType }}</span>
-              <span v-if="selectedStatement.durationMs">耗时 {{ formatDuration(selectedStatement.durationMs) }}</span>
-            </div>
-            <div class="detail-reason" v-if="reasonText(selectedStatement)">原因：{{ reasonText(selectedStatement) }}</div>
-            <pre class="detail-sql">{{ selectedStatement.sqlContent }}</pre>
-          </template>
-          <el-empty v-else :image-size="48" description="点击 SQL 行查看详情" />
+          <div class="detail-meta">
+            <el-tag :type="statusTag(selectedStatement.executeStatus)" size="small">{{ statementStatusText(selectedStatement.executeStatus) }}</el-tag>
+            <span>行号 {{ selectedStatement.lineNumber }}</span>
+            <span>{{ selectedStatement.sqlType }}</span>
+            <span v-if="selectedStatement.durationMs">耗时 {{ formatDuration(selectedStatement.durationMs) }}</span>
+          </div>
+          <div class="detail-reason" v-if="reasonText(selectedStatement)">原因：{{ reasonText(selectedStatement) }}</div>
+          <pre class="detail-sql">{{ selectedStatement.sqlContent }}</pre>
         </section>
       </main>
     </section>
@@ -795,46 +788,47 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 </template>
 
 <style scoped>
-.sql-execution-page { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 118px); overflow: hidden; }
-.page-header, .batch-summary-toolbar, .sql-workbench { background: #fff; border: 1px solid #e4e7ed; border-radius: 6px; }
-.page-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; flex-shrink: 0; }
-.page-header h2 { margin: 0 0 8px; font-size: 20px; color: #1f2937; }
-.page-header p { margin: 0; color: #909399; font-size: 13px; }
-.page-header-actions { display: flex; gap: 8px; }
-.batch-summary-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; flex-shrink: 0; }
-.batch-summary-left { min-width: 0; }
-.batch-title { font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.summary-tags { display: flex; flex-wrap: wrap; gap: 6px; }
-.batch-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-.server-path-input { width: 240px; }
+.sql-execution-page { display: flex; flex-direction: column; gap: 8px; height: calc(100vh - 96px); overflow: hidden; }
+.sql-command-bar, .sql-workbench { background: #fff; border: 1px solid #e4e7ed; border-radius: 6px; }
+.sql-command-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; flex-shrink: 0; min-height: 48px; }
+.command-status { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.command-title { display: flex; align-items: center; gap: 10px; min-width: 0; color: #303133; }
+.command-title strong { font-size: 16px; }
+.command-title span { color: #606266; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.summary-tags { display: flex; flex-wrap: wrap; gap: 10px; color: #909399; font-size: 12px; line-height: 1; }
+.summary-tags span { white-space: nowrap; }
+.summary-tags .ok { color: #67c23a; }
+.summary-tags .danger { color: #f56c6c; }
+.summary-tags .warn { color: #e6a23c; }
+.command-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.server-path-input { width: 220px; }
 .upload-btn input { display: none; }
-.sql-workbench { flex: 1; min-height: 0; display: grid; grid-template-columns: 330px minmax(0, 1fr); overflow: hidden; }
-.sql-file-panel { border-right: 1px solid #e4e7ed; padding: 12px; display: flex; flex-direction: column; min-height: 0; background: #fbfcfe; }
-.panel-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-.panel-title { font-size: 16px; font-weight: 600; color: #303133; }
+.sql-workbench { flex: 1; min-height: 0; display: grid; grid-template-columns: 280px minmax(0, 1fr); overflow: hidden; }
+.sql-file-panel { border-right: 1px solid #e4e7ed; padding: 10px; display: flex; flex-direction: column; min-height: 0; background: #fbfcfe; }
+.panel-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.panel-title { font-size: 14px; font-weight: 600; color: #303133; }
 .file-mode-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
-.file-mode-tabs :deep(.el-radio-button__inner) { padding: 6px 9px; border-radius: 4px; border-left: 1px solid #dcdfe6; }
+.file-mode-tabs :deep(.el-radio-button__inner) { padding: 5px 8px; border-radius: 4px; border-left: 1px solid #dcdfe6; }
 .file-list { flex: 1; min-height: 0; overflow-y: auto; }
-.file-item { padding: 10px 12px; border: 1px solid #edf1f7; border-radius: 4px; background: #fff; margin-bottom: 8px; cursor: pointer; }
+.file-item { padding: 8px 10px; border: 1px solid #edf1f7; border-radius: 4px; background: #fff; margin-bottom: 6px; cursor: pointer; }
 .file-item:hover { border-color: #b3d8ff; background: #f8fbff; }
 .file-item.active { background: #ecf5ff; border-color: #409eff; }
 .file-name { font-size: 13px; font-weight: 600; color: #303133; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-meta { display: flex; align-items: center; gap: 8px; margin-top: 7px; font-size: 12px; color: #909399; }
-.file-actions { display: flex; gap: 8px; margin-top: 8px; }
-.sql-main-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 14px; overflow: hidden; }
-.current-file-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 8px; flex-shrink: 0; }
-.current-file-title { font-size: 16px; font-weight: 600; color: #303133; }
-.current-file-subtitle { color: #909399; font-size: 12px; margin-top: 5px; }
-.option-chips { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-.current-option-row { display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 0 2px 8px; color: #606266; font-size: 13px; flex-shrink: 0; }
+.file-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; color: #909399; }
+.file-actions { display: flex; gap: 8px; margin-top: 6px; }
+.sql-main-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 10px 12px 12px; overflow: hidden; }
+.sql-context-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; margin-bottom: 4px; flex-shrink: 0; }
+.current-file-title { font-size: 14px; font-weight: 600; color: #303133; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.option-chips { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; color: #909399; font-size: 12px; }
 .option-label { color: #303133; font-weight: 600; }
 .sql-content-tabs { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.sql-content-tabs :deep(.el-tabs__header) { margin-bottom: 8px; }
 .sql-content-tabs :deep(.el-tabs__content) { flex: 1; min-height: 0; overflow: hidden; }
 .sql-content-tabs :deep(.el-tab-pane) { height: 100%; min-height: 0; }
-.table-wrap { height: 100%; min-height: 260px; overflow: hidden; }
+.table-wrap { height: 100%; min-height: 0; overflow: hidden; }
 .full-sql-content, .detail-sql { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; margin: 0; color: #303133; }
 .full-sql-content { height: 100%; overflow: auto; padding: 14px; background: #f8fafc; border: 1px solid #e4e7ed; border-radius: 4px; }
-.sql-detail-panel { margin-top: 10px; border: 1px solid #e4e7ed; border-radius: 6px; background: #f8fafc; padding: 10px 12px; flex-shrink: 0; min-height: 150px; max-height: 220px; overflow: auto; }
+.sql-detail-panel { margin-top: 8px; border: 1px solid #e4e7ed; border-radius: 6px; background: #f8fafc; padding: 10px 12px; flex-shrink: 0; max-height: 190px; overflow: auto; }
 .detail-header { display: flex; align-items: center; justify-content: space-between; font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 8px; }
 .detail-actions { display: flex; gap: 8px; }
 .detail-meta { display: flex; align-items: center; gap: 10px; color: #606266; font-size: 12px; margin-bottom: 8px; }
@@ -848,8 +842,8 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 
 @media (max-width: 1280px) {
   .sql-execution-page { height: auto; overflow: visible; }
-  .batch-summary-toolbar { align-items: flex-start; flex-direction: column; }
-  .batch-actions { justify-content: flex-start; }
+  .sql-command-bar { align-items: flex-start; flex-direction: column; }
+  .command-actions { justify-content: flex-start; }
   .sql-workbench { grid-template-columns: 1fr; }
   .sql-file-panel { border-right: 0; border-bottom: 1px solid #e4e7ed; max-height: 360px; }
   .sql-main-panel { min-height: 640px; }
