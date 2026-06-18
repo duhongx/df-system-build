@@ -1956,6 +1956,7 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 		repository.DB.Save(stmt)
 
 		affected, sqlState, execErr := executeOneSQL(execCtx, db, file.SchemaName, stmt.SQLContent, stmt.SQLType)
+		executionCanceled := isSQLExecutionCanceled(executionCtx.Err(), execErr)
 		cancel()
 
 		now := time.Now()
@@ -1964,7 +1965,7 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 		stmt.AffectedRows = affected
 		stmt.SQLState = sqlState
 		if execErr != nil {
-			if errors.Is(execErr, context.Canceled) || execCtx.Err() == context.Canceled || executionCtx.Err() == context.Canceled {
+			if executionCanceled {
 				stmt.ExecuteStatus = "CANCELED"
 				stmt.ExecuteMessage = "执行已取消"
 				canceledCount++
@@ -1980,6 +1981,7 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 				stmt.ExecuteMessage = execErr.Error()
 				failedCount++
 				repository.DB.Save(stmt)
+				markRemainingSQLStatementsPendingAfterFailure(statements, i+1, "前序 SQL 执行失败，当前 SQL 尚未执行")
 				break
 			}
 		} else {
@@ -2075,6 +2077,30 @@ func shouldBlockStatementWithWhitelist(stmt model.SQLChangeStatement, options SQ
 		return false
 	}
 	return true
+}
+
+func isSQLExecutionCanceled(executionCtxErr error, execErr error) bool {
+	return errors.Is(execErr, context.Canceled) || errors.Is(executionCtxErr, context.Canceled)
+}
+
+func markRemainingSQLStatementsPendingAfterFailure(statements []model.SQLChangeStatement, start int, message string) {
+	if start >= len(statements) {
+		return
+	}
+	for i := start; i < len(statements); i++ {
+		stmt := &statements[i]
+		if stmt.ExecuteStatus == "SUCCESS" || stmt.ExecuteStatus == "SKIPPED" || stmt.ExecuteStatus == "FAILED" || stmt.ExecuteStatus == "CANCELED" {
+			continue
+		}
+		stmt.ExecuteStatus = "PENDING_AFTER_FAILURE"
+		stmt.ExecuteMessage = message
+		_ = repository.DB.Model(&model.SQLChangeStatement{}).
+			Where("id = ?", stmt.ID).
+			Updates(map[string]any{
+				"execute_status":  stmt.ExecuteStatus,
+				"execute_message": stmt.ExecuteMessage,
+			}).Error
+	}
 }
 
 func refreshStatementsStaticRiskBeforeExecution(statements []model.SQLChangeStatement) bool {
