@@ -76,6 +76,12 @@ const successCount = computed(() => statements.value.filter(s => s.executeStatus
 const failedCount = computed(() => statements.value.filter(s => s.executeStatus === 'FAILED').length)
 const notExecutableCount = computed(() => statements.value.filter(s => s.executeStatus === 'NOT_EXECUTABLE').length)
 const skippedCount = computed(() => statements.value.filter(s => s.executeStatus === 'SKIPPED').length)
+const sqlDisplayContent = computed(() => {
+  if (statements.value.length > 0) {
+    return statements.value.map(s => formatSQLSingleLine(s.sqlContent)).join('\n')
+  }
+  return form.value.content
+})
 
 onMounted(() => { loadBatches(); loadTodo(); loadDone(); loadSQLForceWhitelistConfig() })
 
@@ -258,6 +264,16 @@ async function handleOpen(row: SQLChangeFile) {
 async function handleOpenBatch(row: SQLChangeBatch) {
   const data = await getSQLBatch(row.id); currentBatch.value = data.batch; batchFileList.value = data.files || []
 }
+
+function handleSQLContentInput(value: string) {
+  form.value.content = value
+  if (statements.value.length > 0 && value !== sqlDisplayContent.value) {
+    statements.value = []
+    currentFile.value = null
+    currentBatch.value = null
+    batchFileList.value = []
+  }
+}
 async function handleSkipFile(row: SQLChangeFile) {
   await ElMessageBox.confirm(`确定跳过 "${row.fileName}" 吗？`, '确认', { type: 'warning' })
   await skipSQLFile(row.id); ElMessage.success('已跳过'); await Promise.all([loadTodo(), loadDone()])
@@ -316,6 +332,10 @@ async function buildConfirmedOptions(targetStatements: SQLChangeStatement[]) {
 function reasonText(row: SQLChangeStatement) {
   if (row.sqlType === 'MISSING_SCHEMA') return row.executeMessage || `必须显式指定 schema。${row.riskReason || ''}`
   return row.executeMessage || row.riskReason
+}
+
+function formatSQLSingleLine(sql: string) {
+  return (sql || '').replace(/\s+/g, ' ').trim()
 }
 </script>
 
@@ -409,7 +429,14 @@ function reasonText(row: SQLChangeStatement) {
           </el-popover>
           <el-button size="small" link type="primary" @click="whitelistDialogVisible = true">白名单配置</el-button>
         </div>
-        <el-input v-model="form.content" type="textarea" :rows="6" placeholder="粘贴 SQL 内容，或从左侧选择文件查看" class="sql-textarea" />
+        <el-input
+          :model-value="sqlDisplayContent"
+          type="textarea"
+          :rows="6"
+          placeholder="粘贴 SQL 内容，或从左侧选择文件查看"
+          class="sql-textarea"
+          @update:model-value="handleSQLContentInput"
+        />
         <div class="editor-actions">
           <el-button size="small" :loading="parsing" @click="handleParse">仅解析</el-button>
           <el-button size="small" type="warning" :loading="executing" @click="handleExecuteContent">解析并执行</el-button>
@@ -452,7 +479,9 @@ function reasonText(row: SQLChangeStatement) {
             </el-table-column>
             <el-table-column prop="estimatedRows" label="预估行数" width="100" align="right" />
             <el-table-column prop="affectedRows" label="影响行数" width="100" align="right" />
-            <el-table-column prop="sqlContent" label="SQL" min-width="380" show-overflow-tooltip />
+            <el-table-column label="SQL" min-width="380" show-overflow-tooltip>
+              <template #default="{ row }">{{ formatSQLSingleLine(row.sqlContent) }}</template>
+            </el-table-column>
             <el-table-column label="原因" min-width="280" show-overflow-tooltip>
               <template #default="{ row }">{{ reasonText(row) }}</template>
             </el-table-column>

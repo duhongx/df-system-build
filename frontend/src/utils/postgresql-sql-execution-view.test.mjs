@@ -22,3 +22,7 @@ assert.match(view, /ZIP_MAX_TOTAL_SIZE/, 'zip upload should enforce a total SQL 
 assert.match(view, /try \{[\s\S]*JSZip\.loadAsync/, 'zip upload should report invalid zip errors explicitly')
 assert.match(view, /duplicateNames/, 'zip upload should detect duplicate SQL basenames')
 assert.match(view, /await handleOpen\(currentFile\.value\)/, 'skipping a statement should reload the current file status after backend recomputation')
+assert.match(view, /function formatSQLSingleLine/, 'SQL execution view should provide one-line SQL formatting')
+assert.match(view, /const sqlDisplayContent = computed/, 'SQL editor should use parsed statements for display-only formatting')
+assert.match(view, /:model-value="sqlDisplayContent"/, 'SQL editor should display one SQL statement per line when parsed statements exist')
+assert.match(view, /formatSQLSingleLine\(row\.sqlContent\)/, 'SQL result table should display compact one-line SQL content')
