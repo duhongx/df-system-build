@@ -330,6 +330,45 @@ func TestParseSQLAllowsSameFileNameAcrossVersionAndSchema(t *testing.T) {
 	}
 }
 
+func TestParseSQLFileMetaDoesNotTreatDescriptionAsSchema(t *testing.T) {
+	version, groupSortNo, schemaName := parseSQLFileMeta("15.3_SP15_260507__18__有需要再执行小数位数相关-有视图依赖需手动执行.sql")
+
+	if version != "15.3_SP15_260507" {
+		t.Fatalf("expected version from file name, got %q", version)
+	}
+	if groupSortNo != 18 {
+		t.Fatalf("expected group sort number from file name, got %d", groupSortNo)
+	}
+	if schemaName != "" {
+		t.Fatalf("file description must not be treated as schema, got %q", schemaName)
+	}
+}
+
+func TestParseSQLInfersSchemaFromContentWhenFileNameHasChineseDescription(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+
+	file, statements, err := NewPostgreSQLService().ParseSQL(ParseSQLRequest{
+		FileName:  "15.3_SP15_260507__18__有需要再执行小数位数相关-有视图依赖需手动执行.sql",
+		Content:   "ALTER TABLE df_bingangl.ba_bingrenfy ALTER COLUMN baidanblzp_xyzp TYPE numeric(18,7);",
+		Overwrite: true,
+	})
+	if err != nil {
+		t.Fatalf("parse sql should infer schema from SQL content, not file name: %v", err)
+	}
+	if file.Version != "15.3_SP15_260507" {
+		t.Fatalf("expected version from file name, got %q", file.Version)
+	}
+	if file.GroupSortNo != 18 {
+		t.Fatalf("expected group sort number from file name, got %d", file.GroupSortNo)
+	}
+	if file.SchemaName != "df_bingangl" {
+		t.Fatalf("expected schema from SQL content, got %q", file.SchemaName)
+	}
+	if len(statements) != 1 {
+		t.Fatalf("expected one statement, got %d", len(statements))
+	}
+}
+
 func TestParseSQLPersistsExecutionStrategy(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 
@@ -696,6 +735,33 @@ func TestParseSQLBatchCreatesOrderedFiles(t *testing.T) {
 	}
 	if files[1].FileName != "002-second.sql" || files[1].BatchSortNo != 2 {
 		t.Fatalf("expected second sorted file, got %+v", files[1])
+	}
+}
+
+func TestParseSQLBatchInfersSchemaFromContentWhenFileNameHasChineseDescription(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+
+	_, files, err := NewPostgreSQLService().ParseSQLBatch(ParseSQLBatchRequest{
+		BatchName: "15.3_SP15_260507_18_有需要再执行小数位数相关-有视图依赖需手动执行",
+		Overwrite: true,
+		Files: []ParseSQLBatchFile{
+			{
+				FileName: "15.3_SP15_260507__18__有需要再执行小数位数相关-有视图依赖需手动执行.sql",
+				Content:  "ALTER TABLE df_bingangl.ba_bingrenfy ALTER COLUMN baidanblzp_xyzp TYPE numeric(18,7);",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse sql batch should infer schema from SQL content, not file name: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected one file, got %d", len(files))
+	}
+	if files[0].SchemaName != "df_bingangl" {
+		t.Fatalf("expected schema from SQL content, got %q", files[0].SchemaName)
+	}
+	if files[0].GroupSortNo != 18 {
+		t.Fatalf("expected group sort number from file name, got %d", files[0].GroupSortNo)
 	}
 }
 

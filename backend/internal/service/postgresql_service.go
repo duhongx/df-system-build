@@ -2990,12 +2990,8 @@ func parseSQLFileMeta(fileName string) (version string, groupSortNo int, schemaN
 		if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
 			groupSortNo = n
 		}
-		schemaName = strings.TrimSpace(parts[2])
-		if idx := strings.Index(schemaName, "."); idx >= 0 {
-			schemaName = schemaName[:idx]
-		}
 	}
-	return version, groupSortNo, schemaName
+	return version, groupSortNo, ""
 }
 
 func defaultSQLFileName(name string) string {
