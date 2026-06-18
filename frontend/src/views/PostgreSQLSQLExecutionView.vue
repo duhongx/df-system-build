@@ -348,7 +348,7 @@ function applyLoadedFile(file: SQLChangeFile, loadedStatements: SQLChangeStateme
   currentFile.value = file
   form.value = { fileName: file.fileName || '', content: file.fileContent || '', overwrite: true }
   statements.value = loadedStatements
-  selectedStatement.value = anomalyStatements.value[0] || loadedStatements[0] || null
+  selectedStatement.value = null
   sqlViewMode.value = loadedStatements.length > 0 ? 'list' : 'full'
 }
 
@@ -517,7 +517,7 @@ function isAnomalyStatement(row: SQLChangeStatement) {
           <el-button size="small" style="pointer-events: none;">上传SQL/ZIP</el-button>
         </label>
         <el-button size="small" :loading="parsing" @click="handleParse">解析</el-button>
-        <el-button size="small" type="warning" :loading="executing" @click="handleExecuteContent">解析并执行</el-button>
+        <el-button size="small" type="warning" :loading="executing" @click="handleExecuteContent">执行</el-button>
         <el-dropdown trigger="click">
           <el-button size="small">更多</el-button>
           <template #dropdown>
@@ -628,7 +628,7 @@ function isAnomalyStatement(row: SQLChangeStatement) {
         <el-tabs v-model="sqlViewMode" class="sql-content-tabs">
           <el-tab-pane label="SQL列表" name="list">
             <div class="table-wrap">
-              <el-table v-if="visibleStatements.length" :data="visibleStatements" size="small" border height="100%" stripe highlight-current-row @row-click="selectStatement">
+              <el-table v-if="visibleStatements.length" :data="visibleStatements" size="small" border height="100%" stripe highlight-current-row>
                 <el-table-column type="index" label="序号" width="58" align="center" />
                 <el-table-column prop="lineNumber" label="行号" width="70" align="center" />
                 <el-table-column prop="executeStatus" label="状态" width="100" align="center">
@@ -652,7 +652,7 @@ function isAnomalyStatement(row: SQLChangeStatement) {
                   <template #default="{ row }">
                     <el-button size="small" link type="primary" :disabled="row.executeStatus === 'SUCCESS'" @click.stop="handleRetryCurrentFile">重试</el-button>
                     <el-button size="small" link type="warning" :disabled="row.executeStatus === 'SUCCESS' || row.executeStatus === 'SKIPPED'" @click.stop="handleSkipStatement(row)">跳过</el-button>
-                    <el-button size="small" link type="primary" @click.stop="selectedStatement = row">查看</el-button>
+                    <el-button size="small" link type="primary" @click.stop="selectStatement(row)">查看</el-button>
                   </template>
                 </el-table-column>
               </el-table>
@@ -666,7 +666,7 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 
           <el-tab-pane :label="`异常SQL (${anomalyStatements.length})`" name="anomaly">
             <div class="table-wrap">
-              <el-table v-if="visibleStatements.length" :data="visibleStatements" size="small" border height="100%" stripe highlight-current-row @row-click="selectStatement">
+              <el-table v-if="visibleStatements.length" :data="visibleStatements" size="small" border height="100%" stripe highlight-current-row>
                 <el-table-column prop="lineNumber" label="行号" width="70" align="center" />
                 <el-table-column prop="executeStatus" label="状态" width="110" align="center">
                   <template #default="{ row }">
@@ -680,10 +680,11 @@ function isAnomalyStatement(row: SQLChangeStatement) {
                 <el-table-column label="原因" min-width="300" show-overflow-tooltip>
                   <template #default="{ row }">{{ reasonText(row) }}</template>
                 </el-table-column>
-                <el-table-column label="操作" width="150" fixed="right" align="center">
+                <el-table-column label="操作" width="180" fixed="right" align="center">
                   <template #default="{ row }">
                     <el-button size="small" link type="primary" @click.stop="handleRetryCurrentFile">重试</el-button>
                     <el-button size="small" link type="warning" @click.stop="handleSkipStatement(row)">跳过</el-button>
+                    <el-button size="small" link type="primary" @click.stop="selectStatement(row)">查看</el-button>
                     <el-button size="small" link type="primary" @click.stop="handleExportSelectedSQL(row)">导出</el-button>
                   </template>
                 </el-table-column>
