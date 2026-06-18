@@ -25,9 +25,9 @@ type ViewRebuildPlan struct {
 }
 
 type SQLViewDependencyTaskRequest struct {
-	SchemaName       string `json:"schemaName" binding:"required"`
-	TableName        string `json:"tableName" binding:"required"`
-	ColumnName       string `json:"columnName" binding:"required"`
+	SchemaName       string `json:"schemaName"`
+	TableName        string `json:"tableName"`
+	ColumnName       string `json:"columnName"`
 	AlterSQL         string `json:"alterSql" binding:"required"`
 	ExecutionMode    string `json:"executionMode"`
 	LockTimeout      string `json:"lockTimeout"`
@@ -104,8 +104,8 @@ func validateViewDependencyAlterSQL(req SQLViewDependencyTaskRequest) (alterColu
 	req.TableName = strings.TrimSpace(req.TableName)
 	req.ColumnName = strings.TrimSpace(req.ColumnName)
 	req.AlterSQL = strings.TrimSpace(req.AlterSQL)
-	if req.SchemaName == "" || req.TableName == "" || req.ColumnName == "" || req.AlterSQL == "" {
-		return alterColumnRef{}, fmt.Errorf("schema、table、column 和 ALTER SQL 不能为空")
+	if req.AlterSQL == "" {
+		return alterColumnRef{}, fmt.Errorf("ALTER SQL 不能为空")
 	}
 	if err := validateSchemaName(req.SchemaName); err != nil {
 		return alterColumnRef{}, err
@@ -117,7 +117,16 @@ func validateViewDependencyAlterSQL(req SQLViewDependencyTaskRequest) (alterColu
 	if ref.schema == "" {
 		return alterColumnRef{}, fmt.Errorf("ALTER SQL 必须显式指定 schema.table")
 	}
-	if !strings.EqualFold(ref.schema, req.SchemaName) || !strings.EqualFold(ref.table, req.TableName) || !strings.EqualFold(ref.column, req.ColumnName) {
+	if err := validateSchemaName(ref.schema); err != nil {
+		return alterColumnRef{}, err
+	}
+	if req.SchemaName != "" && !strings.EqualFold(ref.schema, req.SchemaName) {
+		return alterColumnRef{}, fmt.Errorf("ALTER SQL 目标 schema 与入参不一致")
+	}
+	if req.TableName != "" && !strings.EqualFold(ref.table, req.TableName) {
+		return alterColumnRef{}, fmt.Errorf("ALTER SQL 目标表与入参不一致")
+	}
+	if req.ColumnName != "" && !strings.EqualFold(ref.column, req.ColumnName) {
 		return alterColumnRef{}, fmt.Errorf("ALTER SQL 目标字段与入参不一致")
 	}
 	return ref, nil

@@ -26,6 +26,18 @@ func TestValidateViewDependencyAlterSQLAcceptsExplicitTargetColumn(t *testing.T)
 	}
 }
 
+func TestValidateViewDependencyAlterSQLInfersTargetColumnFromSQL(t *testing.T) {
+	ref, err := validateViewDependencyAlterSQL(SQLViewDependencyTaskRequest{
+		AlterSQL: "ALTER TABLE his.patient ALTER COLUMN code TYPE text;",
+	})
+	if err != nil {
+		t.Fatalf("expected SQL-only request to be accepted, got %v", err)
+	}
+	if ref.schema != "his" || ref.table != "patient" || ref.column != "code" {
+		t.Fatalf("unexpected target ref: %+v", ref)
+	}
+}
+
 func TestValidateViewDependencyAlterSQLRejectsUnsafeSQL(t *testing.T) {
 	tests := []struct {
 		name string

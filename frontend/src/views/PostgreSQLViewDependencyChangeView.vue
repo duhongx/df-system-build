@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   analyzeSQLViewDependencyTask,
@@ -23,6 +23,7 @@ const prechecking = ref(false)
 const executing = ref(false)
 const restoring = ref(false)
 const exporting = ref(false)
+const historyVisible = ref(false)
 const tasks = ref<SQLViewDependencyTask[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -31,9 +32,6 @@ const currentTask = ref<SQLViewDependencyTask | null>(null)
 const items = ref<SQLViewDependencyItem[]>([])
 const planPreview = ref('')
 const form = ref<SQLViewDependencyTaskRequest>({
-  schemaName: '',
-  tableName: '',
-  columnName: '',
   alterSql: '',
   executionMode: 'STEP',
   lockTimeout: '3s',
@@ -60,8 +58,6 @@ const canPrecheck = computed(() => !!currentTask.value && items.value.length > 0
 const canExecute = computed(() => currentStatus.value === 'PRECHECK_PASSED')
 const canRestore = computed(() => !!currentTask.value && items.value.length > 0 && ['FAILED', 'RESTORE_FAILED', 'SUCCESS', 'RESTORED'].includes(currentStatus.value))
 
-onMounted(loadTasks)
-
 async function loadTasks() {
   loading.value = true
   try {
@@ -73,17 +69,22 @@ async function loadTasks() {
   }
 }
 
+async function openTaskDrawer() {
+  historyVisible.value = true
+  await loadTasks()
+}
+
 async function handleCreateTask() {
-  if (!form.value.schemaName.trim() || !form.value.tableName.trim() || !form.value.columnName.trim() || !form.value.alterSql.trim()) {
-    ElMessage.warning('请填写目标 Schema、目标表、目标字段和 ALTER SQL')
+  if (!form.value.alterSql.trim()) {
+    ElMessage.warning('请填写 ALTER SQL')
     return
   }
   const task = await createSQLViewDependencyTask({ ...form.value })
   currentTask.value = task
   items.value = []
   planPreview.value = ''
-  ElMessage.success('任务已保存，请继续分析依赖')
-  await loadTasks()
+  ElMessage.success(`已识别 ${task.schemaName}.${task.tableName}.${task.columnName}，请继续分析依赖`)
+  if (historyVisible.value) await loadTasks()
 }
 
 async function handleOpenTask(task: SQLViewDependencyTask) {
@@ -92,14 +93,12 @@ async function handleOpenTask(task: SQLViewDependencyTask) {
   items.value = data.items || []
   planPreview.value = ''
   form.value = {
-    schemaName: data.task.schemaName,
-    tableName: data.task.tableName,
-    columnName: data.task.columnName,
     alterSql: data.task.alterSql,
     executionMode: data.task.executionMode || 'STEP',
     lockTimeout: data.task.lockTimeout || '3s',
     statementTimeout: data.task.statementTimeout || '10min',
   }
+  historyVisible.value = false
 }
 
 async function refreshCurrentTask() {
@@ -107,7 +106,7 @@ async function refreshCurrentTask() {
   const data = await getSQLViewDependencyTask(currentTask.value.id)
   currentTask.value = data.task
   items.value = data.items || []
-  await loadTasks()
+  if (historyVisible.value) await loadTasks()
 }
 
 function showOperationError(err: unknown) {
@@ -127,7 +126,7 @@ async function handleAnalyze() {
     items.value = data.items || []
     planPreview.value = ''
     ElMessage.success(`分析完成，依赖对象 ${items.value.length} 个`)
-    await loadTasks()
+    if (historyVisible.value) await loadTasks()
   } catch (err) {
     await refreshCurrentTask()
     showOperationError(err)
@@ -147,7 +146,7 @@ async function handlePrecheck() {
     currentTask.value = data.task
     items.value = data.items || []
     ElMessage.success(data.task.executeMessage || '预检通过')
-    await loadTasks()
+    if (historyVisible.value) await loadTasks()
   } catch (err) {
     await refreshCurrentTask()
     showOperationError(err)
@@ -172,7 +171,7 @@ async function handleExecute() {
     currentTask.value = data.task
     items.value = data.items || []
     ElMessage.success(data.task.executeMessage || '执行完成')
-    await loadTasks()
+    if (historyVisible.value) await loadTasks()
   } catch (err) {
     await refreshCurrentTask()
     showOperationError(err)
@@ -193,7 +192,7 @@ async function handleRestore() {
     currentTask.value = data.task
     items.value = data.items || []
     ElMessage.success(data.task.executeMessage || '恢复完成')
-    await loadTasks()
+    if (historyVisible.value) await loadTasks()
   } catch (err) {
     await refreshCurrentTask()
     showOperationError(err)
@@ -279,7 +278,7 @@ function objectKindText(kind: string) {
         <h2>字段变更助手</h2>
         <p>处理 ALTER COLUMN 时被视图依赖阻塞的变更，支持依赖分析、预检、事务执行、分步执行和恢复。</p>
       </div>
-      <el-button :loading="loading" @click="loadTasks">刷新历史任务</el-button>
+      <el-button :loading="loading" @click="openTaskDrawer">查看任务</el-button>
     </section>
 
     <section class="workflow-steps">
@@ -294,7 +293,7 @@ function objectKindText(kind: string) {
 
     <section v-if="currentTask" class="task-summary">
       <div>
-        <span class="summary-label">目标字段</span>
+        <span class="summary-label">识别对象</span>
         <strong>{{ currentTask.schemaName }}.{{ currentTask.tableName }}.{{ currentTask.columnName }}</strong>
       </div>
       <div>
@@ -315,26 +314,21 @@ function objectKindText(kind: string) {
       </div>
     </section>
 
-    <div class="content-grid">
-      <main class="workspace">
+    <main class="workspace">
         <section class="section">
           <div class="section-head">
             <div>
               <h3>1. 字段变更</h3>
-              <p>填写目标字段和 ALTER SQL。系统会校验 SQL 是否只修改同一个字段。</p>
+              <p>直接粘贴一条 ALTER TABLE ... ALTER COLUMN ... SQL。系统会自动识别 schema、表和字段，并校验是否只修改一个字段。</p>
             </div>
             <el-button type="primary" @click="handleCreateTask">保存任务</el-button>
           </div>
-          <div class="form-grid">
-            <el-form-item label="目标 Schema">
-              <el-input v-model="form.schemaName" placeholder="例如 his" />
-            </el-form-item>
-            <el-form-item label="目标表">
-              <el-input v-model="form.tableName" placeholder="例如 patient" />
-            </el-form-item>
-            <el-form-item label="目标字段">
-              <el-input v-model="form.columnName" placeholder="例如 code" />
-            </el-form-item>
+          <el-input v-model="form.alterSql" class="sql-input" type="textarea" :rows="6" placeholder="ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(64);" />
+          <div v-if="currentTask" class="detected-target">
+            <span>已识别</span>
+            <strong>{{ currentTask.schemaName }}.{{ currentTask.tableName }}.{{ currentTask.columnName }}</strong>
+          </div>
+          <div class="options-grid">
             <el-form-item label="锁等待超时">
               <el-input v-model="form.lockTimeout" placeholder="默认 3s" />
             </el-form-item>
@@ -342,7 +336,6 @@ function objectKindText(kind: string) {
               <el-input v-model="form.statementTimeout" placeholder="默认 10min" />
             </el-form-item>
           </div>
-          <el-input v-model="form.alterSql" class="sql-input" type="textarea" :rows="5" placeholder="ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(64);" />
           <div class="mode-panel">
             <div class="mode-title">执行方式</div>
             <el-radio-group v-model="form.executionMode">
@@ -360,7 +353,7 @@ function objectKindText(kind: string) {
           <div class="section-head">
             <div>
               <h3>2. 依赖分析</h3>
-              <p>分析依赖目标字段的视图，生成删除、恢复、权限、注释、索引和校验 SQL。</p>
+              <p>分析依赖变更字段的视图，生成删除、恢复、权限、注释、索引和校验 SQL。</p>
             </div>
             <div class="actions">
               <el-button type="warning" :disabled="!canAnalyze" :loading="analyzing" @click="handleAnalyze">分析依赖</el-button>
@@ -442,30 +435,32 @@ function objectKindText(kind: string) {
           </div>
           <el-input v-model="planPreview" type="textarea" :rows="10" readonly placeholder="导出 SQL 后显示" />
         </section>
-      </main>
+    </main>
 
-      <aside class="task-panel">
-        <div class="panel-title">历史任务</div>
-        <div class="task-list" v-loading="loading">
-          <div v-for="task in tasks" :key="task.id" class="task-item" :class="{ active: currentTask?.id === task.id }" @click="handleOpenTask(task)">
-            <div class="task-name">{{ task.schemaName }}.{{ task.tableName }}.{{ task.columnName }}</div>
-            <div class="task-meta">
-              <el-tag :type="statusTag(task.status)" size="small">{{ statusText(task.status) }}</el-tag>
-              <span>{{ executionModeText(task.executionMode) }}</span>
-              <span>{{ formatTimeStr(task.createdAt)?.slice(5) }}</span>
-            </div>
+    <el-drawer v-model="historyVisible" title="任务记录" size="420px">
+      <div class="history-toolbar">
+        <span>选择已有任务会回填 SQL 和执行状态。</span>
+        <el-button size="small" :loading="loading" @click="loadTasks">刷新</el-button>
+      </div>
+      <div class="task-list" v-loading="loading">
+        <div v-for="task in tasks" :key="task.id" class="task-item" :class="{ active: currentTask?.id === task.id }" @click="handleOpenTask(task)">
+          <div class="task-name">{{ task.schemaName }}.{{ task.tableName }}.{{ task.columnName }}</div>
+          <div class="task-meta">
+            <el-tag :type="statusTag(task.status)" size="small">{{ statusText(task.status) }}</el-tag>
+            <span>{{ executionModeText(task.executionMode) }}</span>
+            <span>{{ formatTimeStr(task.createdAt)?.slice(5) }}</span>
           </div>
-          <el-empty v-if="!tasks.length" :image-size="48" description="暂无任务" />
         </div>
-        <el-pagination v-if="total > pageSize" v-model:current-page="page" small layout="prev, pager, next" :page-size="pageSize" :total="total" @current-change="loadTasks" />
-      </aside>
-    </div>
+        <el-empty v-if="!tasks.length" :image-size="48" description="暂无任务" />
+      </div>
+      <el-pagination v-if="total > pageSize" v-model:current-page="page" small layout="prev, pager, next" :page-size="pageSize" :total="total" @current-change="loadTasks" />
+    </el-drawer>
   </div>
 </template>
 
 <style scoped>
 .view-dep-page { display: flex; flex-direction: column; gap: 12px; min-height: calc(100vh - 130px); }
-.page-header, .workflow-steps, .task-summary, .section, .task-panel { background: #fff; border: 1px solid #ebeef5; border-radius: 6px; }
+.page-header, .workflow-steps, .task-summary, .section { background: #fff; border: 1px solid #ebeef5; border-radius: 6px; }
 .page-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 18px; }
 .page-header h2 { margin: 0 0 6px; font-size: 20px; color: #1f2937; }
 .page-header p, .section-head p, .mode-desc p, .execution-cards p { margin: 0; color: #909399; font-size: 13px; line-height: 1.6; }
@@ -473,15 +468,16 @@ function objectKindText(kind: string) {
 .task-summary { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 12px; padding: 12px 16px; align-items: center; }
 .summary-label { display: block; color: #909399; font-size: 12px; margin-bottom: 4px; }
 .summary-message { grid-column: span 4; color: #606266; }
-.content-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; align-items: start; }
 .workspace { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .section { padding: 14px 16px; }
 .section-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
 .section-head h3 { margin: 0 0 6px; font-size: 16px; color: #303133; }
-.form-grid { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 10px; }
-.form-grid :deep(.el-form-item) { margin-bottom: 8px; }
+.options-grid { display: grid; grid-template-columns: repeat(2, minmax(160px, 260px)); gap: 10px; margin-top: 10px; }
+.options-grid :deep(.el-form-item) { margin-bottom: 8px; }
 .sql-input { margin-top: 4px; }
 .sql-input :deep(textarea), .plan-section :deep(textarea) { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.5; }
+.detected-target { margin-top: 10px; display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid #d9ecff; border-radius: 4px; background: #ecf5ff; color: #606266; }
+.detected-target strong { color: #1f2937; }
 .mode-panel { margin-top: 12px; padding: 12px; border: 1px solid #ebeef5; border-radius: 6px; background: #fafafa; }
 .mode-title { font-weight: 600; margin-bottom: 8px; color: #303133; }
 .mode-desc { margin-top: 10px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -494,23 +490,20 @@ function objectKindText(kind: string) {
 .danger-section { border-color: #f5dab1; }
 .result-line { display: flex; align-items: center; gap: 8px; color: #606266; }
 .result-message { color: #909399; }
-.task-panel { max-height: calc(100vh - 190px); display: flex; flex-direction: column; overflow: hidden; }
-.panel-title { padding: 12px; font-weight: 600; border-bottom: 1px solid #ebeef5; }
-.task-list { flex: 1; overflow-y: auto; padding: 8px; }
+.history-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #909399; font-size: 13px; margin-bottom: 10px; }
+.task-list { max-height: calc(100vh - 180px); overflow-y: auto; padding: 2px 2px 8px; }
 .task-item { padding: 9px 10px; border: 1px solid transparent; border-radius: 4px; cursor: pointer; margin-bottom: 6px; }
 .task-item:hover { background: #f5f7fa; }
 .task-item.active { background: #ecf5ff; border-color: #d9ecff; }
 .task-name { font-size: 13px; font-weight: 500; color: #303133; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task-meta { display: flex; gap: 8px; align-items: center; margin-top: 5px; color: #909399; font-size: 12px; flex-wrap: wrap; }
 @media (max-width: 1100px) {
-  .content-grid { grid-template-columns: 1fr; }
-  .task-panel { max-height: 320px; }
-  .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .options-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
   .page-header, .section-head { flex-direction: column; align-items: stretch; }
   .task-summary, .dependency-stats, .execution-cards, .mode-desc { grid-template-columns: 1fr; }
   .summary-message { grid-column: span 1; }
-  .form-grid { grid-template-columns: 1fr; }
+  .options-grid { grid-template-columns: 1fr; }
 }
 </style>

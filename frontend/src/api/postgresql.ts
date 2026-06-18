@@ -166,9 +166,9 @@ export interface SQLViewDependencyItem {
 }
 
 export interface SQLViewDependencyTaskRequest {
-  schemaName: string
-  tableName: string
-  columnName: string
+  schemaName?: string
+  tableName?: string
+  columnName?: string
   alterSql: string
   executionMode?: string
   lockTimeout?: string
