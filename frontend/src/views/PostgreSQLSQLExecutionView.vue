@@ -477,6 +477,16 @@ function reasonText(row: SQLChangeStatement) {
   return row.executeMessage || row.riskReason
 }
 
+function executionInfoText(row: SQLChangeStatement) {
+  const reason = reasonText(row)
+  if (reason) return reason
+  const executeStatus = row.executeStatus || 'PENDING'
+  if (executeStatus === 'PENDING') return '待执行'
+  if (executeStatus === 'RUNNING') return '执行中'
+  if (executeStatus === 'SUCCESS') return '执行成功'
+  return statementStatusText(executeStatus)
+}
+
 function formatSQLSingleLine(sql: string) {
   return (sql || '').replace(/\s+/g, ' ').trim()
 }
@@ -641,7 +651,7 @@ function isAnomalyStatement(row: SQLChangeStatement) {
                   <template #default="{ row }">{{ formatSQLSingleLine(row.sqlContent) }}</template>
                 </el-table-column>
                 <el-table-column label="执行信息" min-width="240" show-overflow-tooltip>
-                  <template #default="{ row }">{{ reasonText(row) || '执行成功' }}</template>
+                  <template #default="{ row }">{{ executionInfoText(row) }}</template>
                 </el-table-column>
                 <el-table-column prop="estimatedRows" label="预估行数" width="95" align="right" />
                 <el-table-column prop="affectedRows" label="影响行数" width="95" align="right" />
