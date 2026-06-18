@@ -211,6 +211,100 @@ func TestParseTableRefForRiskOperations(t *testing.T) {
 	}
 }
 
+func TestLoadSQLExecutionConfigUsesPostgresAdminAndBusinessOwner(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	settings := repository.NewSettingsRepo()
+	for key, value := range map[string]string{
+		"postgresql_host":           "192.168.199.102",
+		"postgresql_port":           "5432",
+		"postgresql_database":       "df_his",
+		"postgresql_user":           "df_zhushuju",
+		"postgresql_password":       "business-password",
+		"postgresql_admin_password": "admin-password",
+	} {
+		if err := settings.Set(key, value); err != nil {
+			t.Fatalf("set %s: %v", key, err)
+		}
+	}
+
+	cfg, ownerUser, err := NewPostgreSQLService().loadSQLExecutionConfig()
+	if err != nil {
+		t.Fatalf("load execution config: %v", err)
+	}
+
+	if cfg.Host != "192.168.199.102" || cfg.Port != "5432" || cfg.Database != "df_his" {
+		t.Fatalf("unexpected connection target: %+v", cfg)
+	}
+	if cfg.User != "postgres" {
+		t.Fatalf("SQL execution must use postgres admin user, got %q", cfg.User)
+	}
+	if cfg.Password != "admin-password" {
+		t.Fatalf("SQL execution must use admin password, got %q", cfg.Password)
+	}
+	if ownerUser != "df_zhushuju" {
+		t.Fatalf("business owner user should come from postgresql_user, got %q", ownerUser)
+	}
+}
+
+func TestBuildCreateTableOwnerSQL(t *testing.T) {
+	tests := []struct {
+		name          string
+		sqlText       string
+		defaultSchema string
+		want          string
+		wantOwnerSQL  bool
+	}{
+		{
+			name:          "qualified table",
+			sqlText:       `CREATE TABLE his.patient(id int)`,
+			defaultSchema: "public",
+			want:          `ALTER TABLE "his"."patient" OWNER TO "df_zhushuju";`,
+			wantOwnerSQL:  true,
+		},
+		{
+			name:          "if not exists uses default schema",
+			sqlText:       `CREATE TABLE IF NOT EXISTS patient(id int)`,
+			defaultSchema: "his",
+			want:          `ALTER TABLE "his"."patient" OWNER TO "df_zhushuju";`,
+			wantOwnerSQL:  true,
+		},
+		{
+			name:          "quoted identifiers",
+			sqlText:       `CREATE TABLE "Billing"."Order Detail"(id int)`,
+			defaultSchema: "public",
+			want:          `ALTER TABLE "Billing"."Order Detail" OWNER TO "df_zhushuju";`,
+			wantOwnerSQL:  true,
+		},
+		{
+			name:          "non create table",
+			sqlText:       `CREATE INDEX idx_patient_id ON his.patient(id)`,
+			defaultSchema: "his",
+			wantOwnerSQL:  false,
+		},
+		{
+			name:          "temporary table",
+			sqlText:       `CREATE TEMP TABLE session_tmp(id int)`,
+			defaultSchema: "his",
+			wantOwnerSQL:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok, err := buildCreateTableOwnerSQL(tc.sqlText, tc.defaultSchema, "df_zhushuju")
+			if err != nil {
+				t.Fatalf("build owner sql: %v", err)
+			}
+			if ok != tc.wantOwnerSQL {
+				t.Fatalf("expected owner SQL flag %v, got %v with %q", tc.wantOwnerSQL, ok, got)
+			}
+			if got != tc.want {
+				t.Fatalf("unexpected owner SQL:\nwant: %s\n got: %s", tc.want, got)
+			}
+		})
+	}
+}
+
 func TestParseSQLAllowsSameFileNameAcrossVersionAndSchema(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	svc := NewPostgreSQLService()

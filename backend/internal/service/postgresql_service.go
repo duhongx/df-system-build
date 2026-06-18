@@ -110,7 +110,7 @@ func (s *PostgreSQLService) getDB() (*sql.DB, error) {
 	s.dbPoolMu.Lock()
 	defer s.dbPoolMu.Unlock()
 
-	cfg, err := s.loadConfig()
+	cfg, _, err := s.loadSQLExecutionConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -1899,7 +1899,7 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 		return nil, nil, err
 	}
 
-	cfg, err := s.loadConfig()
+	cfg, ownerUser, err := s.loadSQLExecutionConfig()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1955,7 +1955,7 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 		stmt.ExecuteStatus = "RUNNING"
 		repository.DB.Save(stmt)
 
-		affected, sqlState, execErr := executeOneSQL(execCtx, db, file.SchemaName, stmt.SQLContent, stmt.SQLType)
+		affected, sqlState, execErr := executeOneSQL(execCtx, db, file.SchemaName, stmt.SQLContent, stmt.SQLType, ownerUser)
 		executionCanceled := isSQLExecutionCanceled(executionCtx.Err(), execErr)
 		cancel()
 
@@ -2609,6 +2609,21 @@ func (s *PostgreSQLService) loadConfig() (PostgreSQLConfig, error) {
 	return PostgreSQLConfig{Host: host, Port: port, User: user, Password: password, Database: database}, nil
 }
 
+func (s *PostgreSQLService) loadSQLExecutionConfig() (PostgreSQLConfig, string, error) {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return PostgreSQLConfig{}, "", err
+	}
+	ownerUser := strings.TrimSpace(cfg.User)
+	adminPassword, _ := s.settingsRepo.GetByKey("postgresql_admin_password")
+	if strings.TrimSpace(adminPassword) == "" {
+		return PostgreSQLConfig{}, ownerUser, fmt.Errorf("PostgreSQL 管理员密码未配置")
+	}
+	cfg.User = "postgres"
+	cfg.Password = adminPassword
+	return cfg, ownerUser, nil
+}
+
 func openPostgreSQL(cfg PostgreSQLConfig) (*sql.DB, error) {
 	if cfg.Host == "" {
 		return nil, fmt.Errorf("PostgreSQL 主机地址未配置")
@@ -2625,8 +2640,12 @@ func openPostgreSQL(cfg PostgreSQLConfig) (*sql.DB, error) {
 	return db, nil
 }
 
-func executeOneSQL(ctx context.Context, db *sql.DB, schemaName, sqlText, sqlType string) (int64, string, error) {
+func executeOneSQL(ctx context.Context, db *sql.DB, schemaName, sqlText, sqlType, ownerUser string) (int64, string, error) {
 	if err := validateSchemaName(schemaName); err != nil {
+		return 0, "", err
+	}
+	ownerSQL, changeOwner, err := buildCreateTableOwnerSQL(sqlText, schemaName, ownerUser)
+	if err != nil {
 		return 0, "", err
 	}
 	conn, err := db.Conn(ctx)
@@ -2651,7 +2670,40 @@ func executeOneSQL(ctx context.Context, db *sql.DB, schemaName, sqlText, sqlType
 		return 0, pgState(err), err
 	}
 	rows, _ := result.RowsAffected()
+	if changeOwner {
+		if _, err := conn.ExecContext(ctx, ownerSQL); err != nil {
+			return rows, pgState(err), fmt.Errorf("修正表 owner 失败: %w", err)
+		}
+	}
 	return rows, "", nil
+}
+
+func buildCreateTableOwnerSQL(sqlText, defaultSchema, ownerUser string) (string, bool, error) {
+	tree, err := pg_query.Parse(sqlText)
+	if err != nil || tree == nil || len(tree.GetStmts()) == 0 {
+		return "", false, nil
+	}
+	createStmt := tree.GetStmts()[0].GetStmt().GetCreateStmt()
+	if createStmt == nil || createStmt.GetRelation() == nil {
+		return "", false, nil
+	}
+	relation := createStmt.GetRelation()
+	if relation.GetRelpersistence() == "t" {
+		return "", false, nil
+	}
+	tableName := strings.TrimSpace(relation.GetRelname())
+	if tableName == "" {
+		return "", false, nil
+	}
+	ownerUser = strings.TrimSpace(ownerUser)
+	if ownerUser == "" {
+		return "", true, fmt.Errorf("PostgreSQL 业务用户名未配置，无法修正表 owner")
+	}
+	schemaName := strings.TrimSpace(relation.GetSchemaname())
+	if schemaName == "" {
+		schemaName = strings.TrimSpace(defaultSchema)
+	}
+	return fmt.Sprintf("ALTER TABLE %s OWNER TO %s;", quoteQualifiedName(schemaName, tableName), quoteIdent(ownerUser)), true, nil
 }
 
 func statementTimeout(sqlType string) time.Duration {

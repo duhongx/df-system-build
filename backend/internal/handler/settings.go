@@ -391,12 +391,15 @@ func (h *SettingsHandler) testSkyWalking(config map[string]string) (bool, string
 func (h *SettingsHandler) testPostgreSQL(config map[string]string) (bool, string) {
 	host := config["postgresql_host"]
 	port := config["postgresql_port"]
-	user := config["postgresql_user"]
-	password := config["postgresql_password"]
+	user := "postgres"
+	password := config["postgresql_admin_password"]
 	database := config["postgresql_database"]
 
 	if host == "" {
 		return false, "PostgreSQL 主机地址未填写"
+	}
+	if password == "" {
+		return false, "PostgreSQL 管理员密码未填写"
 	}
 	if port == "" {
 		port = "5432"
