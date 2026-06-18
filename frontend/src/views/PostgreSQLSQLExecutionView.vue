@@ -6,12 +6,10 @@ import {
   cancelSQLBatch,
   cancelSQLFile,
   deleteSQLFile,
-  executeSQLBatch,
   executeSQLFileWithOptions,
   getSQLBatch,
   getSQLFile,
   getSQLForceWhitelist,
-  importServerSQL,
   listSQLBatches,
   listDoneSQLFiles,
   listTodoSQLFiles,
@@ -34,7 +32,6 @@ type SQLViewMode = 'list' | 'full' | 'anomaly'
 
 const parsing = ref(false)
 const executing = ref(false)
-const importing = ref(false)
 const loadingTodo = ref(false)
 const loadingDone = ref(false)
 const whitelistSaving = ref(false)
@@ -44,7 +41,6 @@ const selectedTab = ref<FileListMode>('todo')
 const sqlViewMode = ref<SQLViewMode>('list')
 const localFileIndex = ref(0)
 const form = ref({ fileName: '', content: '', overwrite: true })
-const serverFilePath = ref('')
 const batchFiles = ref<ParseSQLBatchFile[]>([])
 const whitelistDialogVisible = ref(false)
 const forceWhitelistOptions = ref<SQLForceWhitelistOption[]>([])
@@ -301,29 +297,6 @@ async function handleExecuteFile(row = currentFile.value) {
   }
 }
 
-async function handleExecuteBatch(row = currentBatch.value) {
-  if (!row) {
-    ElMessage.warning('请选择 SQL 批次')
-    return
-  }
-  await ElMessageBox.confirm(`确定执行批次 "${row.batchName}" 吗？`, '确认', { type: 'warning' })
-  if (options.value.forceBlockedSql) {
-    await ElMessageBox.confirm('已开启强制执行阻断 SQL。只有白名单中的阻断类型会提交执行，MISSING_SCHEMA、语法错误和系统级硬阻断仍会被后端拦截。确认继续？', '高风险确认', { type: 'error', confirmButtonText: '强制执行' })
-  }
-  executing.value = true
-  try {
-    const data = await executeSQLBatch(row.id, { ...options.value, confirmWarnRisk: true })
-    currentBatch.value = data.batch
-    batchFileList.value = data.files || []
-    selectedTab.value = 'batchFiles'
-    ElMessage.success(data.batch.executeMessage || '批次执行完成')
-    await Promise.all([loadBatches(), loadTodo(), loadDone()])
-    if (batchFileList.value.length > 0) await handleOpen(batchFileList.value[0])
-  } finally {
-    executing.value = false
-  }
-}
-
 async function handleCancelExecution() {
   if (currentFile.value) {
     await cancelSQLFile(currentFile.value.id)
@@ -410,22 +383,6 @@ async function handleRetryCurrentFile() {
     return
   }
   await handleExecuteFile(currentFile.value)
-}
-
-async function handleImportServerSQL() {
-  if (!serverFilePath.value.trim()) {
-    ElMessage.warning('请输入文件路径')
-    return
-  }
-  importing.value = true
-  try {
-    const data = await importServerSQL(serverFilePath.value, true)
-    ElMessage.success(`已导入 ${data.count} 个文件`)
-    selectedTab.value = 'todo'
-    await loadTodo()
-  } finally {
-    importing.value = false
-  }
 }
 
 function handleExportAnomalySQL() {
@@ -559,11 +516,8 @@ function isAnomalyStatement(row: SQLChangeStatement) {
           <input type="file" accept=".sql,.zip" multiple @change="handleFileChange" />
           <el-button size="small" style="pointer-events: none;">上传SQL/ZIP</el-button>
         </label>
-        <el-input v-model="serverFilePath" clearable placeholder="服务器 .sql/.zip 路径" class="server-path-input" size="small" />
-        <el-button size="small" :loading="importing" @click="handleImportServerSQL">导入</el-button>
         <el-button size="small" :loading="parsing" @click="handleParse">解析</el-button>
         <el-button size="small" type="warning" :loading="executing" @click="handleExecuteContent">解析并执行</el-button>
-        <el-button size="small" type="primary" :disabled="!currentBatch" :loading="executing" @click="handleExecuteBatch()">执行批次</el-button>
         <el-dropdown trigger="click">
           <el-button size="small">更多</el-button>
           <template #dropdown>
@@ -801,7 +755,6 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 .summary-tags .danger { color: #f56c6c; }
 .summary-tags .warn { color: #e6a23c; }
 .command-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-.server-path-input { width: 220px; }
 .upload-btn input { display: none; }
 .sql-workbench { flex: 1; min-height: 0; display: grid; grid-template-columns: 280px minmax(0, 1fr); overflow: hidden; }
 .sql-file-panel { border-right: 1px solid #e4e7ed; padding: 10px; display: flex; flex-direction: column; min-height: 0; background: #fbfcfe; }

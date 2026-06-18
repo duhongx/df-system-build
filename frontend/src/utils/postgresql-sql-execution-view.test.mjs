@@ -36,3 +36,6 @@ assert.match(view, /handleExportAnomalySQL/, 'SQL execution page should export f
 assert.doesNotMatch(view, /class="sql-textarea"/, 'SQL execution page should not show a duplicate raw SQL textarea above the result table')
 assert.doesNotMatch(view, /class="page-header"/, 'SQL execution page should not waste vertical space on a separate title card')
 assert.match(view, /<section v-if="selectedStatement" class="sql-detail-panel">/, 'SQL detail panel should only appear after selecting a SQL row')
+assert.doesNotMatch(view, /server-path-input/, 'SQL execution command bar should not show server path import input')
+assert.doesNotMatch(view, /importServerSQL/, 'SQL execution command bar should not expose server SQL import')
+assert.doesNotMatch(view, /执行批次/, 'SQL execution command bar should not show batch execution action')
