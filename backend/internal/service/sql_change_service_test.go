@@ -391,6 +391,50 @@ func TestShouldBlockStatementAllowsForcedBlockedSQL(t *testing.T) {
 	}
 }
 
+func TestDefaultForceWhitelistAllowsBusinessHighRiskSQL(t *testing.T) {
+	for _, sqlType := range []string{
+		"UPDATE_WITHOUT_WHERE",
+		"DELETE_WITHOUT_WHERE",
+		"UPDATE_TRIVIAL_WHERE",
+		"DELETE_TRIVIAL_WHERE",
+		"UPDATE_WEAK_WHERE",
+		"DELETE_WEAK_WHERE",
+		"UPDATE",
+		"DELETE",
+		"DROP_TABLE",
+		"TRUNCATE",
+		"ALTER_COLUMN_TYPE",
+		"ALTER_SET_NOT_NULL",
+		"ADD_COLUMN_DEFAULT_VOLATILE",
+		"ADD_CHECK",
+		"ADD_FOREIGN_KEY",
+		"ADD_PRIMARY_KEY",
+		"ADD_UNIQUE",
+		"CREATE_INDEX",
+		"CREATE_UNIQUE_INDEX",
+		"CREATE_INDEX_EXPRESSION",
+		"CREATE_INDEX_PARTIAL",
+	} {
+		stmt := model.SQLChangeStatement{
+			SQLType:       sqlType,
+			RiskLevel:     "BLOCKED",
+			ExecuteStatus: "NOT_EXECUTABLE",
+		}
+		if shouldBlockStatement(stmt, SQLExecuteOptions{ForceBlockedSQL: true}) {
+			t.Fatalf("expected default force whitelist to allow business high-risk SQL type %s", sqlType)
+		}
+	}
+}
+
+func TestSavedForceWhitelistKeepsDefaultBusinessHighRiskTypes(t *testing.T) {
+	got := mergeDefaultSQLForceWhitelist([]string{"UPDATE_WEAK_WHERE"})
+	for _, sqlType := range []string{"CREATE_INDEX", "ALTER_COLUMN_TYPE", "DROP_TABLE", "TRUNCATE", "UPDATE_WITHOUT_WHERE"} {
+		if !forceWhitelistContains(got, sqlType) {
+			t.Fatalf("expected saved whitelist to include default business high-risk SQL type %s, got %v", sqlType, got)
+		}
+	}
+}
+
 func TestForceBlockedSQLWhitelistNeverAllowsHardBlockedTypes(t *testing.T) {
 	stmt := model.SQLChangeStatement{
 		SQLType:       "DROP_DATABASE",

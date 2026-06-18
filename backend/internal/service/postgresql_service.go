@@ -73,8 +73,27 @@ var forceableBlockedSQLTypes = map[string]string{
 }
 
 var defaultSQLForceWhitelist = []string{
+	"UPDATE_WITHOUT_WHERE",
+	"DELETE_WITHOUT_WHERE",
+	"UPDATE_TRIVIAL_WHERE",
+	"DELETE_TRIVIAL_WHERE",
 	"UPDATE_WEAK_WHERE",
 	"DELETE_WEAK_WHERE",
+	"UPDATE",
+	"DELETE",
+	"DROP_TABLE",
+	"TRUNCATE",
+	"ALTER_COLUMN_TYPE",
+	"ALTER_SET_NOT_NULL",
+	"ADD_COLUMN_DEFAULT_VOLATILE",
+	"ADD_CHECK",
+	"ADD_FOREIGN_KEY",
+	"ADD_PRIMARY_KEY",
+	"ADD_UNIQUE",
+	"CREATE_INDEX",
+	"CREATE_UNIQUE_INDEX",
+	"CREATE_INDEX_EXPRESSION",
+	"CREATE_INDEX_PARTIAL",
 }
 
 func validateSchemaName(name string) error {
@@ -313,7 +332,7 @@ func (s *PostgreSQLService) GetSQLForceWhitelist() (SQLForceWhitelistConfig, err
 }
 
 func (s *PostgreSQLService) SaveSQLForceWhitelist(enabled []string) (SQLForceWhitelistConfig, error) {
-	normalized := normalizeSQLForceWhitelist(enabled)
+	normalized := mergeDefaultSQLForceWhitelist(enabled)
 	payload, err := json.Marshal(normalized)
 	if err != nil {
 		return SQLForceWhitelistConfig{}, err
@@ -336,7 +355,7 @@ func (s *PostgreSQLService) loadSQLForceWhitelist() ([]string, error) {
 	if err := json.Unmarshal([]byte(raw), &enabled); err != nil {
 		return nil, fmt.Errorf("SQL 强制执行白名单配置格式错误")
 	}
-	return normalizeSQLForceWhitelist(enabled), nil
+	return mergeDefaultSQLForceWhitelist(enabled), nil
 }
 
 func availableSQLForceWhitelistOptions() []SQLForceWhitelistOption {
@@ -365,6 +384,13 @@ func normalizeSQLForceWhitelist(enabled []string) []string {
 	}
 	sort.Strings(normalized)
 	return normalized
+}
+
+func mergeDefaultSQLForceWhitelist(enabled []string) []string {
+	merged := make([]string, 0, len(defaultSQLForceWhitelist)+len(enabled))
+	merged = append(merged, defaultSQLForceWhitelist...)
+	merged = append(merged, enabled...)
+	return normalizeSQLForceWhitelist(merged)
 }
 
 func isForceableBlockedSQLType(sqlType string) bool {

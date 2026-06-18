@@ -6,6 +6,7 @@ const view = fs.readFileSync(new URL('../views/PostgreSQLSQLExecutionView.vue', 
 assert.match(view, /prop="affectedRows"\s+label="影响行数"/, 'SQL detail table should display affected row count')
 assert.match(view, /prop="estimatedRows"\s+label="预估行数"/, 'SQL detail table should display estimated affected row count')
 assert.match(view, /forceBlockedSql/, 'SQL execution options should include forceBlockedSql')
+assert.match(view, /forceBlockedSql:\s*true/, 'SQL execution should enable force execution by default')
 assert.match(view, /强制执行阻断 SQL/, 'SQL execution view should expose a force blocked SQL switch')
 assert.match(view, /accept="\.sql,\.zip"/, 'SQL upload should accept .sql and .zip files')
 assert.match(view, /JSZip\.loadAsync/, 'SQL upload should extract zip files in the browser')

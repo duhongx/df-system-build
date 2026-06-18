@@ -50,7 +50,7 @@ const options = ref<SQLExecuteOptions>({
   skipUniqueConstraint: true,
   requireRiskConfirmation: true,
   confirmWarnRisk: false,
-  forceBlockedSql: false,
+  forceBlockedSql: true,
 })
 
 const currentBatch = ref<SQLChangeBatch | null>(null)
