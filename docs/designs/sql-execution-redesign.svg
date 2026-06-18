@@ -1,0 +1,193 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <style>
+      .bg{fill:#f3f5f8}
+      .panel{fill:#fff;stroke:#dfe5ee;stroke-width:1}
+      .muted{fill:#8a94a6;font-family:Arial,"Microsoft YaHei",sans-serif}
+      .text{fill:#1f2937;font-family:Arial,"Microsoft YaHei",sans-serif}
+      .title{fill:#111827;font-family:Arial,"Microsoft YaHei",sans-serif;font-weight:700}
+      .blue{fill:#409eff}
+      .line{stroke:#e5eaf2;stroke-width:1}
+      .tag-blue{fill:#ecf5ff;stroke:#b3d8ff}
+      .tag-green{fill:#f0f9eb;stroke:#c2e7b0}
+      .tag-red{fill:#fef0f0;stroke:#fab6b6}
+      .tag-orange{fill:#fdf6ec;stroke:#f5dab1}
+      .tag-gray{fill:#f4f4f5;stroke:#dcdfe6}
+      .mono{fill:#334155;font-family:Consolas,"Courier New",monospace}
+      .small{font-size:13px}
+      .body{font-size:15px}
+      .h2{font-size:20px}
+      .h1{font-size:24px}
+      .btn{fill:#409eff;rx:4}
+      .btn-light{fill:#fff;stroke:#cfd8e3;rx:4}
+      .shadow{filter:url(#shadow)}
+    </style>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1920" height="1080"/>
+
+  <!-- App shell -->
+  <rect fill="#fff" x="0" y="0" width="260" height="1080"/>
+  <line class="line" x1="260" y1="0" x2="260" y2="1080"/>
+  <text class="title h2" x="32" y="42">CloudHIS</text>
+  <text class="text small" x="34" y="66">智能管理平台</text>
+  <g class="body">
+    <text class="muted" x="42" y="125">工作台</text>
+    <text class="muted" x="42" y="185">服务器管理</text>
+    <text class="muted" x="42" y="245">Kubernetes</text>
+    <text class="muted" x="42" y="305">任务中心</text>
+    <text class="text" x="42" y="365">PostgreSQL 管理</text>
+    <rect fill="#ecf5ff" x="0" y="388" width="260" height="48"/>
+    <rect class="blue" x="256" y="388" width="4" height="48"/>
+    <text fill="#409eff" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="15" x="62" y="419">SQL 执行</text>
+    <text class="muted" x="62" y="468">视图依赖变更</text>
+  </g>
+
+  <rect fill="#fff" x="260" y="0" width="1660" height="56"/>
+  <line class="line" x1="260" y1="56" x2="1920" y2="56"/>
+  <rect class="tag-blue" x="315" y="14" width="88" height="30" rx="4"/>
+  <text fill="#409eff" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="14" x="337" y="34">SQL 执行</text>
+
+  <!-- Header -->
+  <rect class="panel" x="288" y="78" width="1604" height="96" rx="6"/>
+  <text class="title h1" x="320" y="120">SQL 执行</text>
+  <text class="muted body" x="320" y="150">按批次导入 SQL，按文件切换查看，逐条执行、重试、跳过和导出异常 SQL。</text>
+
+  <!-- Summary toolbar -->
+  <rect class="panel" x="288" y="190" width="1604" height="86" rx="6"/>
+  <text class="title body" x="320" y="226">批次 15.3_SP16_Patch2_20260605_01</text>
+  <g font-family="Arial,'Microsoft YaHei',sans-serif" font-size="13">
+    <rect class="tag-blue" x="320" y="240" width="76" height="26" rx="4"/><text fill="#409eff" x="336" y="258">文件 18</text>
+    <rect class="tag-blue" x="408" y="240" width="78" height="26" rx="4"/><text fill="#409eff" x="424" y="258">SQL 328</text>
+    <rect class="tag-green" x="498" y="240" width="78" height="26" rx="4"/><text fill="#67c23a" x="514" y="258">成功 124</text>
+    <rect class="tag-red" x="588" y="240" width="66" height="26" rx="4"/><text fill="#f56c6c" x="604" y="258">失败 2</text>
+    <rect class="tag-orange" x="666" y="240" width="66" height="26" rx="4"/><text fill="#e6a23c" x="682" y="258">超时 1</text>
+    <rect class="tag-gray" x="744" y="240" width="66" height="26" rx="4"/><text fill="#606266" x="760" y="258">跳过 3</text>
+    <rect class="tag-orange" x="822" y="240" width="90" height="26" rx="4"/><text fill="#e6a23c" x="838" y="258">待执行 198</text>
+  </g>
+  <g font-family="Arial,'Microsoft YaHei',sans-serif" font-size="14">
+    <rect class="btn-light" x="1082" y="224" width="90" height="34"/><text class="text" x="1104" y="246">执行选项</text>
+    <rect class="btn-light" x="1184" y="224" width="102" height="34"/><text class="text" x="1204" y="246">白名单配置</text>
+    <rect class="btn-light" x="1298" y="224" width="108" height="34"/><text class="text" x="1318" y="246">上传SQL/ZIP</text>
+    <rect class="btn-light" x="1418" y="224" width="118" height="34"/><text class="text" x="1438" y="246">导入服务器SQL</text>
+    <rect class="btn" x="1548" y="224" width="126" height="34"/><text fill="#fff" x="1568" y="246">执行全部待执行</text>
+    <rect class="btn-light" x="1686" y="224" width="78" height="34"/><text class="text" x="1708" y="246">重试异常</text>
+    <rect class="btn-light" x="1776" y="224" width="92" height="34"/><text class="text" x="1788" y="246">导出异常SQL</text>
+  </g>
+
+  <!-- Main workspace -->
+  <rect class="panel" x="288" y="292" width="1604" height="742" rx="6"/>
+
+  <!-- Left file list -->
+  <rect fill="#fbfcfe" stroke="#dfe5ee" x="312" y="316" width="360" height="694" rx="4"/>
+  <text class="title h2" x="336" y="352">SQL文件</text>
+  <rect fill="#fff" stroke="#dfe5ee" x="336" y="370" width="312" height="34" rx="4"/>
+  <text class="muted small" x="352" y="392">搜索文件名</text>
+  <g font-family="Arial,'Microsoft YaHei',sans-serif" font-size="13">
+    <rect class="tag-blue" x="336" y="418" width="48" height="26" rx="13"/><text fill="#409eff" x="348" y="436">全部</text>
+    <rect class="tag-orange" x="394" y="418" width="62" height="26" rx="13"/><text fill="#e6a23c" x="406" y="436">待执行</text>
+    <rect class="tag-red" x="466" y="418" width="48" height="26" rx="13"/><text fill="#f56c6c" x="478" y="436">异常</text>
+    <rect class="tag-green" x="524" y="418" width="48" height="26" rx="13"/><text fill="#67c23a" x="536" y="436">成功</text>
+  </g>
+
+  <g font-family="Arial,'Microsoft YaHei',sans-serif">
+    <rect fill="#ecf5ff" stroke="#b3d8ff" x="328" y="462" width="328" height="74" rx="4"/>
+    <text class="title small" x="344" y="488">15.3_25015_0813-14.3_01_df_yibao.sql</text>
+    <text class="muted small" x="344" y="512">总120 成功80 失败2 超时1</text>
+    <rect fill="#e5eaf2" x="344" y="522" width="230" height="5" rx="2"/><rect fill="#67c23a" x="344" y="522" width="150" height="5" rx="2"/><rect fill="#f56c6c" x="494" y="522" width="24" height="5" rx="2"/>
+    <rect class="tag-red" x="586" y="502" width="52" height="24" rx="4"/><text fill="#f56c6c" font-size="12" x="600" y="519">异常</text>
+
+    <rect fill="#fff" stroke="#edf1f7" x="328" y="548" width="328" height="64" rx="4"/>
+    <text class="text small" x="344" y="574">15.3_SP16_02_df_zhus.sql</text>
+    <text class="muted small" x="344" y="596">总88 待执行88</text>
+    <rect class="tag-orange" x="586" y="574" width="52" height="24" rx="4"/><text fill="#e6a23c" font-size="12" x="600" y="591">待执行</text>
+
+    <rect fill="#fff" stroke="#edf1f7" x="328" y="624" width="328" height="64" rx="4"/>
+    <text class="text small" x="344" y="650">patch_patient_view.sql</text>
+    <text class="muted small" x="344" y="672">总42 成功42</text>
+    <rect class="tag-green" x="586" y="650" width="52" height="24" rx="4"/><text fill="#67c23a" font-size="12" x="600" y="667">成功</text>
+
+    <rect fill="#fff" stroke="#edf1f7" x="328" y="700" width="328" height="64" rx="4"/>
+    <text class="text small" x="344" y="726">update_fee_202606.sql</text>
+    <text class="muted small" x="344" y="748">总78 解析失败1</text>
+    <rect class="tag-red" x="574" y="726" width="64" height="24" rx="4"/><text fill="#f56c6c" font-size="12" x="586" y="743">解析失败</text>
+  </g>
+
+  <!-- Right current file -->
+  <rect fill="#fff" stroke="#dfe5ee" x="696" y="316" width="1172" height="694" rx="4"/>
+  <text class="title h2" x="724" y="352">当前文件：15.3_25015_0813-14.3_01_df_yibao.sql</text>
+  <text class="muted small" x="724" y="376">一条 SQL 一行展示；完整原文在“完整SQL”中查看，不再重复显示大文本框。</text>
+  <g font-family="Arial,'Microsoft YaHei',sans-serif" font-size="12">
+    <rect class="tag-blue" x="1370" y="332" width="82" height="24" rx="4"/><text fill="#409eff" x="1384" y="349">事务内执行</text>
+    <rect class="tag-orange" x="1462" y="332" width="92" height="24" rx="4"/><text fill="#e6a23c" x="1476" y="349">语句超时10min</text>
+    <rect class="tag-orange" x="1564" y="332" width="82" height="24" rx="4"/><text fill="#e6a23c" x="1578" y="349">锁等待3s</text>
+    <rect class="tag-green" x="1656" y="332" width="102" height="24" rx="4"/><text fill="#67c23a" x="1670" y="349">强制执行开启</text>
+    <rect class="tag-gray" x="1768" y="332" width="76" height="24" rx="4"/><text fill="#606266" x="1782" y="349">白名单18项</text>
+  </g>
+
+  <rect fill="#f4f8ff" stroke="#b3d8ff" x="724" y="392" width="92" height="34" rx="4"/><text fill="#409eff" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="14" x="744" y="414">SQL列表</text>
+  <rect fill="#fff" stroke="#dfe5ee" x="822" y="392" width="92" height="34" rx="4"/><text class="text body" x="842" y="414">完整SQL</text>
+  <rect fill="#fff" stroke="#dfe5ee" x="920" y="392" width="92" height="34" rx="4"/><text class="text body" x="940" y="414">异常SQL</text>
+  <rect class="btn-light" x="1582" y="392" width="92" height="34"/><text class="text small" x="1602" y="414">调整选项</text>
+  <rect class="btn-light" x="1686" y="392" width="116" height="34"/><text class="text small" x="1704" y="414">查看白名单</text>
+
+  <!-- SQL table header -->
+  <rect fill="#f7f9fc" x="724" y="446" width="1120" height="42"/>
+  <g class="text small" font-weight="700">
+    <text x="744" y="472">序号</text><text x="800" y="472">行号</text><text x="864" y="472">状态</text><text x="950" y="472">类型</text>
+    <text x="1080" y="472">SQL摘要</text><text x="1460" y="472">执行信息</text><text x="1660" y="472">耗时</text><text x="1740" y="472">操作</text>
+  </g>
+  <g class="line">
+    <line x1="724" y1="488" x2="1844" y2="488"/>
+    <line x1="724" y1="540" x2="1844" y2="540"/>
+    <line x1="724" y1="592" x2="1844" y2="592"/>
+    <line x1="724" y1="644" x2="1844" y2="644"/>
+    <line x1="724" y1="696" x2="1844" y2="696"/>
+  </g>
+  <g font-family="Arial,'Microsoft YaHei',sans-serif" font-size="13">
+    <text class="muted" x="752" y="520">1</text><text class="muted" x="808" y="520">2</text>
+    <rect class="tag-orange" x="856" y="501" width="58" height="24" rx="4"/><text fill="#e6a23c" x="868" y="518">未执行</text>
+    <text class="text" x="950" y="520">COMMENT</text><text class="mono" x="1080" y="520">COMMENT ON COLUMN df_yibao.yb_yibaoxx_ty.id IS '主键'</text><text class="muted" x="1460" y="520">-</text><text class="muted" x="1660" y="520">-</text><text fill="#409eff" x="1740" y="520">标记跳过</text>
+
+    <text class="muted" x="752" y="572">2</text><text class="muted" x="804" y="572">32</text>
+    <rect class="tag-green" x="856" y="553" width="58" height="24" rx="4"/><text fill="#67c23a" x="874" y="570">成功</text>
+    <text class="text" x="950" y="572">CREATE_TABLE</text><text class="mono" x="1080" y="572">CREATE TABLE df_yibao.yb_yibaoxx_ty (...)</text><text class="text" x="1460" y="572">执行成功</text><text class="muted" x="1660" y="572">120ms</text><text class="muted" x="1740" y="572">查看</text>
+
+    <text class="muted" x="752" y="624">3</text><text class="muted" x="804" y="624">43</text>
+    <rect class="tag-red" x="856" y="605" width="58" height="24" rx="4"/><text fill="#f56c6c" x="874" y="622">失败</text>
+    <text class="text" x="950" y="624">UPDATE</text><text class="mono" x="1080" y="624">UPDATE df_bingangl.ba_bingrenzd_xy SET ...</text><text fill="#f56c6c" x="1460" y="624">permission denied</text><text class="muted" x="1660" y="624">38ms</text><text fill="#409eff" x="1740" y="624">重试  跳过  查看</text>
+
+    <text class="muted" x="752" y="676">4</text><text class="muted" x="804" y="676">87</text>
+    <rect class="tag-orange" x="856" y="657" width="58" height="24" rx="4"/><text fill="#e6a23c" x="874" y="674">超时</text>
+    <text class="text" x="950" y="676">CREATE_INDEX</text><text class="mono" x="1080" y="676">CREATE INDEX idx_patient_code ON ...</text><text fill="#e6a23c" x="1460" y="676">statement timeout 10min</text><text class="muted" x="1660" y="676">10min</text><text fill="#409eff" x="1740" y="676">调整超时  重试</text>
+
+    <text class="muted" x="752" y="728">5</text><text class="muted" x="804" y="728">92</text>
+    <rect class="tag-gray" x="856" y="709" width="58" height="24" rx="4"/><text fill="#909399" x="874" y="726">跳过</text>
+    <text class="text" x="950" y="728">COMMENT</text><text class="mono" x="1080" y="728">COMMENT ON COLUMN ...</text><text class="muted" x="1460" y="728">手工跳过</text><text class="muted" x="1660" y="728">-</text><text fill="#409eff" x="1740" y="728">恢复</text>
+  </g>
+
+  <!-- Detail panel -->
+  <rect fill="#f8fafc" stroke="#dfe5ee" x="724" y="768" width="1120" height="216" rx="4"/>
+  <text class="title body" x="748" y="800">SQL详情</text>
+  <g font-family="Arial,'Microsoft YaHei',sans-serif" font-size="13">
+    <rect class="tag-red" x="820" y="782" width="54" height="24" rx="4"/><text fill="#f56c6c" x="836" y="799">失败</text>
+    <text class="text" x="748" y="832">原因：</text><text fill="#f56c6c" x="794" y="832">ERROR: permission denied for table ba_bingrenzd_xy</text>
+    <text class="text" x="748" y="860">风险：</text><text class="muted" x="794" y="860">UPDATE 条件过弱，建议低峰期执行；强制执行只绕过风险提醒，不绕过数据库权限。</text>
+  </g>
+  <rect fill="#fff" stroke="#dfe5ee" x="748" y="884" width="850" height="78" rx="4"/>
+  <text class="mono small" x="766" y="910">UPDATE df_bingangl.ba_bingrenzd_xy a SET zhenduarnq = c.zhenduarnq</text>
+  <text class="mono small" x="766" y="932">FROM df_bingangl.ba_bingrenjbxx b JOIN df_bingangl.ba_jk_bingrenxyzd c ...</text>
+  <text class="mono small" x="766" y="954">WHERE a.bingangbrxh = b.bingangbrxh;</text>
+  <rect class="btn-light" x="1620" y="884" width="86" height="32"/><text class="text small" x="1640" y="905">复制SQL</text>
+  <rect class="btn-light" x="1716" y="884" width="86" height="32"/><text class="text small" x="1734" y="905">导出本条</text>
+  <rect class="btn" x="1620" y="928" width="182" height="34"/><text fill="#fff" font-family="Arial,'Microsoft YaHei',sans-serif" font-size="13" x="1644" y="950">编辑副本并重新解析</text>
+
+  <!-- Options side hint -->
+  <rect fill="#fff" stroke="#dfe5ee" x="1516" y="782" width="328" height="86" rx="4"/>
+  <text class="title small" x="1536" y="808">当前执行选项</text>
+  <text class="muted small" x="1536" y="832">跳过：已存在表、已存在字段、唯一约束冲突</text>
+  <text class="muted small" x="1536" y="854">强制执行：仅白名单风险类型；数据库错误仍失败</text>
+</svg>

@@ -8,7 +8,6 @@ import {
   deleteSQLFile,
   executeSQLBatch,
   executeSQLFileWithOptions,
-  exportNotExecutableSQL,
   getSQLBatch,
   getSQLFile,
   getSQLForceWhitelist,
@@ -30,20 +29,27 @@ import {
 } from '../api/postgresql'
 import { formatTime as formatTimeStr } from '../utils/time'
 
+type FileListMode = 'local' | 'todo' | 'done' | 'batch' | 'batchFiles'
+type SQLViewMode = 'list' | 'full' | 'anomaly'
+
 const parsing = ref(false)
 const executing = ref(false)
 const importing = ref(false)
 const loadingTodo = ref(false)
 const loadingDone = ref(false)
 const whitelistSaving = ref(false)
+const optionsDialogVisible = ref(false)
 
-const selectedTab = ref('todo')
+const selectedTab = ref<FileListMode>('todo')
+const sqlViewMode = ref<SQLViewMode>('list')
+const localFileIndex = ref(0)
 const form = ref({ fileName: '', content: '', overwrite: true })
 const serverFilePath = ref('')
 const batchFiles = ref<ParseSQLBatchFile[]>([])
 const whitelistDialogVisible = ref(false)
 const forceWhitelistOptions = ref<SQLForceWhitelistOption[]>([])
 const forceWhitelistEnabled = ref<string[]>([])
+const selectedStatement = ref<SQLChangeStatement | null>(null)
 const options = ref<SQLExecuteOptions>({
   skipExistsColumn: true,
   skipExistsTable: true,
@@ -76,28 +82,65 @@ const successCount = computed(() => statements.value.filter(s => s.executeStatus
 const failedCount = computed(() => statements.value.filter(s => s.executeStatus === 'FAILED').length)
 const notExecutableCount = computed(() => statements.value.filter(s => s.executeStatus === 'NOT_EXECUTABLE').length)
 const skippedCount = computed(() => statements.value.filter(s => s.executeStatus === 'SKIPPED').length)
-const sqlDisplayContent = computed(() => {
-  if (statements.value.length > 0) {
-    return statements.value.map(s => formatSQLSingleLine(s.sqlContent)).join('\n')
-  }
-  return form.value.content
+const timeoutCount = computed(() => statements.value.filter(s => s.executeStatus === 'TIMEOUT').length)
+const pendingCount = computed(() => statements.value.filter(s => !s.executeStatus || s.executeStatus === 'PENDING').length)
+const anomalyStatements = computed(() => statements.value.filter(isAnomalyStatement))
+const visibleStatements = computed(() => sqlViewMode.value === 'anomaly' ? anomalyStatements.value : statements.value)
+const activeBatchName = computed(() => currentBatch.value?.batchName || form.value.fileName?.replace(/\.[^.]+$/, '') || '未选择批次')
+const summaryFileCount = computed(() => {
+  if (batchFiles.value.length > 0) return batchFiles.value.length
+  if (batchFileList.value.length > 0) return batchFileList.value.length
+  if (currentBatch.value?.totalFiles) return currentBatch.value.totalFiles
+  return todoTotal.value || doneTotal.value || 0
+})
+const forceWhitelistSummary = computed(() => `白名单 ${forceWhitelistEnabled.value.length} 项`)
+const executeOptionSummary = computed(() => {
+  const items: string[] = []
+  if (options.value.skipExistsTable) items.push('已存在表')
+  if (options.value.skipExistsColumn) items.push('已存在字段')
+  if (options.value.skipUniqueConstraint) items.push('唯一约束冲突')
+  return items.length ? items.join(' / ') : '未启用跳过规则'
+})
+const fileModeOptions = computed(() => {
+  const modes = []
+  if (batchFiles.value.length > 0) modes.push({ label: `本次导入(${batchFiles.value.length})`, value: 'local' })
+  if (batchFileList.value.length > 0) modes.push({ label: `批次文件(${batchFileList.value.length})`, value: 'batchFiles' })
+  modes.push(
+    { label: '待执行', value: 'todo' },
+    { label: '已执行', value: 'done' },
+    { label: '批次', value: 'batch' },
+  )
+  return modes
 })
 
 onMounted(() => { loadBatches(); loadTodo(); loadDone(); loadSQLForceWhitelistConfig() })
 
 async function loadBatches() {
   const data = await listSQLBatches(batchPage.value, pageSize)
-  batches.value = data.list || []; batchTotal.value = data.total || 0
+  batches.value = data.list || []
+  batchTotal.value = data.total || 0
 }
+
 async function loadTodo() {
   loadingTodo.value = true
-  try { const data = await listTodoSQLFiles(todoPage.value, pageSize); todoFiles.value = data.list || []; todoTotal.value = data.total || 0 }
-  finally { loadingTodo.value = false }
+  try {
+    const data = await listTodoSQLFiles(todoPage.value, pageSize)
+    todoFiles.value = data.list || []
+    todoTotal.value = data.total || 0
+  } finally {
+    loadingTodo.value = false
+  }
 }
+
 async function loadDone() {
   loadingDone.value = true
-  try { const data = await listDoneSQLFiles(donePage.value, pageSize); doneFiles.value = data.list || []; doneTotal.value = data.total || 0 }
-  finally { loadingDone.value = false }
+  try {
+    const data = await listDoneSQLFiles(donePage.value, pageSize)
+    doneFiles.value = data.list || []
+    doneTotal.value = data.total || 0
+  } finally {
+    loadingDone.value = false
+  }
 }
 
 async function loadSQLForceWhitelistConfig() {
@@ -119,127 +162,150 @@ async function handleSaveSQLForceWhitelist() {
   }
 }
 
+async function handleRefreshAll() {
+  await Promise.all([loadBatches(), loadTodo(), loadDone()])
+}
+
 async function handleFileChange(event: Event) {
-	const input = event.target as HTMLInputElement
-	const files = Array.from(input.files || [])
-	if (files.length === 0) return
-	try {
-		const parsedFiles = (await Promise.all(files.map(readSQLUploadFile))).flat()
-		if (parsedFiles.length === 0) {
-			ElMessage.warning('未找到 SQL 文件')
-			return
-		}
-		batchFiles.value = parsedFiles
-		form.value.fileName = parsedFiles[0].fileName
-		form.value.content = parsedFiles[0].content
-		if (parsedFiles.length > 1) ElMessage.success(`已选择 ${parsedFiles.length} 个 SQL 文件`)
-	} catch (err: any) {
-		ElMessage.error(err?.message || '读取 SQL 文件失败')
-	} finally {
-		input.value = ''
-	}
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  if (files.length === 0) return
+  try {
+    const parsedFiles = (await Promise.all(files.map(readSQLUploadFile))).flat()
+    if (parsedFiles.length === 0) {
+      ElMessage.warning('未找到 SQL 文件')
+      return
+    }
+    batchFiles.value = parsedFiles
+    selectedTab.value = 'local'
+    handleOpenLocalFile(parsedFiles[0], 0)
+    if (parsedFiles.length > 1) ElMessage.success(`已选择 ${parsedFiles.length} 个 SQL 文件`)
+  } catch (err: any) {
+    ElMessage.error(err?.message || '读取 SQL 文件失败')
+  } finally {
+    input.value = ''
+  }
 }
 
 async function readSQLUploadFile(file: File): Promise<ParseSQLBatchFile[]> {
-	const lowerName = file.name.toLowerCase()
-	if (lowerName.endsWith('.zip')) {
-		if (file.size > ZIP_MAX_TOTAL_SIZE) {
-			throw new Error('ZIP 文件超过大小限制 (50MB)')
-		}
-		let zip: JSZip
-		try {
-			zip = await JSZip.loadAsync(file)
-		} catch {
-			throw new Error('ZIP 文件解析失败，请确认文件未损坏')
-		}
-		const entries = Object.values(zip.files).filter(entry => !entry.dir && entry.name.toLowerCase().endsWith('.sql'))
-		if (entries.length > ZIP_MAX_SQL_FILES) {
-			throw new Error(`ZIP 内 SQL 文件数量超过限制 (${ZIP_MAX_SQL_FILES})`)
-		}
-		const seenNames = new Set<string>()
-		const duplicateNames = new Set<string>()
-		const parsed: ParseSQLBatchFile[] = []
-		let totalSize = 0
-		for (const entry of entries) {
-			const fileName = entry.name.split('/').pop() || entry.name
-			const normalizedName = fileName.toLowerCase()
-			if (seenNames.has(normalizedName)) duplicateNames.add(fileName)
-			seenNames.add(normalizedName)
-			const content = await entry.async('string')
-			const size = new Blob([content]).size
-			if (size > ZIP_MAX_SQL_FILE_SIZE) {
-				throw new Error(`SQL 文件 ${fileName} 超过大小限制 (50MB)`)
-			}
-			totalSize += size
-			if (totalSize > ZIP_MAX_TOTAL_SIZE) {
-				throw new Error('ZIP 内 SQL 文件总大小超过限制 (50MB)')
-			}
-			parsed.push({ fileName, content })
-		}
-		if (duplicateNames.size > 0) {
-			throw new Error(`ZIP 内存在同名 SQL 文件: ${Array.from(duplicateNames).slice(0, 5).join('、')}`)
-		}
-		return parsed
-	}
-	if (lowerName.endsWith('.sql')) {
-		if (file.size > ZIP_MAX_SQL_FILE_SIZE) {
-			throw new Error('SQL 文件超过大小限制 (50MB)')
-		}
-		return [{ fileName: file.name, content: await file.text() }]
-	}
-	return []
+  const lowerName = file.name.toLowerCase()
+  if (lowerName.endsWith('.zip')) {
+    if (file.size > ZIP_MAX_TOTAL_SIZE) throw new Error('ZIP 文件超过大小限制 (50MB)')
+    let zip: JSZip
+    try {
+      zip = await JSZip.loadAsync(file)
+    } catch {
+      throw new Error('ZIP 文件解析失败，请确认文件未损坏')
+    }
+    const entries = Object.values(zip.files).filter(entry => !entry.dir && entry.name.toLowerCase().endsWith('.sql'))
+    if (entries.length > ZIP_MAX_SQL_FILES) throw new Error(`ZIP 内 SQL 文件数量超过限制 (${ZIP_MAX_SQL_FILES})`)
+    const seenNames = new Set<string>()
+    const duplicateNames = new Set<string>()
+    const parsed: ParseSQLBatchFile[] = []
+    let totalSize = 0
+    for (const entry of entries) {
+      const fileName = entry.name.split('/').pop() || entry.name
+      const normalizedName = fileName.toLowerCase()
+      if (seenNames.has(normalizedName)) duplicateNames.add(fileName)
+      seenNames.add(normalizedName)
+      const content = await entry.async('string')
+      const size = new Blob([content]).size
+      if (size > ZIP_MAX_SQL_FILE_SIZE) throw new Error(`SQL 文件 ${fileName} 超过大小限制 (50MB)`)
+      totalSize += size
+      if (totalSize > ZIP_MAX_TOTAL_SIZE) throw new Error('ZIP 内 SQL 文件总大小超过限制 (50MB)')
+      parsed.push({ fileName, content })
+    }
+    if (duplicateNames.size > 0) throw new Error(`ZIP 内存在同名 SQL 文件: ${Array.from(duplicateNames).slice(0, 5).join('、')}`)
+    return parsed
+  }
+  if (lowerName.endsWith('.sql')) {
+    if (file.size > ZIP_MAX_SQL_FILE_SIZE) throw new Error('SQL 文件超过大小限制 (50MB)')
+    return [{ fileName: file.name, content: await file.text() }]
+  }
+  return []
 }
 
 async function handleParse() {
-  if (batchFiles.value.length > 1) { await handleParseBatch(); return }
-  if (!form.value.content.trim()) { ElMessage.warning('请粘贴 SQL 内容或上传文件'); return }
+  if (batchFiles.value.length > 1) {
+    await handleParseBatch()
+    return
+  }
+  if (!form.value.content.trim()) {
+    ElMessage.warning('请粘贴 SQL 内容或上传文件')
+    return
+  }
   parsing.value = true
   try {
     const data = await parseSQLFile(form.value)
-    currentFile.value = data.file; statements.value = data.statements || []
-    ElMessage.success(`已解析 ${statements.value.length} 条 SQL`); await loadTodo()
-  } finally { parsing.value = false }
+    applyLoadedFile(data.file, data.statements || [])
+    ElMessage.success(`已解析 ${statements.value.length} 条 SQL`)
+    await loadTodo()
+  } finally {
+    parsing.value = false
+  }
 }
 
 async function handleParseBatch() {
-  if (batchFiles.value.length === 0) { ElMessage.warning('请选择 SQL 文件'); return }
+  if (batchFiles.value.length === 0) {
+    ElMessage.warning('请选择 SQL 文件')
+    return
+  }
   parsing.value = true
   try {
     const data = await parseSQLBatch({ batchName: form.value.fileName.replace(/\.[^.]+$/, '') || undefined, overwrite: form.value.overwrite, files: batchFiles.value })
-    currentBatch.value = data.batch; batchFileList.value = data.files || []
+    currentBatch.value = data.batch
+    batchFileList.value = data.files || []
+    batchFiles.value = []
+    selectedTab.value = 'batchFiles'
     ElMessage.success(`已解析批次，包含 ${batchFileList.value.length} 个文件`)
     await Promise.all([loadBatches(), loadTodo()])
-  } finally { parsing.value = false }
+    if (batchFileList.value.length > 0) await handleOpen(batchFileList.value[0])
+  } finally {
+    parsing.value = false
+  }
 }
 
 async function handleExecuteContent() {
-  if (!form.value.content.trim()) { ElMessage.warning('请粘贴 SQL 内容或上传文件'); return }
+  if (!form.value.content.trim()) {
+    ElMessage.warning('请粘贴 SQL 内容或上传文件')
+    return
+  }
   executing.value = true
   try {
     const parsed = await parseSQLFile(form.value)
     const confirmedOptions = await buildConfirmedOptions(parsed.statements || [])
     const data = await executeSQLFileWithOptions(parsed.file.id, confirmedOptions)
-    currentFile.value = data.file; statements.value = data.statements || []
+    applyLoadedFile(data.file, data.statements || [])
     ElMessage.success(data.file.executeMessage || '执行完成')
     await Promise.all([loadBatches(), loadTodo(), loadDone()])
-  } finally { executing.value = false }
+  } finally {
+    executing.value = false
+  }
 }
 
 async function handleExecuteFile(row = currentFile.value) {
-  if (!row) { ElMessage.warning('请选择 SQL 文件'); return }
+  if (!row) {
+    ElMessage.warning('请选择 SQL 文件')
+    return
+  }
   executing.value = true
   try {
     const loaded = await getSQLFile(row.id)
     const confirmedOptions = await buildConfirmedOptions(loaded.statements || [])
     const data = await executeSQLFileWithOptions(row.id, confirmedOptions)
-    currentFile.value = data.file; statements.value = data.statements || []
+    applyLoadedFile(data.file, data.statements || [])
     ElMessage.success(data.file.executeMessage || '执行完成')
     await Promise.all([loadBatches(), loadTodo(), loadDone()])
-  } finally { executing.value = false }
+  } finally {
+    executing.value = false
+  }
 }
 
 async function handleExecuteBatch(row = currentBatch.value) {
-  if (!row) { ElMessage.warning('请选择 SQL 批次'); return }
+  if (!row) {
+    ElMessage.warning('请选择 SQL 批次')
+    return
+  }
   await ElMessageBox.confirm(`确定执行批次 "${row.batchName}" 吗？`, '确认', { type: 'warning' })
   if (options.value.forceBlockedSql) {
     await ElMessageBox.confirm('已开启强制执行阻断 SQL。只有白名单中的阻断类型会提交执行，MISSING_SCHEMA、语法错误和系统级硬阻断仍会被后端拦截。确认继续？', '高风险确认', { type: 'error', confirmButtonText: '强制执行' })
@@ -247,70 +313,190 @@ async function handleExecuteBatch(row = currentBatch.value) {
   executing.value = true
   try {
     const data = await executeSQLBatch(row.id, { ...options.value, confirmWarnRisk: true })
-    currentBatch.value = data.batch; batchFileList.value = data.files || []
+    currentBatch.value = data.batch
+    batchFileList.value = data.files || []
+    selectedTab.value = 'batchFiles'
     ElMessage.success(data.batch.executeMessage || '批次执行完成')
     await Promise.all([loadBatches(), loadTodo(), loadDone()])
-  } finally { executing.value = false }
+    if (batchFileList.value.length > 0) await handleOpen(batchFileList.value[0])
+  } finally {
+    executing.value = false
+  }
 }
 
-async function handleCancelExecution() { if (currentFile.value) { await cancelSQLFile(currentFile.value.id); ElMessage.warning('已提交取消请求') } }
-async function handleCancelBatch() { if (currentBatch.value) { const b = await cancelSQLBatch(currentBatch.value.id); currentBatch.value = b; ElMessage.warning('已提交取消请求') } }
+async function handleCancelExecution() {
+  if (currentFile.value) {
+    await cancelSQLFile(currentFile.value.id)
+    ElMessage.warning('已提交取消请求')
+  }
+}
+
+async function handleCancelBatch() {
+  if (currentBatch.value) {
+    const b = await cancelSQLBatch(currentBatch.value.id)
+    currentBatch.value = b
+    ElMessage.warning('已提交取消请求')
+  }
+}
+
+function selectStatement(row: SQLChangeStatement) {
+  selectedStatement.value = row
+}
+
+async function handleCopySelectedSQL() {
+  if (!selectedStatement.value) return
+  await navigator.clipboard?.writeText(selectedStatement.value.sqlContent)
+  ElMessage.success('SQL 已复制')
+}
 
 async function handleOpen(row: SQLChangeFile) {
   const data = await getSQLFile(row.id)
-  currentFile.value = data.file; statements.value = data.statements || []
-  form.value = { fileName: data.file.fileName || '', content: data.file.fileContent || '', overwrite: true }
-}
-async function handleOpenBatch(row: SQLChangeBatch) {
-  const data = await getSQLBatch(row.id); currentBatch.value = data.batch; batchFileList.value = data.files || []
+  applyLoadedFile(data.file, data.statements || [])
 }
 
-function handleSQLContentInput(value: string) {
-  form.value.content = value
-  if (statements.value.length > 0 && value !== sqlDisplayContent.value) {
-    statements.value = []
-    currentFile.value = null
-    currentBatch.value = null
-    batchFileList.value = []
-  }
+async function handleOpenBatch(row: SQLChangeBatch) {
+  const data = await getSQLBatch(row.id)
+  currentBatch.value = data.batch
+  batchFileList.value = data.files || []
+  selectedTab.value = 'batchFiles'
+  if (batchFileList.value.length > 0) await handleOpen(batchFileList.value[0])
 }
+
+function handleOpenLocalFile(file: ParseSQLBatchFile, index: number) {
+  localFileIndex.value = index
+  form.value = { fileName: file.fileName || '', content: file.content || '', overwrite: true }
+  currentFile.value = null
+  statements.value = []
+  selectedStatement.value = null
+  sqlViewMode.value = 'full'
+}
+
+function applyLoadedFile(file: SQLChangeFile, loadedStatements: SQLChangeStatement[]) {
+  currentFile.value = file
+  form.value = { fileName: file.fileName || '', content: file.fileContent || '', overwrite: true }
+  statements.value = loadedStatements
+  selectedStatement.value = anomalyStatements.value[0] || loadedStatements[0] || null
+  sqlViewMode.value = loadedStatements.length > 0 ? 'list' : 'full'
+}
+
 async function handleSkipFile(row: SQLChangeFile) {
   await ElMessageBox.confirm(`确定跳过 "${row.fileName}" 吗？`, '确认', { type: 'warning' })
-  await skipSQLFile(row.id); ElMessage.success('已跳过'); await Promise.all([loadTodo(), loadDone()])
+  await skipSQLFile(row.id)
+  ElMessage.success('已跳过')
+  await Promise.all([loadTodo(), loadDone()])
 }
+
 async function handleDeleteFile(row: SQLChangeFile) {
   await ElMessageBox.confirm(`确定删除 "${row.fileName}" 吗？`, '确认', { type: 'warning' })
-  await deleteSQLFile(row.id); ElMessage.success('已删除'); await loadTodo()
+  await deleteSQLFile(row.id)
+  ElMessage.success('已删除')
+  await loadTodo()
 }
+
 async function handleSkipStatement(row: SQLChangeStatement) {
-  await skipSQLStatement(row.id); row.executeStatus = 'SKIPPED'; row.executeMessage = '手工跳过'; ElMessage.success('已跳过')
+  await skipSQLStatement(row.id)
+  row.executeStatus = 'SKIPPED'
+  row.executeMessage = '手工跳过'
+  ElMessage.success('已跳过')
   if (currentFile.value) {
     await handleOpen(currentFile.value)
     await Promise.all([loadTodo(), loadDone()])
   }
 }
-async function handleImportServerSQL() {
-  if (!serverFilePath.value.trim()) { ElMessage.warning('请输入文件路径'); return }
-  importing.value = true
-  try { const data = await importServerSQL(serverFilePath.value, true); ElMessage.success(`已导入 ${data.count} 个文件`); await loadTodo() }
-  finally { importing.value = false }
+
+async function handleRetryCurrentFile() {
+  if (!currentFile.value) {
+    ElMessage.warning('请选择 SQL 文件')
+    return
+  }
+  await handleExecuteFile(currentFile.value)
 }
-async function handleExport() {
-  if (!currentFile.value) { ElMessage.warning('请选择文件'); return }
-  const content = await exportNotExecutableSQL(currentFile.value.id)
-  if (!content.trim()) { ElMessage.warning('没有需要导出的 SQL'); return }
+
+async function handleImportServerSQL() {
+  if (!serverFilePath.value.trim()) {
+    ElMessage.warning('请输入文件路径')
+    return
+  }
+  importing.value = true
+  try {
+    const data = await importServerSQL(serverFilePath.value, true)
+    ElMessage.success(`已导入 ${data.count} 个文件`)
+    selectedTab.value = 'todo'
+    await loadTodo()
+  } finally {
+    importing.value = false
+  }
+}
+
+function handleExportAnomalySQL() {
+  if (!currentFile.value && !form.value.fileName) {
+    ElMessage.warning('请选择文件')
+    return
+  }
+  const rows = anomalyStatements.value
+  if (!rows.length) {
+    ElMessage.warning('当前文件没有异常 SQL')
+    return
+  }
+  const content = rows.map(row => [
+    `-- 文件: ${form.value.fileName || currentFile.value?.fileName || 'sql'}`,
+    `-- 行号: ${row.lineNumber}`,
+    `-- 状态: ${row.executeStatus}`,
+    `-- 类型: ${row.sqlType}`,
+    `-- 原因: ${reasonText(row) || '-'}`,
+    row.sqlContent.trim(),
+    row.sqlContent.trim().endsWith(';') ? '' : ';',
+  ].filter(Boolean).join('\n')).join('\n\n')
+  downloadText(`${form.value.fileName || 'sql'}-异常SQL.sql`, content)
+}
+
+function handleExportSelectedSQL(row = selectedStatement.value) {
+  if (!row) {
+    ElMessage.warning('请选择 SQL')
+    return
+  }
+  const content = [
+    `-- 文件: ${form.value.fileName || currentFile.value?.fileName || 'sql'}`,
+    `-- 行号: ${row.lineNumber}`,
+    `-- 状态: ${row.executeStatus}`,
+    `-- 类型: ${row.sqlType}`,
+    `-- 原因: ${reasonText(row) || '-'}`,
+    row.sqlContent.trim(),
+    row.sqlContent.trim().endsWith(';') ? '' : ';',
+  ].filter(Boolean).join('\n')
+  downloadText(`${form.value.fileName || 'sql'}-line-${row.lineNumber}.sql`, content)
+}
+
+function downloadText(fileName: string, content: string) {
   const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
-  a.download = `${currentFile.value.fileName || 'sql'}-not-executable.sql`; a.click()
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = fileName
+  a.click()
+  URL.revokeObjectURL(a.href)
 }
 
 function statusTag(status: string) {
   if (status === 'SUCCESS') return 'success'
-  if (status === 'FAILED' || status === 'PARTIAL_FAILED' || status === 'NOT_EXECUTABLE') return 'danger'
+  if (status === 'FAILED' || status === 'PARTIAL_FAILED' || status === 'NOT_EXECUTABLE' || status === 'TIMEOUT') return 'danger'
   if (status === 'RUNNING') return 'primary'
   if (status === 'SKIPPED') return 'info'
   if (status === 'CANCELED') return 'warning'
   return 'info'
+}
+
+function statementStatusText(status: string) {
+  return ({
+    SUCCESS: '成功',
+    FAILED: '失败',
+    PARTIAL_FAILED: '部分失败',
+    NOT_EXECUTABLE: '不可执行',
+    TIMEOUT: '超时',
+    RUNNING: '执行中',
+    SKIPPED: '跳过',
+    CANCELED: '已取消',
+    PENDING: '待执行',
+  } as Record<string, string>)[status] || status || '待执行'
 }
 
 async function buildConfirmedOptions(targetStatements: SQLChangeStatement[]) {
@@ -337,20 +523,101 @@ function reasonText(row: SQLChangeStatement) {
 function formatSQLSingleLine(sql: string) {
   return (sql || '').replace(/\s+/g, ' ').trim()
 }
+
+function formatDuration(ms?: number) {
+  if (!ms) return '-'
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+function isAnomalyStatement(row: SQLChangeStatement) {
+  return ['FAILED', 'PARTIAL_FAILED', 'NOT_EXECUTABLE', 'TIMEOUT', 'CANCELED'].includes(row.executeStatus)
+}
 </script>
 
 <template>
-  <div class="sql-page">
-    <!-- Left Panel: File List -->
-    <aside class="left-panel">
-      <el-tabs v-model="selectedTab" class="panel-tabs">
-        <el-tab-pane label="待执行" name="todo">
-          <div class="file-list" v-loading="loadingTodo">
+  <div class="sql-execution-page">
+    <section class="page-header">
+      <div>
+        <h2>SQL 执行</h2>
+        <p>按批次导入 SQL，按文件切换查看，逐条执行、跳过和导出异常 SQL。</p>
+      </div>
+      <div class="page-header-actions">
+        <el-button @click="optionsDialogVisible = true">执行选项</el-button>
+        <el-button @click="whitelistDialogVisible = true">白名单配置</el-button>
+      </div>
+    </section>
+
+    <section class="batch-summary-toolbar">
+      <div class="batch-summary-left">
+        <div class="batch-title">批次 {{ activeBatchName }}</div>
+        <div class="summary-tags">
+          <el-tag type="primary" effect="plain">文件 {{ summaryFileCount }}</el-tag>
+          <el-tag type="info" effect="plain">SQL {{ totalCount }}</el-tag>
+          <el-tag type="success" effect="plain">成功 {{ successCount }}</el-tag>
+          <el-tag type="danger" effect="plain">失败 {{ failedCount }}</el-tag>
+          <el-tag type="danger" effect="plain">不可执行 {{ notExecutableCount }}</el-tag>
+          <el-tag type="warning" effect="plain">超时 {{ timeoutCount }}</el-tag>
+          <el-tag type="info" effect="plain">跳过 {{ skippedCount }}</el-tag>
+          <el-tag type="warning" effect="plain">待执行 {{ pendingCount }}</el-tag>
+        </div>
+      </div>
+      <div class="batch-actions">
+        <label class="upload-btn">
+          <input type="file" accept=".sql,.zip" multiple @change="handleFileChange" />
+          <el-button style="pointer-events: none;">上传SQL/ZIP</el-button>
+        </label>
+        <el-input v-model="serverFilePath" clearable placeholder="服务器 .sql/.zip 路径" class="server-path-input" />
+        <el-button :loading="importing" @click="handleImportServerSQL">导入服务器SQL</el-button>
+        <el-button :loading="parsing" @click="handleParse">解析当前</el-button>
+        <el-button type="warning" :loading="executing" @click="handleExecuteContent">解析并执行</el-button>
+        <el-button type="primary" :disabled="!currentBatch" :loading="executing" @click="handleExecuteBatch()">执行全部待执行</el-button>
+        <el-button :disabled="!currentFile" :loading="executing" @click="handleRetryCurrentFile">重试异常</el-button>
+        <el-button :disabled="!currentFile" @click="handleCancelExecution">取消当前</el-button>
+        <el-button :disabled="!currentBatch" @click="handleCancelBatch">取消批次</el-button>
+        <el-button :disabled="!anomalyStatements.length" @click="handleExportAnomalySQL">导出异常SQL</el-button>
+      </div>
+    </section>
+
+    <section class="sql-workbench">
+      <aside class="sql-file-panel">
+        <div class="panel-title-row">
+          <span class="panel-title">SQL文件</span>
+          <el-button size="small" link type="primary" @click="handleRefreshAll">刷新</el-button>
+        </div>
+        <el-radio-group v-model="selectedTab" size="small" class="file-mode-tabs">
+          <el-radio-button v-for="mode in fileModeOptions" :key="mode.value" :label="mode.value">{{ mode.label }}</el-radio-button>
+        </el-radio-group>
+
+        <div class="file-list" v-loading="loadingTodo && selectedTab === 'todo' || loadingDone && selectedTab === 'done'">
+          <template v-if="selectedTab === 'local'">
+            <div v-for="(f, index) in batchFiles" :key="`${f.fileName}-${index}`" class="file-item" :class="{ active: localFileIndex === index }" @click="handleOpenLocalFile(f, index)">
+              <div class="file-name">{{ f.fileName }}</div>
+              <div class="file-meta">
+                <el-tag type="warning" size="small">未解析</el-tag>
+                <span>本次导入</span>
+              </div>
+            </div>
+            <el-empty v-if="!batchFiles.length" :image-size="48" description="暂无导入文件" />
+          </template>
+
+          <template v-else-if="selectedTab === 'batchFiles'">
+            <div v-for="f in batchFileList" :key="f.id" class="file-item" :class="{ active: currentFile?.id === f.id }" @click="handleOpen(f)">
+              <div class="file-name">{{ f.fileName }}</div>
+              <div class="file-meta">
+                <el-tag :type="statusTag(f.executeStatus)" size="small">{{ statementStatusText(f.executeStatus) }}</el-tag>
+                <span>{{ formatTimeStr(f.createdAt)?.slice(5) }}</span>
+              </div>
+            </div>
+            <el-empty v-if="!batchFileList.length" :image-size="48" description="请先从批次中选择" />
+          </template>
+
+          <template v-else-if="selectedTab === 'todo'">
             <div v-for="f in todoFiles" :key="f.id" class="file-item" :class="{ active: currentFile?.id === f.id }" @click="handleOpen(f)">
               <div class="file-name">{{ f.fileName }}</div>
               <div class="file-meta">
-                <el-tag :type="statusTag(f.executeStatus)" size="small">{{ f.executeStatus }}</el-tag>
-                <span class="file-time">{{ formatTimeStr(f.createdAt)?.slice(5) }}</span>
+                <el-tag :type="statusTag(f.executeStatus)" size="small">{{ statementStatusText(f.executeStatus) }}</el-tag>
+                <span>{{ formatTimeStr(f.createdAt)?.slice(5) }}</span>
               </div>
               <div class="file-actions">
                 <el-button size="small" link type="primary" @click.stop="handleExecuteFile(f)">执行</el-button>
@@ -358,143 +625,159 @@ function formatSQLSingleLine(sql: string) {
                 <el-button size="small" link type="danger" @click.stop="handleDeleteFile(f)">删除</el-button>
               </div>
             </div>
-            <el-empty v-if="!todoFiles.length" :image-size="40" description="暂无" />
-          </div>
-          <el-pagination v-if="todoTotal > pageSize" v-model:current-page="todoPage" small layout="prev, pager, next" :page-size="pageSize" :total="todoTotal" @current-change="loadTodo" />
-        </el-tab-pane>
+            <el-empty v-if="!todoFiles.length" :image-size="48" description="暂无待执行文件" />
+            <el-pagination v-if="todoTotal > pageSize" v-model:current-page="todoPage" small layout="prev, pager, next" :page-size="pageSize" :total="todoTotal" @current-change="loadTodo" />
+          </template>
 
-        <el-tab-pane label="已执行" name="done">
-          <div class="file-list" v-loading="loadingDone">
+          <template v-else-if="selectedTab === 'done'">
             <div v-for="f in doneFiles" :key="f.id" class="file-item" :class="{ active: currentFile?.id === f.id }" @click="handleOpen(f)">
               <div class="file-name">{{ f.fileName }}</div>
               <div class="file-meta">
-                <el-tag :type="statusTag(f.executeStatus)" size="small">{{ f.executeStatus }}</el-tag>
-                <span class="file-time">{{ formatTimeStr(f.executeTime)?.slice(5) }}</span>
+                <el-tag :type="statusTag(f.executeStatus)" size="small">{{ statementStatusText(f.executeStatus) }}</el-tag>
+                <span>{{ formatTimeStr(f.executeTime)?.slice(5) }}</span>
               </div>
             </div>
-            <el-empty v-if="!doneFiles.length" :image-size="40" description="暂无" />
-          </div>
-          <el-pagination v-if="doneTotal > pageSize" v-model:current-page="donePage" small layout="prev, pager, next" :page-size="pageSize" :total="doneTotal" @current-change="loadDone" />
-        </el-tab-pane>
+            <el-empty v-if="!doneFiles.length" :image-size="48" description="暂无已执行文件" />
+            <el-pagination v-if="doneTotal > pageSize" v-model:current-page="donePage" small layout="prev, pager, next" :page-size="pageSize" :total="doneTotal" @current-change="loadDone" />
+          </template>
 
-        <el-tab-pane label="批次" name="batch">
-          <div class="file-list">
+          <template v-else>
             <div v-for="b in batches" :key="b.id" class="file-item" :class="{ active: currentBatch?.id === b.id }" @click="handleOpenBatch(b)">
               <div class="file-name">{{ b.batchName }}</div>
               <div class="file-meta">
-                <el-tag :type="statusTag(b.executeStatus)" size="small">{{ b.executeStatus }}</el-tag>
-                <span class="file-time">{{ b.totalFiles }} 文件</span>
-              </div>
-              <div class="file-actions">
-                <el-button size="small" link type="primary" @click.stop="handleExecuteBatch(b)">执行</el-button>
+                <el-tag :type="statusTag(b.executeStatus)" size="small">{{ statementStatusText(b.executeStatus) }}</el-tag>
+                <span>{{ b.totalFiles }} 文件</span>
               </div>
             </div>
-            <el-empty v-if="!batches.length" :image-size="40" description="暂无" />
+            <el-empty v-if="!batches.length" :image-size="48" description="暂无批次" />
+            <el-pagination v-if="batchTotal > pageSize" v-model:current-page="batchPage" small layout="prev, pager, next" :page-size="pageSize" :total="batchTotal" @current-change="loadBatches" />
+          </template>
+        </div>
+      </aside>
+
+      <main class="sql-main-panel">
+        <div class="current-file-header">
+          <div>
+            <div class="current-file-title">当前文件：{{ form.fileName || '-' }}</div>
+            <div class="current-file-subtitle">SQL 列表按语句展示；完整原文在“完整SQL”中查看。</div>
           </div>
-          <el-pagination v-if="batchTotal > pageSize" v-model:current-page="batchPage" small layout="prev, pager, next" :page-size="pageSize" :total="batchTotal" @current-change="loadBatches" />
-        </el-tab-pane>
-      </el-tabs>
-
-      <div class="panel-footer">
-        <label class="upload-btn">
-          <input type="file" accept=".sql,.zip" multiple @change="handleFileChange" />
-          <el-button size="small" style="pointer-events: none;">上传 SQL</el-button>
-        </label>
-        <div class="import-row">
-          <el-input v-model="serverFilePath" size="small" placeholder="服务器 .sql/.zip 路径" />
-          <el-button size="small" :loading="importing" @click="handleImportServerSQL">导入</el-button>
+          <div class="option-chips">
+            <el-tag type="primary" effect="plain">事务内执行</el-tag>
+            <el-tag type="warning" effect="plain">强制执行 {{ options.forceBlockedSql ? '开启' : '关闭' }}</el-tag>
+            <el-tag type="info" effect="plain">{{ forceWhitelistSummary }}</el-tag>
+          </div>
         </div>
-      </div>
-    </aside>
 
-    <!-- Right Panel: Editor + Results -->
-    <main class="right-panel">
-      <!-- Editor -->
-      <div class="editor-section">
-        <div class="editor-toolbar">
-          <el-input v-model="form.fileName" size="small" placeholder="文件名" style="width: 200px;" />
-          <el-tag v-if="batchFiles.length > 1" type="warning" size="small">{{ batchFiles.length }} 个文件</el-tag>
-          <div class="toolbar-spacer" />
-          <el-popover placement="bottom-end" :width="200" trigger="click">
-            <template #reference>
-              <el-button size="small" link type="primary">执行选项</el-button>
-            </template>
-            <div class="options-pop">
-              <el-checkbox v-model="form.overwrite" size="small">同名覆盖</el-checkbox>
-              <el-checkbox v-model="options.skipExistsColumn" size="small">字段已存在跳过</el-checkbox>
-              <el-checkbox v-model="options.skipExistsTable" size="small">对象已存在跳过</el-checkbox>
-              <el-checkbox v-model="options.skipUniqueConstraint" size="small">唯一冲突跳过</el-checkbox>
-              <el-checkbox v-model="options.forceBlockedSql" size="small">强制执行阻断 SQL</el-checkbox>
+        <div class="current-option-row">
+          <span class="option-label">当前执行选项</span>
+          <span>{{ executeOptionSummary }}</span>
+          <el-button size="small" link type="primary" @click="optionsDialogVisible = true">调整选项</el-button>
+          <el-button size="small" link type="primary" @click="whitelistDialogVisible = true">查看白名单</el-button>
+        </div>
+
+        <el-tabs v-model="sqlViewMode" class="sql-content-tabs">
+          <el-tab-pane label="SQL列表" name="list">
+            <div class="table-wrap">
+              <el-table v-if="visibleStatements.length" :data="visibleStatements" size="small" border height="100%" stripe highlight-current-row @row-click="selectStatement">
+                <el-table-column type="index" label="序号" width="58" align="center" />
+                <el-table-column prop="lineNumber" label="行号" width="70" align="center" />
+                <el-table-column prop="executeStatus" label="状态" width="100" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="statusTag(row.executeStatus)" size="small">{{ statementStatusText(row.executeStatus) }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="sqlType" label="类型" width="150" show-overflow-tooltip />
+                <el-table-column label="SQL摘要" min-width="360" show-overflow-tooltip>
+                  <template #default="{ row }">{{ formatSQLSingleLine(row.sqlContent) }}</template>
+                </el-table-column>
+                <el-table-column label="执行信息" min-width="240" show-overflow-tooltip>
+                  <template #default="{ row }">{{ reasonText(row) || '执行成功' }}</template>
+                </el-table-column>
+                <el-table-column prop="estimatedRows" label="预估行数" width="95" align="right" />
+                <el-table-column prop="affectedRows" label="影响行数" width="95" align="right" />
+                <el-table-column label="耗时" width="85" align="right">
+                  <template #default="{ row }">{{ formatDuration(row.durationMs) }}</template>
+                </el-table-column>
+                <el-table-column label="操作" width="150" fixed="right" align="center">
+                  <template #default="{ row }">
+                    <el-button size="small" link type="primary" :disabled="row.executeStatus === 'SUCCESS'" @click.stop="handleRetryCurrentFile">重试</el-button>
+                    <el-button size="small" link type="warning" :disabled="row.executeStatus === 'SUCCESS' || row.executeStatus === 'SKIPPED'" @click.stop="handleSkipStatement(row)">跳过</el-button>
+                    <el-button size="small" link type="primary" @click.stop="selectedStatement = row">查看</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <el-empty v-else :image-size="60" description="当前文件尚未解析 SQL" />
             </div>
-          </el-popover>
-          <el-button size="small" link type="primary" @click="whitelistDialogVisible = true">白名单配置</el-button>
-        </div>
-        <el-input
-          :model-value="sqlDisplayContent"
-          type="textarea"
-          :rows="6"
-          placeholder="粘贴 SQL 内容，或从左侧选择文件查看"
-          class="sql-textarea"
-          @update:model-value="handleSQLContentInput"
-        />
-        <div class="editor-actions">
-          <el-button size="small" :loading="parsing" @click="handleParse">仅解析</el-button>
-          <el-button size="small" type="warning" :loading="executing" @click="handleExecuteContent">解析并执行</el-button>
-          <el-button size="small" type="primary" :disabled="!currentFile" :loading="executing" @click="handleExecuteFile()">执行选中文件</el-button>
-          <el-button size="small" v-if="currentFile?.executeStatus === 'RUNNING'" type="danger" @click="handleCancelExecution">取消</el-button>
-          <el-button size="small" v-if="currentBatch?.executeStatus === 'RUNNING'" type="danger" @click="handleCancelBatch">取消批次</el-button>
-          <div class="toolbar-spacer" />
-          <el-button size="small" link type="primary" :disabled="!currentFile" @click="handleExport">导出不可执行 SQL</el-button>
-        </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="完整SQL" name="full">
+            <pre class="full-sql-content">{{ form.content || '请选择 SQL 文件' }}</pre>
+          </el-tab-pane>
+
+          <el-tab-pane :label="`异常SQL (${anomalyStatements.length})`" name="anomaly">
+            <div class="table-wrap">
+              <el-table v-if="visibleStatements.length" :data="visibleStatements" size="small" border height="100%" stripe highlight-current-row @row-click="selectStatement">
+                <el-table-column prop="lineNumber" label="行号" width="70" align="center" />
+                <el-table-column prop="executeStatus" label="状态" width="110" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="statusTag(row.executeStatus)" size="small">{{ statementStatusText(row.executeStatus) }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="sqlType" label="类型" width="150" />
+                <el-table-column label="SQL摘要" min-width="420" show-overflow-tooltip>
+                  <template #default="{ row }">{{ formatSQLSingleLine(row.sqlContent) }}</template>
+                </el-table-column>
+                <el-table-column label="原因" min-width="300" show-overflow-tooltip>
+                  <template #default="{ row }">{{ reasonText(row) }}</template>
+                </el-table-column>
+                <el-table-column label="操作" width="150" fixed="right" align="center">
+                  <template #default="{ row }">
+                    <el-button size="small" link type="primary" @click.stop="handleRetryCurrentFile">重试</el-button>
+                    <el-button size="small" link type="warning" @click.stop="handleSkipStatement(row)">跳过</el-button>
+                    <el-button size="small" link type="primary" @click.stop="handleExportSelectedSQL(row)">导出</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <el-empty v-else :image-size="60" description="当前文件没有异常 SQL" />
+            </div>
+          </el-tab-pane>
+        </el-tabs>
+
+        <section class="sql-detail-panel">
+          <div class="detail-header">
+            <span>SQL详情</span>
+            <div v-if="selectedStatement" class="detail-actions">
+              <el-button size="small" @click="handleCopySelectedSQL">复制SQL</el-button>
+              <el-button size="small" @click="handleExportSelectedSQL()">导出本条</el-button>
+            </div>
+          </div>
+          <template v-if="selectedStatement">
+            <div class="detail-meta">
+              <el-tag :type="statusTag(selectedStatement.executeStatus)" size="small">{{ statementStatusText(selectedStatement.executeStatus) }}</el-tag>
+              <span>行号 {{ selectedStatement.lineNumber }}</span>
+              <span>{{ selectedStatement.sqlType }}</span>
+              <span v-if="selectedStatement.durationMs">耗时 {{ formatDuration(selectedStatement.durationMs) }}</span>
+            </div>
+            <div class="detail-reason" v-if="reasonText(selectedStatement)">原因：{{ reasonText(selectedStatement) }}</div>
+            <pre class="detail-sql">{{ selectedStatement.sqlContent }}</pre>
+          </template>
+          <el-empty v-else :image-size="48" description="点击 SQL 行查看详情" />
+        </section>
+      </main>
+    </section>
+
+    <el-dialog v-model="optionsDialogVisible" title="执行选项" width="520px">
+      <div class="options-dialog">
+        <el-checkbox v-model="form.overwrite">同名覆盖</el-checkbox>
+        <el-checkbox v-model="options.skipExistsColumn">字段已存在跳过</el-checkbox>
+        <el-checkbox v-model="options.skipExistsTable">对象已存在跳过</el-checkbox>
+        <el-checkbox v-model="options.skipUniqueConstraint">唯一冲突跳过</el-checkbox>
+        <el-checkbox v-model="options.forceBlockedSql">强制执行阻断 SQL</el-checkbox>
       </div>
-
-      <!-- Result section: summary + batch bar + table all in one card -->
-      <div class="result-section">
-        <!-- Summary -->
-        <div class="summary-bar" v-if="totalCount > 0">
-          <span>总 <strong>{{ totalCount }}</strong></span>
-          <span class="s-success">成功 <strong>{{ successCount }}</strong></span>
-          <span class="s-danger">失败 <strong>{{ failedCount }}</strong></span>
-          <span class="s-warning">不可执行 <strong>{{ notExecutableCount }}</strong></span>
-          <span>跳过 <strong>{{ skippedCount }}</strong></span>
-        </div>
-
-        <!-- Batch files (when batch selected) -->
-        <div v-if="currentBatch && batchFileList.length" class="batch-files-bar">
-          <span class="batch-label">批次: {{ currentBatch.batchName }}</span>
-          <el-tag v-for="f in batchFileList" :key="f.id" :type="statusTag(f.executeStatus)" size="small" class="batch-file-tag" @click="handleOpen(f)">
-            {{ f.fileName }}
-          </el-tag>
-        </div>
-
-        <!-- SQL Detail Table -->
-        <div class="table-wrap">
-          <el-table v-if="statements.length" :data="statements" size="small" border height="100%" stripe>
-            <el-table-column prop="lineNumber" label="行" width="55" align="center" />
-            <el-table-column prop="sqlType" label="类型" width="140" />
-            <el-table-column prop="executeStatus" label="状态" width="110" align="center">
-              <template #default="{ row }">
-                <el-tag :type="statusTag(row.executeStatus)" size="small">{{ row.executeStatus }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="estimatedRows" label="预估行数" width="100" align="right" />
-            <el-table-column prop="affectedRows" label="影响行数" width="100" align="right" />
-            <el-table-column label="SQL" min-width="380" show-overflow-tooltip>
-              <template #default="{ row }">{{ formatSQLSingleLine(row.sqlContent) }}</template>
-            </el-table-column>
-            <el-table-column label="原因" min-width="280" show-overflow-tooltip>
-              <template #default="{ row }">{{ reasonText(row) }}</template>
-            </el-table-column>
-            <el-table-column label="操作" width="70" fixed="right" align="center">
-              <template #default="{ row }">
-                <el-button size="small" link type="warning" :disabled="row.executeStatus === 'SUCCESS' || row.executeStatus === 'SKIPPED'" @click="handleSkipStatement(row)">跳过</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-          <el-empty v-else :image-size="60" description="选择左侧文件或粘贴 SQL 后解析" />
-        </div>
-      </div>
-    </main>
+      <template #footer>
+        <el-button @click="optionsDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="whitelistDialogVisible" title="强制执行白名单配置" width="560px">
       <el-checkbox-group v-model="forceWhitelistEnabled" class="whitelist-options">
@@ -512,61 +795,63 @@ function formatSQLSingleLine(sql: string) {
 </template>
 
 <style scoped>
-.sql-page { display: flex; height: calc(100vh - 130px); gap: 0; overflow: hidden; }
-
-/* Left Panel */
-.left-panel { width: 280px; flex-shrink: 0; background: #fff; border: 1px solid #ebeef5; border-radius: 6px; display: flex; flex-direction: column; overflow: hidden; }
-.panel-tabs { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-:deep(.panel-tabs .el-tabs__content) { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
-:deep(.panel-tabs .el-tab-pane) { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
-:deep(.panel-tabs .el-tabs__header) { margin-bottom: 0; padding: 0 12px; }
-.file-list { flex: 1; overflow-y: auto; padding: 4px 8px; min-height: 200px; }
-.file-item { padding: 8px 10px; border-radius: 4px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent; }
-.file-item:hover { background: #f5f7fa; }
-.file-item.active { background: #ecf5ff; border-color: #d9ecff; }
-.file-name { font-size: 13px; font-weight: 500; color: #303133; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.file-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
-.file-time { font-size: 11px; color: #c0c4cc; }
-.file-actions { margin-top: 4px; display: flex; gap: 4px; }
-.panel-footer { padding: 10px; border-top: 1px solid #ebeef5; }
-.upload-btn { display: block; margin-bottom: 8px; }
+.sql-execution-page { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 118px); overflow: hidden; }
+.page-header, .batch-summary-toolbar, .sql-workbench { background: #fff; border: 1px solid #e4e7ed; border-radius: 6px; }
+.page-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; flex-shrink: 0; }
+.page-header h2 { margin: 0 0 8px; font-size: 20px; color: #1f2937; }
+.page-header p { margin: 0; color: #909399; font-size: 13px; }
+.page-header-actions { display: flex; gap: 8px; }
+.batch-summary-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; flex-shrink: 0; }
+.batch-summary-left { min-width: 0; }
+.batch-title { font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.summary-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.batch-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.server-path-input { width: 240px; }
 .upload-btn input { display: none; }
-.import-row { display: flex; gap: 6px; }
-
-/* Right Panel */
-.right-panel { flex: 1; display: flex; flex-direction: column; gap: 10px; overflow: hidden; margin-left: 12px; min-width: 0; }
-.editor-section { background: #fff; border: 1px solid #ebeef5; border-radius: 6px; padding: 12px; flex-shrink: 0; }
-.editor-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
-.toolbar-spacer { flex: 1; }
-.options-pop { display: flex; flex-direction: column; gap: 4px; }
-.sql-textarea :deep(textarea) { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.5; }
-.editor-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-
-/* Result section wraps summary + batch + table */
-.result-section { flex: 1; min-height: 0; overflow: hidden; background: #fff; border: 1px solid #ebeef5; border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
-.table-wrap { flex: 1; min-height: 0; overflow: hidden; }
-
-/* Summary */
-.summary-bar { display: flex; align-items: center; gap: 16px; padding: 8px 14px; background: #f5f7fa; border-radius: 6px; font-size: 13px; color: #606266; flex-shrink: 0; }
-.summary-bar strong { font-size: 15px; margin-left: 4px; }
-.s-success strong { color: #67c23a; }
-.s-danger strong { color: #f56c6c; }
-.s-warning strong { color: #e6a23c; }
-
-/* Batch files bar */
-.batch-files-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 14px; background: #fdf6ec; border: 1px solid #faecd8; border-radius: 6px; flex-shrink: 0; }
-.batch-label { font-size: 13px; font-weight: 500; color: #e6a23c; margin-right: 8px; }
-.batch-file-tag { cursor: pointer; }
+.sql-workbench { flex: 1; min-height: 0; display: grid; grid-template-columns: 330px minmax(0, 1fr); overflow: hidden; }
+.sql-file-panel { border-right: 1px solid #e4e7ed; padding: 12px; display: flex; flex-direction: column; min-height: 0; background: #fbfcfe; }
+.panel-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.panel-title { font-size: 16px; font-weight: 600; color: #303133; }
+.file-mode-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+.file-mode-tabs :deep(.el-radio-button__inner) { padding: 6px 9px; border-radius: 4px; border-left: 1px solid #dcdfe6; }
+.file-list { flex: 1; min-height: 0; overflow-y: auto; }
+.file-item { padding: 10px 12px; border: 1px solid #edf1f7; border-radius: 4px; background: #fff; margin-bottom: 8px; cursor: pointer; }
+.file-item:hover { border-color: #b3d8ff; background: #f8fbff; }
+.file-item.active { background: #ecf5ff; border-color: #409eff; }
+.file-name { font-size: 13px; font-weight: 600; color: #303133; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-meta { display: flex; align-items: center; gap: 8px; margin-top: 7px; font-size: 12px; color: #909399; }
+.file-actions { display: flex; gap: 8px; margin-top: 8px; }
+.sql-main-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 14px; overflow: hidden; }
+.current-file-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 8px; flex-shrink: 0; }
+.current-file-title { font-size: 16px; font-weight: 600; color: #303133; }
+.current-file-subtitle { color: #909399; font-size: 12px; margin-top: 5px; }
+.option-chips { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.current-option-row { display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 0 2px 8px; color: #606266; font-size: 13px; flex-shrink: 0; }
+.option-label { color: #303133; font-weight: 600; }
+.sql-content-tabs { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.sql-content-tabs :deep(.el-tabs__content) { flex: 1; min-height: 0; overflow: hidden; }
+.sql-content-tabs :deep(.el-tab-pane) { height: 100%; min-height: 0; }
+.table-wrap { height: 100%; min-height: 260px; overflow: hidden; }
+.full-sql-content, .detail-sql { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; margin: 0; color: #303133; }
+.full-sql-content { height: 100%; overflow: auto; padding: 14px; background: #f8fafc; border: 1px solid #e4e7ed; border-radius: 4px; }
+.sql-detail-panel { margin-top: 10px; border: 1px solid #e4e7ed; border-radius: 6px; background: #f8fafc; padding: 10px 12px; flex-shrink: 0; min-height: 150px; max-height: 220px; overflow: auto; }
+.detail-header { display: flex; align-items: center; justify-content: space-between; font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 8px; }
+.detail-actions { display: flex; gap: 8px; }
+.detail-meta { display: flex; align-items: center; gap: 10px; color: #606266; font-size: 12px; margin-bottom: 8px; }
+.detail-reason { color: #f56c6c; font-size: 13px; margin-bottom: 8px; }
+.detail-sql { background: #fff; border: 1px solid #e4e7ed; border-radius: 4px; padding: 10px; max-height: 110px; overflow: auto; }
+.options-dialog { display: flex; flex-direction: column; gap: 10px; }
 .whitelist-options { display: flex; flex-direction: column; gap: 8px; }
 .whitelist-options :deep(.el-checkbox) { height: auto; align-items: flex-start; margin-right: 0; }
 .whitelist-type { display: inline-block; min-width: 190px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; color: #303133; }
 .whitelist-label { font-size: 12px; color: #606266; }
 
-@media (max-width: 1200px) {
-  .sql-page { flex-direction: column; height: auto; overflow: visible; }
-  .left-panel { width: 100%; height: 300px; }
-  .right-panel { margin-left: 0; margin-top: 12px; overflow: visible; }
-  .result-section { min-height: 400px; }
-  .table-wrap { min-height: 360px; }
+@media (max-width: 1280px) {
+  .sql-execution-page { height: auto; overflow: visible; }
+  .batch-summary-toolbar { align-items: flex-start; flex-direction: column; }
+  .batch-actions { justify-content: flex-start; }
+  .sql-workbench { grid-template-columns: 1fr; }
+  .sql-file-panel { border-right: 0; border-bottom: 1px solid #e4e7ed; max-height: 360px; }
+  .sql-main-panel { min-height: 640px; }
 }
 </style>
