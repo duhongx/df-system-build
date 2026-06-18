@@ -1981,8 +1981,6 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 				stmt.ExecuteMessage = execErr.Error()
 				failedCount++
 				repository.DB.Save(stmt)
-				markRemainingSQLStatementsPendingAfterFailure(statements, i+1, "前序 SQL 执行失败，当前 SQL 尚未执行")
-				break
 			}
 		} else {
 			stmt.ExecuteStatus = "SUCCESS"
@@ -2081,26 +2079,6 @@ func shouldBlockStatementWithWhitelist(stmt model.SQLChangeStatement, options SQ
 
 func isSQLExecutionCanceled(executionCtxErr error, execErr error) bool {
 	return errors.Is(execErr, context.Canceled) || errors.Is(executionCtxErr, context.Canceled)
-}
-
-func markRemainingSQLStatementsPendingAfterFailure(statements []model.SQLChangeStatement, start int, message string) {
-	if start >= len(statements) {
-		return
-	}
-	for i := start; i < len(statements); i++ {
-		stmt := &statements[i]
-		if stmt.ExecuteStatus == "SUCCESS" || stmt.ExecuteStatus == "SKIPPED" || stmt.ExecuteStatus == "FAILED" || stmt.ExecuteStatus == "CANCELED" {
-			continue
-		}
-		stmt.ExecuteStatus = "PENDING_AFTER_FAILURE"
-		stmt.ExecuteMessage = message
-		_ = repository.DB.Model(&model.SQLChangeStatement{}).
-			Where("id = ?", stmt.ID).
-			Updates(map[string]any{
-				"execute_status":  stmt.ExecuteStatus,
-				"execute_message": stmt.ExecuteMessage,
-			}).Error
-	}
 }
 
 func refreshStatementsStaticRiskBeforeExecution(statements []model.SQLChangeStatement) bool {
@@ -2302,7 +2280,7 @@ func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, u
 		default:
 			failedFiles++
 		}
-		if file.ExecuteStatus != "SUCCESS" && file.ExecuteStatus != "SKIPPED" {
+		if file.ExecuteStatus == "CANCELED" {
 			break
 		}
 	}
@@ -2565,7 +2543,6 @@ func (s *PostgreSQLService) BuildNotExecutableSQLForFile(id uint) (string, error
 	}
 	exportItems := make([]SQLExportStatement, 0, len(statements))
 	parts := make([]string, 0, len(statements))
-	exportPendingAfterFailure := false
 	for _, stmt := range statements {
 		item := SQLExportStatement{
 			LineNumber:     stmt.LineNumber,
@@ -2574,28 +2551,15 @@ func (s *PostgreSQLService) BuildNotExecutableSQLForFile(id uint) (string, error
 			ExecuteMessage: stmt.ExecuteMessage,
 			RiskReason:     stmt.RiskReason,
 		}
-		if exportPendingAfterFailure && isPendingSQLStatus(stmt.ExecuteStatus) && strings.TrimSpace(item.ExecuteMessage) == "" {
-			item.ExecuteStatus = "PENDING_AFTER_FAILURE"
-			item.ExecuteMessage = "前序 SQL 执行失败，当前 SQL 尚未执行"
-		}
 		exportItems = append(exportItems, item)
-		if !shouldExportSQLInFile(stmt.ExecuteStatus, exportPendingAfterFailure) {
-			if isFailedSQLStatus(stmt.ExecuteStatus) {
-				exportPendingAfterFailure = true
-			}
+		if !shouldExportSQL(stmt.ExecuteStatus) {
 			continue
 		}
 		if viewBackups := backupsByStatement[stmt.ID]; len(viewBackups) > 0 {
 			parts = append(parts, buildViewBackupExport(viewBackups, stmt.SQLContent))
-			if isFailedSQLStatus(stmt.ExecuteStatus) {
-				exportPendingAfterFailure = true
-			}
 			continue
 		}
 		parts = append(parts, BuildNotExecutableSQL([]SQLExportStatement{item}))
-		if isFailedSQLStatus(stmt.ExecuteStatus) {
-			exportPendingAfterFailure = true
-		}
 	}
 	if len(parts) > 0 {
 		return strings.TrimSpace(strings.Join(parts, "\n\n")), nil
@@ -2941,18 +2905,11 @@ func BuildNotExecutableSQL(statements []SQLExportStatement) string {
 
 func shouldExportSQL(status string) bool {
 	switch status {
-	case "NOT_EXECUTABLE", "FAILED", "PARTIAL_FAILED", "BLOCKED", "PENDING_AFTER_FAILURE":
+	case "NOT_EXECUTABLE", "FAILED", "PARTIAL_FAILED", "BLOCKED":
 		return true
 	default:
 		return false
 	}
-}
-
-func shouldExportSQLInFile(status string, exportPendingAfterFailure bool) bool {
-	if shouldExportSQL(status) {
-		return true
-	}
-	return exportPendingAfterFailure && isPendingSQLStatus(status)
 }
 
 func isFailedSQLStatus(status string) bool {

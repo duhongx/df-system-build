@@ -461,34 +461,6 @@ func TestSQLExecutionErrorClassificationDoesNotTreatDatabaseErrorAsCanceled(t *t
 	}
 }
 
-func TestMarkRemainingSQLStatementsPendingAfterFailureClearsBlockedStatus(t *testing.T) {
-	setupSQLChangeServiceTestDB(t)
-	file := model.SQLChangeFile{FileName: "force-after-failure.sql", ExecuteStatus: "RUNNING"}
-	if err := repository.DB.Create(&file).Error; err != nil {
-		t.Fatalf("create file: %v", err)
-	}
-	statements := []model.SQLChangeStatement{
-		{FileID: file.ID, LineNumber: 1, SQLContent: "UPDATE his.a SET code = 1", SQLType: "UPDATE_WEAK_WHERE", RiskLevel: "BLOCKED", ExecuteStatus: "FAILED"},
-		{FileID: file.ID, LineNumber: 2, SQLContent: "UPDATE his.b SET code = 1", SQLType: "UPDATE_WEAK_WHERE", RiskLevel: "BLOCKED", ExecuteStatus: "NOT_EXECUTABLE", ExecuteMessage: "UPDATE 条件过弱"},
-	}
-	if err := repository.DB.Create(&statements).Error; err != nil {
-		t.Fatalf("create statements: %v", err)
-	}
-
-	markRemainingSQLStatementsPendingAfterFailure(statements, 1, "前序 SQL 执行失败，当前 SQL 尚未执行")
-
-	var got model.SQLChangeStatement
-	if err := repository.DB.First(&got, statements[1].ID).Error; err != nil {
-		t.Fatalf("reload statement: %v", err)
-	}
-	if got.ExecuteStatus != "PENDING_AFTER_FAILURE" {
-		t.Fatalf("expected PENDING_AFTER_FAILURE, got %+v", got)
-	}
-	if !strings.Contains(got.ExecuteMessage, "前序 SQL 执行失败") {
-		t.Fatalf("expected failure dependency message, got %q", got.ExecuteMessage)
-	}
-}
-
 func TestColumnTypeViewDependencyRiskWarnsWithoutBlockingExecution(t *testing.T) {
 	analysis := RiskAnalysis{
 		SQLType:    "ALTER_COLUMN_TYPE",
@@ -718,7 +690,7 @@ func TestExportNotExecutableSQLIncludesBlockedAndFailed(t *testing.T) {
 	}
 }
 
-func TestBuildNotExecutableSQLForFileIncludesPendingAfterFailure(t *testing.T) {
+func TestBuildNotExecutableSQLForFileDoesNotRewritePendingAfterFailure(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	file := model.SQLChangeFile{FileName: "partial.sql", ExecuteStatus: "PARTIAL_FAILED"}
 	if err := repository.DB.Create(&file).Error; err != nil {
@@ -744,8 +716,14 @@ func TestBuildNotExecutableSQLForFileIncludesPendingAfterFailure(t *testing.T) {
 	if !strings.Contains(out, "Line 2") || !strings.Contains(out, "relation does not exist") {
 		t.Fatalf("expected failed SQL in export: %s", out)
 	}
-	if !strings.Contains(out, "Line 3") || !strings.Contains(out, "前序 SQL 执行失败") {
-		t.Fatalf("expected pending SQL after failure in export: %s", out)
+	if strings.Contains(out, "Line 3") || strings.Contains(out, "前序 SQL 执行失败") {
+		t.Fatalf("pending SQL must not be rewritten as failed by a previous statement: %s", out)
+	}
+}
+
+func TestPendingSQLStatusIsNotExportedBecausePreviousStatementFailed(t *testing.T) {
+	if shouldExportSQL("PENDING") {
+		t.Fatalf("pending SQL must not be treated as failed just because a previous statement failed")
 	}
 }
 
