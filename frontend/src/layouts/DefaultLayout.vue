@@ -350,6 +350,7 @@ async function handleSavePassword() {
           <el-menu-item index="/settings/environment">环境配置</el-menu-item>
           <el-menu-item index="/settings/config-items">配置项管理</el-menu-item>
           <el-menu-item index="/settings/build-configs">编译配置</el-menu-item>
+          <el-menu-item index="/settings/sql-execution">SQL执行配置</el-menu-item>
           <el-menu-item index="/settings/notifications">通知配置</el-menu-item>
         </el-sub-menu>
 

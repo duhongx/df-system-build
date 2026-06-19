@@ -9,22 +9,20 @@ import {
   executeSQLFileWithOptions,
   getSQLBatch,
   getSQLFile,
-  getSQLForceWhitelist,
   listSQLBatches,
   listDoneSQLFiles,
   listTodoSQLFiles,
   parseSQLBatch,
   parseSQLFile,
-  saveSQLForceWhitelist,
   skipSQLFile,
   skipSQLStatement,
   type ParseSQLBatchFile,
   type SQLChangeBatch,
   type SQLChangeFile,
-  type SQLForceWhitelistOption,
   type SQLChangeStatement,
   type SQLExecuteOptions,
 } from '../api/postgresql'
+import { getSettings } from '../api/settings'
 import { formatTime as formatTimeStr } from '../utils/time'
 
 type FileListMode = 'local' | 'todo' | 'done' | 'batch' | 'batchFiles'
@@ -34,17 +32,12 @@ const parsing = ref(false)
 const executing = ref(false)
 const loadingTodo = ref(false)
 const loadingDone = ref(false)
-const whitelistSaving = ref(false)
-const optionsDialogVisible = ref(false)
 
 const selectedTab = ref<FileListMode>('todo')
 const sqlViewMode = ref<SQLViewMode>('list')
 const localFileIndex = ref(0)
 const form = ref({ fileName: '', content: '', overwrite: true })
 const batchFiles = ref<ParseSQLBatchFile[]>([])
-const whitelistDialogVisible = ref(false)
-const forceWhitelistOptions = ref<SQLForceWhitelistOption[]>([])
-const forceWhitelistEnabled = ref<string[]>([])
 const selectedStatement = ref<SQLChangeStatement | null>(null)
 const options = ref<SQLExecuteOptions>({
   skipExistsColumn: true,
@@ -53,6 +46,8 @@ const options = ref<SQLExecuteOptions>({
   requireRiskConfirmation: true,
   confirmWarnRisk: false,
   forceBlockedSql: true,
+  lockTimeout: '5s',
+  statementTimeout: '10min',
 })
 
 const currentBatch = ref<SQLChangeBatch | null>(null)
@@ -89,13 +84,15 @@ const summaryFileCount = computed(() => {
   if (currentBatch.value?.totalFiles) return currentBatch.value.totalFiles
   return todoTotal.value || doneTotal.value || 0
 })
-const forceWhitelistSummary = computed(() => `白名单 ${forceWhitelistEnabled.value.length} 项`)
 const executeOptionSummary = computed(() => {
   const items: string[] = []
   if (options.value.skipExistsTable) items.push('已存在表')
   if (options.value.skipExistsColumn) items.push('已存在字段')
   if (options.value.skipUniqueConstraint) items.push('唯一约束冲突')
-  return items.length ? items.join(' / ') : '未启用跳过规则'
+  items.push(`锁等待 ${options.value.lockTimeout || '5s'}`)
+  items.push(`语句超时 ${options.value.statementTimeout || '10min'}`)
+  items.push(`强制执行 ${options.value.forceBlockedSql ? '开启' : '关闭'}`)
+  return items.join(' / ')
 })
 const fileModeOptions = computed(() => {
   const modes = []
@@ -109,7 +106,7 @@ const fileModeOptions = computed(() => {
   return modes
 })
 
-onMounted(() => { loadBatches(); loadTodo(); loadDone(); loadSQLForceWhitelistConfig() })
+onMounted(() => { loadBatches(); loadTodo(); loadDone(); loadSQLExecutionSettings() })
 
 async function loadBatches() {
   const data = await listSQLBatches(batchPage.value, pageSize)
@@ -139,22 +136,26 @@ async function loadDone() {
   }
 }
 
-async function loadSQLForceWhitelistConfig() {
-  const data = await getSQLForceWhitelist()
-  forceWhitelistOptions.value = data.available || []
-  forceWhitelistEnabled.value = data.enabled || []
+function boolSetting(value: string | undefined, fallback: boolean) {
+  if (value === undefined || value === '') return fallback
+  return value === 'true'
 }
 
-async function handleSaveSQLForceWhitelist() {
-  whitelistSaving.value = true
+async function loadSQLExecutionSettings() {
   try {
-    const data = await saveSQLForceWhitelist(forceWhitelistEnabled.value)
-    forceWhitelistOptions.value = data.available || []
-    forceWhitelistEnabled.value = data.enabled || []
-    whitelistDialogVisible.value = false
-    ElMessage.success('白名单配置已保存')
-  } finally {
-    whitelistSaving.value = false
+    const settings = await getSettings()
+    options.value = {
+      skipExistsColumn: boolSetting(settings.sql_execute_skip_exists_column, true),
+      skipExistsTable: boolSetting(settings.sql_execute_skip_exists_table, true),
+      skipUniqueConstraint: boolSetting(settings.sql_execute_skip_unique_constraint, true),
+      requireRiskConfirmation: true,
+      confirmWarnRisk: false,
+      forceBlockedSql: boolSetting(settings.sql_execute_force_blocked_sql, true),
+      lockTimeout: settings.sql_execute_lock_timeout || '5s',
+      statementTimeout: settings.sql_execute_statement_timeout || '10min',
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.message || '加载 SQL 执行配置失败')
   }
 }
 
@@ -459,11 +460,8 @@ function statementStatusText(status: string) {
 async function buildConfirmedOptions(targetStatements: SQLChangeStatement[]) {
   const blockedStatements = targetStatements.filter(s => (s.riskLevel === 'BLOCKED' || s.executeStatus === 'NOT_EXECUTABLE') && s.executeStatus !== 'SUCCESS' && s.executeStatus !== 'SKIPPED')
   if (options.value.forceBlockedSql && blockedStatements.length > 0) {
-    const forceableBlockedStatements = blockedStatements.filter(s => forceWhitelistEnabled.value.includes(s.sqlType))
-    const hardBlockedStatements = blockedStatements.filter(s => !forceWhitelistEnabled.value.includes(s.sqlType))
-    const forceableTypes = Array.from(new Set(forceableBlockedStatements.map(s => s.sqlType))).slice(0, 8).join('、') || '无'
-    const hardTypes = Array.from(new Set(hardBlockedStatements.map(s => s.sqlType))).slice(0, 8).join('、') || '无'
-    await ElMessageBox.confirm(`将强制提交白名单内阻断 SQL ${forceableBlockedStatements.length} 条：${forceableTypes}。仍会被后端阻断 ${hardBlockedStatements.length} 条：${hardTypes}。`, '高风险确认', { type: 'error', confirmButtonText: '强制执行' })
+    const riskTypes = Array.from(new Set(blockedStatements.map(s => s.sqlType))).slice(0, 8).join('、')
+    await ElMessageBox.confirm(`将尝试强制提交高风险 SQL ${blockedStatements.length} 条：${riskTypes}。未被系统配置允许的类型仍会由后端阻断。`, '高风险确认', { type: 'error', confirmButtonText: '强制执行' })
   }
   const warnStatements = targetStatements.filter(s => s.riskLevel === 'WARN' && s.executeStatus !== 'SUCCESS' && s.executeStatus !== 'SKIPPED')
   if (warnStatements.length === 0) return { ...options.value, confirmWarnRisk: false }
@@ -536,8 +534,6 @@ function isAnomalyStatement(row: SQLChangeStatement) {
               <el-dropdown-item :disabled="!currentFile" @click="handleCancelExecution">取消当前</el-dropdown-item>
               <el-dropdown-item :disabled="!currentBatch" @click="handleCancelBatch">取消批次</el-dropdown-item>
               <el-dropdown-item :disabled="!anomalyStatements.length" @click="handleExportAnomalySQL">导出异常SQL</el-dropdown-item>
-              <el-dropdown-item @click="optionsDialogVisible = true">执行选项</el-dropdown-item>
-              <el-dropdown-item @click="whitelistDialogVisible = true">白名单配置</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -628,10 +624,7 @@ function isAnomalyStatement(row: SQLChangeStatement) {
           <div class="option-chips">
             <span class="option-label">当前执行选项</span>
             <span>{{ executeOptionSummary }}</span>
-            <span>强制执行 {{ options.forceBlockedSql ? '开启' : '关闭' }}</span>
-            <span>{{ forceWhitelistSummary }}</span>
-            <el-button size="small" link type="primary" @click="optionsDialogVisible = true">调整</el-button>
-            <el-button size="small" link type="primary" @click="whitelistDialogVisible = true">白名单</el-button>
+            <router-link class="settings-link" to="/settings/sql-execution">SQL执行配置</router-link>
           </div>
         </div>
 
@@ -724,31 +717,6 @@ function isAnomalyStatement(row: SQLChangeStatement) {
       </main>
     </section>
 
-    <el-dialog v-model="optionsDialogVisible" title="执行选项" width="520px">
-      <div class="options-dialog">
-        <el-checkbox v-model="form.overwrite">同名覆盖</el-checkbox>
-        <el-checkbox v-model="options.skipExistsColumn">字段已存在跳过</el-checkbox>
-        <el-checkbox v-model="options.skipExistsTable">对象已存在跳过</el-checkbox>
-        <el-checkbox v-model="options.skipUniqueConstraint">唯一冲突跳过</el-checkbox>
-        <el-checkbox v-model="options.forceBlockedSql">强制执行阻断 SQL</el-checkbox>
-      </div>
-      <template #footer>
-        <el-button @click="optionsDialogVisible = false">关闭</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="whitelistDialogVisible" title="强制执行白名单配置" width="560px">
-      <el-checkbox-group v-model="forceWhitelistEnabled" class="whitelist-options">
-        <el-checkbox v-for="item in forceWhitelistOptions" :key="item.sqlType" :label="item.sqlType">
-          <span class="whitelist-type">{{ item.sqlType }}</span>
-          <span class="whitelist-label">{{ item.label }}</span>
-        </el-checkbox>
-      </el-checkbox-group>
-      <template #footer>
-        <el-button @click="whitelistDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="whitelistSaving" @click="handleSaveSQLForceWhitelist">保存</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -785,6 +753,7 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 .current-file-title { font-size: 14px; font-weight: 600; color: #303133; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .option-chips { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; color: #909399; font-size: 12px; }
 .option-label { color: #303133; font-weight: 600; }
+.settings-link { color: #409eff; text-decoration: none; }
 .sql-content-tabs { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .sql-content-tabs :deep(.el-tabs__header) { margin-bottom: 8px; }
 .sql-content-tabs :deep(.el-tabs__content) { flex: 1; min-height: 0; overflow: hidden; }
@@ -798,11 +767,6 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 .detail-meta { display: flex; align-items: center; gap: 10px; color: #606266; font-size: 12px; margin-bottom: 8px; }
 .detail-reason { color: #f56c6c; font-size: 13px; margin-bottom: 8px; }
 .detail-sql { background: #fff; border: 1px solid #e4e7ed; border-radius: 4px; padding: 10px; max-height: 110px; overflow: auto; }
-.options-dialog { display: flex; flex-direction: column; gap: 10px; }
-.whitelist-options { display: flex; flex-direction: column; gap: 8px; }
-.whitelist-options :deep(.el-checkbox) { height: auto; align-items: flex-start; margin-right: 0; }
-.whitelist-type { display: inline-block; min-width: 190px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; color: #303133; }
-.whitelist-label { font-size: 12px; color: #606266; }
 
 @media (max-width: 1280px) {
   .sql-execution-page { height: auto; overflow: visible; }

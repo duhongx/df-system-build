@@ -51,6 +51,7 @@ const routes = [
       { path: 'settings/templates', redirect: '/settings/build-configs' },
       { path: 'settings/executors', redirect: '/settings/build-configs' },
       { path: 'settings/build-configs', name: 'SettingsBuildConfigs', component: () => import('../views/BuildConfigView.vue'), meta: { title: '编译配置', settingsTab: 'build-configs' } },
+      { path: 'settings/sql-execution', name: 'SettingsSQLExecution', component: () => import('../views/SettingsSQLExecutionView.vue'), meta: { title: 'SQL执行配置', settingsTab: 'sql-execution' } },
       { path: 'settings/notifications', name: 'SettingsNotifications', component: () => import('../views/SettingsView.vue'), meta: { title: '通知配置', settingsTab: 'notifications' } },
       { path: 'settings/config-items', name: 'SettingsConfigItems', component: () => import('../views/ConfigItemsView.vue'), meta: { title: '配置项管理', settingsTab: 'config-items' } },
       { path: 'settings', redirect: '/settings/general' },

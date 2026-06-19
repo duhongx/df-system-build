@@ -48,6 +48,13 @@ var validSchemaNameRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 const sqlForceWhitelistSettingKey = "postgresql_sql_force_whitelist"
 
+const (
+	sqlExecuteLockTimeoutSettingKey      = "sql_execute_lock_timeout"
+	sqlExecuteStatementTimeoutSettingKey = "sql_execute_statement_timeout"
+	defaultSQLExecuteLockTimeout         = "5s"
+	defaultSQLExecuteStatementTimeout    = "10min"
+)
+
 var forceableBlockedSQLTypes = map[string]string{
 	"UPDATE_WITHOUT_WHERE":        "UPDATE 缺少 WHERE",
 	"DELETE_WITHOUT_WHERE":        "DELETE 缺少 WHERE",
@@ -186,12 +193,14 @@ type RiskAnalysis struct {
 }
 
 type SQLExecuteOptions struct {
-	SkipExistsColumn        bool `json:"skipExistsColumn"`
-	SkipExistsTable         bool `json:"skipExistsTable"`
-	SkipUniqueConstraint    bool `json:"skipUniqueConstraint"`
-	RequireRiskConfirmation bool `json:"requireRiskConfirmation"`
-	ConfirmWarnRisk         bool `json:"confirmWarnRisk"`
-	ForceBlockedSQL         bool `json:"forceBlockedSql"`
+	SkipExistsColumn        bool   `json:"skipExistsColumn"`
+	SkipExistsTable         bool   `json:"skipExistsTable"`
+	SkipUniqueConstraint    bool   `json:"skipUniqueConstraint"`
+	RequireRiskConfirmation bool   `json:"requireRiskConfirmation"`
+	ConfirmWarnRisk         bool   `json:"confirmWarnRisk"`
+	ForceBlockedSQL         bool   `json:"forceBlockedSql"`
+	LockTimeout             string `json:"lockTimeout"`
+	StatementTimeout        string `json:"statementTimeout"`
 }
 
 type ExecuteSQLContentRequest struct {
@@ -356,6 +365,22 @@ func (s *PostgreSQLService) loadSQLForceWhitelist() ([]string, error) {
 		return nil, fmt.Errorf("SQL 强制执行白名单配置格式错误")
 	}
 	return mergeDefaultSQLForceWhitelist(enabled), nil
+}
+
+func (s *PostgreSQLService) applySQLExecuteSettings(options SQLExecuteOptions) SQLExecuteOptions {
+	if strings.TrimSpace(options.LockTimeout) == "" {
+		if value, _ := s.settingsRepo.GetByKey(sqlExecuteLockTimeoutSettingKey); strings.TrimSpace(value) != "" {
+			options.LockTimeout = value
+		}
+	}
+	if strings.TrimSpace(options.StatementTimeout) == "" {
+		if value, _ := s.settingsRepo.GetByKey(sqlExecuteStatementTimeoutSettingKey); strings.TrimSpace(value) != "" {
+			options.StatementTimeout = value
+		}
+	}
+	options.LockTimeout = normalizeSQLTimeoutLiteral(options.LockTimeout, defaultSQLExecuteLockTimeout)
+	options.StatementTimeout = normalizeSQLTimeoutLiteral(options.StatementTimeout, defaultSQLExecuteStatementTimeout)
+	return options
 }
 
 func availableSQLForceWhitelistOptions() []SQLForceWhitelistOption {
@@ -1873,6 +1898,7 @@ func (s *PostgreSQLService) ExecuteSQLFile(ctx context.Context, fileID uint, use
 }
 
 func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileID uint, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	options = s.applySQLExecuteSettings(options)
 	var file model.SQLChangeFile
 	if err := repository.DB.Where("is_deleted = ?", false).First(&file, fileID).Error; err != nil {
 		return nil, nil, err
@@ -1950,12 +1976,12 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 			continue
 		}
 
-		execCtx, cancel := context.WithTimeout(executionCtx, statementTimeout(stmt.SQLType)+10*time.Second)
+		execCtx, cancel := context.WithTimeout(executionCtx, sqlExecutionContextTimeout(stmt.SQLType, options))
 		start := time.Now()
 		stmt.ExecuteStatus = "RUNNING"
 		repository.DB.Save(stmt)
 
-		affected, sqlState, execErr := executeOneSQL(execCtx, db, file.SchemaName, stmt.SQLContent, stmt.SQLType, ownerUser)
+		affected, sqlState, execErr := executeOneSQL(execCtx, db, file.SchemaName, stmt.SQLContent, stmt.SQLType, ownerUser, options)
 		executionCanceled := isSQLExecutionCanceled(executionCtx.Err(), execErr)
 		cancel()
 
@@ -2640,7 +2666,7 @@ func openPostgreSQL(cfg PostgreSQLConfig) (*sql.DB, error) {
 	return db, nil
 }
 
-func executeOneSQL(ctx context.Context, db *sql.DB, schemaName, sqlText, sqlType, ownerUser string) (int64, string, error) {
+func executeOneSQL(ctx context.Context, db *sql.DB, schemaName, sqlText, sqlType, ownerUser string, options SQLExecuteOptions) (int64, string, error) {
 	if err := validateSchemaName(schemaName); err != nil {
 		return 0, "", err
 	}
@@ -2654,11 +2680,12 @@ func executeOneSQL(ctx context.Context, db *sql.DB, schemaName, sqlText, sqlType
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx, "SET lock_timeout = '5s'"); err != nil {
+	lockTimeout := normalizeSQLTimeoutLiteral(options.LockTimeout, defaultSQLExecuteLockTimeout)
+	statementTimeoutValue := sqlStatementTimeoutLiteral(sqlType, options)
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET lock_timeout = '%s'", escapeSQLString(lockTimeout))); err != nil {
 		return 0, pgState(err), err
 	}
-	timeout := statementTimeout(sqlType)
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET statement_timeout = '%dms'", timeout.Milliseconds())); err != nil {
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET statement_timeout = '%s'", escapeSQLString(statementTimeoutValue))); err != nil {
 		return 0, pgState(err), err
 	}
 	if _, err := conn.ExecContext(ctx, "SET idle_in_transaction_session_timeout = '60s'"); err != nil {
@@ -2715,6 +2742,57 @@ func statementTimeout(sqlType string) time.Duration {
 	default:
 		return 2 * time.Minute
 	}
+}
+
+func sqlExecutionContextTimeout(sqlType string, options SQLExecuteOptions) time.Duration {
+	return sqlStatementTimeoutDuration(sqlType, options) + 10*time.Second
+}
+
+func sqlStatementTimeoutLiteral(sqlType string, options SQLExecuteOptions) string {
+	value := normalizeSQLTimeoutLiteral(options.StatementTimeout, "")
+	if value != "" {
+		return value
+	}
+	return fmt.Sprintf("%dms", statementTimeout(sqlType).Milliseconds())
+}
+
+func sqlStatementTimeoutDuration(sqlType string, options SQLExecuteOptions) time.Duration {
+	if duration, ok := parseSQLTimeoutDuration(options.StatementTimeout); ok && duration > 0 {
+		return duration
+	}
+	return statementTimeout(sqlType)
+}
+
+func normalizeSQLTimeoutLiteral(value, fallback string) string {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), " ", ""))
+	if normalized == "" {
+		normalized = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(fallback), " ", ""))
+	}
+	if normalized == "" {
+		return ""
+	}
+	if !regexp.MustCompile(`^\d+(ms|s|m|min|h)?$`).MatchString(normalized) {
+		return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(fallback), " ", ""))
+	}
+	if regexp.MustCompile(`^\d+$`).MatchString(normalized) {
+		return normalized + "ms"
+	}
+	if strings.HasSuffix(normalized, "m") && !strings.HasSuffix(normalized, "ms") {
+		return strings.TrimSuffix(normalized, "m") + "min"
+	}
+	return normalized
+}
+
+func parseSQLTimeoutDuration(value string) (time.Duration, bool) {
+	normalized := normalizeSQLTimeoutLiteral(value, "")
+	if normalized == "" {
+		return 0, false
+	}
+	if strings.HasSuffix(normalized, "min") {
+		normalized = strings.TrimSuffix(normalized, "min") + "m"
+	}
+	duration, err := time.ParseDuration(normalized)
+	return duration, err == nil
 }
 
 func pgState(err error) string {

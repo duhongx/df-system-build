@@ -97,6 +97,8 @@ export interface SQLExecuteOptions {
   requireRiskConfirmation: boolean
   confirmWarnRisk: boolean
   forceBlockedSql: boolean
+  lockTimeout?: string
+  statementTimeout?: string
 }
 
 export interface SQLForceWhitelistOption {
