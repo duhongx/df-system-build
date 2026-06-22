@@ -53,5 +53,7 @@ assert.doesNotMatch(view, /执行批次/, 'SQL execution command bar should not 
 assert.match(api, /updateSQLFileContent/, 'PostgreSQL API should expose SQL file content editing')
 assert.match(api, /\/postgresql\/sql-files\/\$\{id\}\/content/, 'SQL file edit API should use a dedicated content endpoint')
 assert.match(view, /编辑SQL/, 'SQL execution page should expose SQL file editing')
+assert.match(view, /class="sql-context-actions"[\s\S]*编辑SQL/, 'SQL edit action should be visible in the SQL list context row')
+assert.doesNotMatch(view, /class="full-sql-toolbar"[\s\S]*v-if="!editingSQL"[\s\S]*编辑SQL/, 'SQL edit action should not be hidden inside the full SQL tab toolbar')
 assert.match(view, /保存并重新解析/, 'SQL execution page should save edits by reparsing the SQL file')
 assert.match(view, /editSQLContent/, 'SQL execution page should keep edited SQL in a separate draft before saving')

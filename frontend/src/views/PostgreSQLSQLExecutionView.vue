@@ -692,13 +692,21 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 
       <main class="sql-main-panel">
         <div class="sql-context-row">
-          <div>
+          <div class="current-file-block">
             <div class="current-file-title">当前文件：{{ form.fileName || '-' }}</div>
+            <div v-if="editingSQL" class="current-file-editing">正在编辑完整 SQL，保存后会重新解析当前文件。</div>
           </div>
-          <div class="option-chips">
-            <span class="option-label">当前执行选项</span>
-            <span>{{ executeOptionSummary }}</span>
-            <router-link class="settings-link" to="/settings/sql-execution">SQL执行配置</router-link>
+          <div class="sql-context-actions">
+            <div class="option-chips">
+              <span class="option-label">当前执行选项</span>
+              <span>{{ executeOptionSummary }}</span>
+              <router-link class="settings-link" to="/settings/sql-execution">SQL执行配置</router-link>
+            </div>
+            <template v-if="editingSQL">
+              <el-button size="small" @click="handleCancelEditSQL">取消</el-button>
+              <el-button size="small" type="primary" :loading="savingSQLContent" @click="handleSaveSQLContent">保存并重新解析</el-button>
+            </template>
+            <el-button v-else size="small" :disabled="!canEditCurrentSQL" @click="handleStartEditSQL">编辑SQL</el-button>
           </div>
         </div>
 
@@ -743,13 +751,6 @@ function isAnomalyStatement(row: SQLChangeStatement) {
                 <span class="full-sql-hint">
                   {{ editingSQL ? '编辑后保存会重新解析 SQL，并重置当前文件执行状态。' : '完整 SQL 默认只读，点击编辑后可修改当前文件内容。' }}
                 </span>
-                <div class="full-sql-actions">
-                  <el-button v-if="!editingSQL" size="small" :disabled="!canEditCurrentSQL" @click="handleStartEditSQL">编辑SQL</el-button>
-                  <template v-else>
-                    <el-button size="small" @click="handleCancelEditSQL">取消</el-button>
-                    <el-button size="small" type="primary" :loading="savingSQLContent" @click="handleSaveSQLContent">保存并重新解析</el-button>
-                  </template>
-                </div>
               </div>
               <el-input
                 v-if="editingSQL"
@@ -846,7 +847,10 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 .file-actions { display: flex; gap: 8px; margin-top: 6px; }
 .sql-main-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 10px 12px 12px; overflow: hidden; }
 .sql-context-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; margin-bottom: 4px; flex-shrink: 0; }
+.current-file-block { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .current-file-title { font-size: 14px; font-weight: 600; color: #303133; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.current-file-editing { font-size: 12px; color: #e6a23c; }
+.sql-context-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .option-chips { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; color: #909399; font-size: 12px; }
 .option-label { color: #303133; font-weight: 600; }
 .settings-link { color: #409eff; text-decoration: none; }
@@ -858,7 +862,6 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 .full-sql-pane { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
 .full-sql-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; color: #909399; font-size: 12px; }
 .full-sql-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.full-sql-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .full-sql-content, .detail-sql { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; margin: 0; color: #303133; }
 .full-sql-content { flex: 1; min-height: 0; overflow: auto; padding: 14px; background: #f8fafc; border: 1px solid #e4e7ed; border-radius: 4px; }
 .full-sql-editor { flex: 1; min-height: 0; }
