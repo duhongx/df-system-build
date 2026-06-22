@@ -21,6 +21,7 @@ import {
   type SQLChangeFile,
   type SQLChangeStatement,
   type SQLExecuteOptions,
+  updateSQLFileContent,
 } from '../api/postgresql'
 import { getSettings } from '../api/settings'
 import { formatTime as formatTimeStr } from '../utils/time'
@@ -32,11 +33,14 @@ const parsing = ref(false)
 const executing = ref(false)
 const loadingTodo = ref(false)
 const loadingDone = ref(false)
+const editingSQL = ref(false)
+const savingSQLContent = ref(false)
 
 const selectedTab = ref<FileListMode>('todo')
 const sqlViewMode = ref<SQLViewMode>('list')
 const localFileIndex = ref(0)
 const form = ref({ fileName: '', content: '', overwrite: true })
+const editSQLContent = ref('')
 const batchFiles = ref<ParseSQLBatchFile[]>([])
 const selectedStatement = ref<SQLChangeStatement | null>(null)
 const options = ref<SQLExecuteOptions>({
@@ -77,6 +81,10 @@ const timeoutCount = computed(() => statements.value.filter(s => s.executeStatus
 const pendingCount = computed(() => statements.value.filter(s => !s.executeStatus || s.executeStatus === 'PENDING').length)
 const anomalyStatements = computed(() => statements.value.filter(isAnomalyStatement))
 const visibleStatements = computed(() => sqlViewMode.value === 'anomaly' ? anomalyStatements.value : statements.value)
+const canEditCurrentSQL = computed(() => {
+  if (!currentFile.value) return !!form.value.content
+  return !['RUNNING', 'SUCCESS'].includes(currentFile.value.executeStatus)
+})
 const activeBatchName = computed(() => currentBatch.value?.batchName || form.value.fileName?.replace(/\.[^.]+$/, '') || '未选择批次')
 const summaryFileCount = computed(() => {
   if (batchFiles.value.length > 0) return batchFiles.value.length
@@ -342,6 +350,8 @@ function handleOpenLocalFile(file: ParseSQLBatchFile, index: number) {
   currentFile.value = null
   statements.value = []
   selectedStatement.value = null
+  editingSQL.value = false
+  editSQLContent.value = ''
   sqlViewMode.value = 'full'
 }
 
@@ -350,7 +360,71 @@ function applyLoadedFile(file: SQLChangeFile, loadedStatements: SQLChangeStateme
   form.value = { fileName: file.fileName || '', content: file.fileContent || '', overwrite: true }
   statements.value = loadedStatements
   selectedStatement.value = null
+  editingSQL.value = false
+  editSQLContent.value = ''
   sqlViewMode.value = loadedStatements.length > 0 ? 'list' : 'full'
+}
+
+function handleStartEditSQL() {
+  if (!form.value.content.trim()) {
+    ElMessage.warning('请选择 SQL 文件')
+    return
+  }
+  if (!canEditCurrentSQL.value) {
+    if (currentFile.value?.executeStatus === 'RUNNING') {
+      ElMessage.warning('SQL 文件正在执行中，不能编辑')
+      return
+    }
+    if (currentFile.value?.executeStatus === 'SUCCESS') {
+      ElMessage.warning('已执行成功的 SQL 文件不能原地编辑，请重新上传为新文件')
+      return
+    }
+    ElMessage.warning('当前 SQL 文件不能编辑')
+    return
+  }
+  editSQLContent.value = form.value.content
+  editingSQL.value = true
+  sqlViewMode.value = 'full'
+}
+
+function handleCancelEditSQL() {
+  editingSQL.value = false
+  editSQLContent.value = ''
+}
+
+async function handleSaveSQLContent() {
+  if (!editSQLContent.value.trim()) {
+    ElMessage.warning('SQL 内容为空')
+    return
+  }
+  savingSQLContent.value = true
+  try {
+    if (currentFile.value) {
+      const data = await updateSQLFileContent(currentFile.value.id, {
+        fileName: form.value.fileName,
+        content: editSQLContent.value,
+        overwrite: true,
+      })
+      applyLoadedFile(data.file, data.statements || [])
+      ElMessage.success(`已保存并重新解析 ${statements.value.length} 条 SQL`)
+      await Promise.all([loadBatches(), loadTodo(), loadDone()])
+      return
+    }
+
+    form.value.content = editSQLContent.value
+    if (batchFiles.value[localFileIndex.value]) {
+      batchFiles.value[localFileIndex.value] = {
+        ...batchFiles.value[localFileIndex.value],
+        fileName: form.value.fileName,
+        content: editSQLContent.value,
+      }
+    }
+    editingSQL.value = false
+    editSQLContent.value = ''
+    await handleParse()
+  } finally {
+    savingSQLContent.value = false
+  }
 }
 
 async function handleSkipFile(row: SQLChangeFile) {
@@ -664,7 +738,29 @@ function isAnomalyStatement(row: SQLChangeStatement) {
           </el-tab-pane>
 
           <el-tab-pane label="完整SQL" name="full">
-            <pre class="full-sql-content">{{ form.content || '请选择 SQL 文件' }}</pre>
+            <div class="full-sql-pane">
+              <div class="full-sql-toolbar">
+                <span class="full-sql-hint">
+                  {{ editingSQL ? '编辑后保存会重新解析 SQL，并重置当前文件执行状态。' : '完整 SQL 默认只读，点击编辑后可修改当前文件内容。' }}
+                </span>
+                <div class="full-sql-actions">
+                  <el-button v-if="!editingSQL" size="small" :disabled="!canEditCurrentSQL" @click="handleStartEditSQL">编辑SQL</el-button>
+                  <template v-else>
+                    <el-button size="small" @click="handleCancelEditSQL">取消</el-button>
+                    <el-button size="small" type="primary" :loading="savingSQLContent" @click="handleSaveSQLContent">保存并重新解析</el-button>
+                  </template>
+                </div>
+              </div>
+              <el-input
+                v-if="editingSQL"
+                v-model="editSQLContent"
+                type="textarea"
+                class="full-sql-editor"
+                resize="none"
+                spellcheck="false"
+              />
+              <pre v-else class="full-sql-content">{{ form.content || '请选择 SQL 文件' }}</pre>
+            </div>
           </el-tab-pane>
 
           <el-tab-pane :label="`异常SQL (${anomalyStatements.length})`" name="anomaly">
@@ -759,8 +855,14 @@ function isAnomalyStatement(row: SQLChangeStatement) {
 .sql-content-tabs :deep(.el-tabs__content) { flex: 1; min-height: 0; overflow: hidden; }
 .sql-content-tabs :deep(.el-tab-pane) { height: 100%; min-height: 0; }
 .table-wrap { height: 100%; min-height: 0; overflow: hidden; }
+.full-sql-pane { height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.full-sql-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; color: #909399; font-size: 12px; }
+.full-sql-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.full-sql-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .full-sql-content, .detail-sql { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; margin: 0; color: #303133; }
-.full-sql-content { height: 100%; overflow: auto; padding: 14px; background: #f8fafc; border: 1px solid #e4e7ed; border-radius: 4px; }
+.full-sql-content { flex: 1; min-height: 0; overflow: auto; padding: 14px; background: #f8fafc; border: 1px solid #e4e7ed; border-radius: 4px; }
+.full-sql-editor { flex: 1; min-height: 0; }
+.full-sql-editor :deep(.el-textarea__inner) { height: 100% !important; min-height: 100% !important; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.55; color: #303133; }
 .sql-detail-panel { margin-top: 8px; border: 1px solid #e4e7ed; border-radius: 6px; background: #f8fafc; padding: 10px 12px; flex-shrink: 0; max-height: 190px; overflow: auto; }
 .detail-header { display: flex; align-items: center; justify-content: space-between; font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 8px; }
 .detail-actions { display: flex; gap: 8px; }

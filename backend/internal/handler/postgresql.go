@@ -46,6 +46,7 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.POST("/sql-batches/:id/execute", h.ExecuteSQLBatch)
 		g.POST("/sql-batches/:id/cancel", h.CancelSQLBatch)
 		g.POST("/sql-files/parse", h.ParseSQL)
+		g.PUT("/sql-files/:id/content", h.UpdateSQLFileContent)
 		g.POST("/sql-files/:id/execute", h.ExecuteSQLFile)
 		g.POST("/sql-files/:id/cancel", h.CancelSQLFile)
 		g.POST("/sql-files/save", h.ParseSQL)
@@ -255,6 +256,25 @@ func (h *PostgreSQLHandler) ParseSQL(c *gin.Context) {
 	file, statements, err := h.svc.ParseSQL(req)
 	if err != nil {
 		response.Fail(c, 14002, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"file": file, "statements": statements})
+}
+
+func (h *PostgreSQLHandler) UpdateSQLFileContent(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	var req service.UpdateSQLFileContentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 14018, "参数错误")
+		return
+	}
+	file, statements, err := h.svc.UpdateSQLFileContent(uint(id), req, middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
 		return
 	}
 	response.OK(c, gin.H{"file": file, "statements": statements})

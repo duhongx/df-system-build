@@ -173,8 +173,10 @@ onMounted(loadSettings)
               :key="item.sqlType"
               :label="item.sqlType"
             >
-              <span class="whitelist-type">{{ item.sqlType }}</span>
-              <span class="whitelist-label">{{ item.label }}</span>
+              <span class="whitelist-content">
+                <span class="whitelist-type">{{ item.sqlType }}</span>
+                <span class="whitelist-label">{{ item.label }}</span>
+              </span>
             </el-checkbox>
           </el-checkbox-group>
         </section>
@@ -243,24 +245,51 @@ onMounted(loadSettings)
 
 .whitelist-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 8px 16px;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 10px 18px;
 }
 
 .whitelist-grid :deep(.el-checkbox) {
   height: auto;
   margin-right: 0;
   align-items: flex-start;
+  white-space: normal;
+}
+
+.whitelist-grid :deep(.el-checkbox__label) {
+  flex: 1;
+  min-width: 0;
+  padding-left: 8px;
+}
+
+.whitelist-content {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  column-gap: 12px;
+  align-items: start;
+  width: 100%;
+  line-height: 1.4;
 }
 
 .whitelist-type {
-  display: inline-block;
-  min-width: 190px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .whitelist-label {
   color: #606266;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .whitelist-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .whitelist-content {
+    grid-template-columns: 1fr;
+    row-gap: 2px;
+  }
 }
 </style>

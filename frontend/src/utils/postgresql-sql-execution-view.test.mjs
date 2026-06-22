@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import assert from 'node:assert/strict'
 
 const view = fs.readFileSync(new URL('../views/PostgreSQLSQLExecutionView.vue', import.meta.url), 'utf8')
+const api = fs.readFileSync(new URL('../api/postgresql.ts', import.meta.url), 'utf8')
 
 assert.match(view, /prop="affectedRows"\s+label="影响行数"/, 'SQL detail table should display affected row count')
 assert.match(view, /prop="estimatedRows"\s+label="预估行数"/, 'SQL detail table should display estimated affected row count')
@@ -49,3 +50,8 @@ assert.match(view, /@click="handleExecuteContent">执行<\/el-button>/, 'execute
 assert.doesNotMatch(view, /server-path-input/, 'SQL execution command bar should not show server path import input')
 assert.doesNotMatch(view, /importServerSQL/, 'SQL execution command bar should not expose server SQL import')
 assert.doesNotMatch(view, /执行批次/, 'SQL execution command bar should not show batch execution action')
+assert.match(api, /updateSQLFileContent/, 'PostgreSQL API should expose SQL file content editing')
+assert.match(api, /\/postgresql\/sql-files\/\$\{id\}\/content/, 'SQL file edit API should use a dedicated content endpoint')
+assert.match(view, /编辑SQL/, 'SQL execution page should expose SQL file editing')
+assert.match(view, /保存并重新解析/, 'SQL execution page should save edits by reparsing the SQL file')
+assert.match(view, /editSQLContent/, 'SQL execution page should keep edited SQL in a separate draft before saving')

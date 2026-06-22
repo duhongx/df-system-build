@@ -225,6 +225,9 @@ export const restoreSQLViewDependencyTask = (id: number) =>
 export const parseSQLFile = (data: ParseSQLRequest) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/parse', data)
 
+export const updateSQLFileContent = (id: number, data: ParseSQLRequest) =>
+  request.put<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/content`, data)
+
 export const executeSQLFile = (id: number) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/execute`)
 

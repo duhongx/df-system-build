@@ -414,6 +414,70 @@ func TestGetSQLFileOrdersStatementsByLineNumber(t *testing.T) {
 	}
 }
 
+func TestUpdateSQLFileContentReparsesAndResetsFile(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	svc := NewPostgreSQLService()
+	file, statements, err := svc.ParseSQL(ParseSQLRequest{
+		FileName:   "editable.sql",
+		SchemaName: "public",
+		Content:    "SELECT 1;",
+		Overwrite:  true,
+	})
+	if err != nil {
+		t.Fatalf("parse sql: %v", err)
+	}
+	if err := repository.DB.Model(&model.SQLChangeFile{}).Where("id = ?", file.ID).Updates(map[string]any{
+		"execute_status":  "PARTIAL_FAILED",
+		"execute_message": "旧错误",
+		"execute_user":    "tester",
+	}).Error; err != nil {
+		t.Fatalf("mark file failed: %v", err)
+	}
+
+	updated, updatedStatements, err := svc.UpdateSQLFileContent(file.ID, UpdateSQLFileContentRequest{
+		Content: "SELECT 2;\nSELECT 3;",
+	}, "editor")
+	if err != nil {
+		t.Fatalf("update sql file content: %v", err)
+	}
+	if updated.ID != file.ID {
+		t.Fatalf("expected in-place update of file id %d, got %d", file.ID, updated.ID)
+	}
+	if updated.ExecuteStatus != "PENDING" || updated.ExecuteMessage != "" || updated.ExecuteUser != "" || updated.ExecuteTime != nil {
+		t.Fatalf("expected file execution state reset, got %+v", updated)
+	}
+	if updated.FileContent != "SELECT 2;\nSELECT 3;" {
+		t.Fatalf("expected updated file content, got %q", updated.FileContent)
+	}
+	if len(updatedStatements) != 2 {
+		t.Fatalf("expected 2 reparsed statements, got %d", len(updatedStatements))
+	}
+	if updatedStatements[0].ID == statements[0].ID {
+		t.Fatalf("expected old statements to be replaced")
+	}
+	if updatedStatements[0].SQLContent != "SELECT 2" || updatedStatements[1].SQLContent != "SELECT 3" {
+		t.Fatalf("unexpected reparsed statements: %#v", updatedStatements)
+	}
+}
+
+func TestUpdateSQLFileContentRejectsRunningAndSuccessfulFiles(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	svc := NewPostgreSQLService()
+	for _, status := range []string{"RUNNING", "SUCCESS"} {
+		t.Run(status, func(t *testing.T) {
+			file := model.SQLChangeFile{FileName: status + ".sql", FileContent: "SELECT 1", ExecuteStatus: status}
+			if err := repository.DB.Create(&file).Error; err != nil {
+				t.Fatalf("create file: %v", err)
+			}
+
+			_, _, err := svc.UpdateSQLFileContent(file.ID, UpdateSQLFileContentRequest{Content: "SELECT 2;"}, "editor")
+			if err == nil {
+				t.Fatalf("expected %s file update to be rejected", status)
+			}
+		})
+	}
+}
+
 func TestPostgreSQLServiceDoesNotSetSearchPathForTargetSQL(t *testing.T) {
 	source, err := os.ReadFile("postgresql_service.go")
 	if err != nil {

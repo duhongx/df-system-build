@@ -185,6 +185,16 @@ type ParseSQLRequest struct {
 	Overwrite   bool   `json:"overwrite"`
 }
 
+type UpdateSQLFileContentRequest struct {
+	SystemCode  string `json:"systemCode"`
+	Environment string `json:"environment"`
+	SchemaName  string `json:"schemaName"`
+	Version     string `json:"version"`
+	GroupSortNo int    `json:"groupSortNo"`
+	FileName    string `json:"fileName"`
+	Content     string `json:"content" binding:"required"`
+}
+
 type RiskAnalysis struct {
 	SQLType       string
 	RiskLevel     string
@@ -1485,6 +1495,14 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 		return nil, nil, err
 	}
 
+	items, err := s.createSQLStatementsForFile(db, file.ID, req.Content, schemaName, statements)
+	if err != nil {
+		return nil, nil, err
+	}
+	return file, items, nil
+}
+
+func (s *PostgreSQLService) createSQLStatementsForFile(db *gorm.DB, fileID uint, content, schemaName string, statements []string) ([]model.SQLChangeStatement, error) {
 	items := make([]model.SQLChangeStatement, 0, len(statements))
 	for _, sqlText := range statements {
 		analysis := AnalyzeSQLRisk(sqlText)
@@ -1510,8 +1528,8 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 		}
 		strategy := DetermineExecutionStrategy(analysis)
 		item := model.SQLChangeStatement{
-			FileID:              file.ID,
-			LineNumber:          lineNumberForSQL(req.Content, sqlText),
+			FileID:              fileID,
+			LineNumber:          lineNumberForSQL(content, sqlText),
 			SQLContent:          sqlText,
 			SQLType:             analysis.SQLType,
 			RiskLevel:           analysis.RiskLevel,
@@ -1522,16 +1540,127 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 			ExecuteStatus:       defaultStatementStatus(analysis),
 		}
 		if err := db.Create(&item).Error; err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if len(viewDeps) > 0 {
-			if err := saveViewDependencyBackupsWithDB(db, file.ID, item.ID, viewDeps); err != nil {
-				return nil, nil, err
+			if err := saveViewDependencyBackupsWithDB(db, fileID, item.ID, viewDeps); err != nil {
+				return nil, err
 			}
 		}
 		items = append(items, item)
 	}
-	return file, items, nil
+	return items, nil
+}
+
+func (s *PostgreSQLService) UpdateSQLFileContent(fileID uint, req UpdateSQLFileContentRequest, username string) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	if strings.TrimSpace(req.Content) == "" {
+		return nil, nil, fmt.Errorf("SQL 内容为空")
+	}
+
+	var file *model.SQLChangeFile
+	var statements []model.SQLChangeStatement
+	err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		var existing model.SQLChangeFile
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("is_deleted = ?", false).First(&existing, fileID).Error; err != nil {
+			return err
+		}
+		switch existing.ExecuteStatus {
+		case "RUNNING":
+			return fmt.Errorf("SQL 文件正在执行中，不能编辑")
+		case "SUCCESS":
+			return fmt.Errorf("已执行成功的 SQL 文件不能原地编辑，请重新上传为新文件")
+		}
+
+		parsedStatements := SplitSQLStatements(req.Content)
+		if len(parsedStatements) == 0 {
+			return fmt.Errorf("SQL 内容为空")
+		}
+
+		fileName := existing.FileName
+		if strings.TrimSpace(req.FileName) != "" {
+			fileName = defaultSQLFileName(req.FileName)
+		}
+		version, groupSortNo, schemaName := parseSQLFileMeta(fileName)
+		if version == "" {
+			version = existing.Version
+		}
+		if groupSortNo == 0 {
+			groupSortNo = existing.GroupSortNo
+		}
+		if schemaName == "" {
+			schemaName = existing.SchemaName
+		}
+		if strings.TrimSpace(req.Version) != "" {
+			version = strings.TrimSpace(req.Version)
+		}
+		if req.GroupSortNo > 0 {
+			groupSortNo = req.GroupSortNo
+		}
+		if strings.TrimSpace(req.SchemaName) != "" {
+			schemaName = strings.TrimSpace(req.SchemaName)
+		}
+		if schemaName == "" {
+			schemaName = inferSQLSchema(parsedStatements)
+		}
+		if err := validateSchemaName(schemaName); err != nil {
+			return err
+		}
+
+		if strings.TrimSpace(req.SystemCode) != "" {
+			existing.SystemCode = strings.TrimSpace(req.SystemCode)
+		}
+		if strings.TrimSpace(req.Environment) != "" {
+			existing.Environment = strings.TrimSpace(req.Environment)
+		}
+		existing.FileName = fileName
+		existing.FileContent = req.Content
+		existing.SchemaName = schemaName
+		existing.Version = version
+		existing.GroupSortNo = groupSortNo
+		existing.ExecuteStatus = "PENDING"
+		existing.ExecuteMessage = ""
+		existing.ExecuteUser = ""
+		existing.ExecuteTime = nil
+		if err := tx.Save(&existing).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Where("file_id = ?", existing.ID).Delete(&model.SQLViewBackup{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("file_id = ?", existing.ID).Delete(&model.SQLChangeStatement{}).Error; err != nil {
+			return err
+		}
+
+		createdStatements, err := s.createSQLStatementsForFile(tx, existing.ID, req.Content, schemaName, parsedStatements)
+		if err != nil {
+			return err
+		}
+		if existing.BatchID > 0 {
+			if err := markSQLBatchPendingAfterFileEdit(tx, existing.BatchID, username); err != nil {
+				return err
+			}
+		}
+		file = &existing
+		statements = createdStatements
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return file, statements, nil
+}
+
+func markSQLBatchPendingAfterFileEdit(db *gorm.DB, batchID uint, username string) error {
+	var batch model.SQLChangeBatch
+	if err := db.Where("is_deleted = ?", false).First(&batch, batchID).Error; err != nil {
+		return err
+	}
+	batch.ExecuteStatus = "PENDING"
+	batch.ExecuteMessage = "SQL 文件已编辑，请重新执行批次"
+	batch.ExecuteUser = strings.TrimSpace(username)
+	batch.ExecuteTime = nil
+	return db.Save(&batch).Error
 }
 
 func (s *PostgreSQLService) ParseSQLBatch(req ParseSQLBatchRequest) (*model.SQLChangeBatch, []model.SQLChangeFile, error) {
