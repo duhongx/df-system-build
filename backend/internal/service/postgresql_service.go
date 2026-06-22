@@ -529,6 +529,14 @@ func (s *PostgreSQLService) GetSQLViewDependencyChanges(taskID uint) ([]model.SQ
 	return ensureSQLViewDependencyChanges(task)
 }
 
+func (s *PostgreSQLService) GetSQLViewDependencySteps(taskID uint) ([]model.SQLViewDependencyStep, error) {
+	var steps []model.SQLViewDependencyStep
+	if err := repository.DB.Where("task_id = ?", taskID).Order("step_order ASC, id ASC").Find(&steps).Error; err != nil {
+		return nil, err
+	}
+	return steps, nil
+}
+
 func buildSQLViewDependencyChange(taskID uint, ref alterColumnRef, status string) model.SQLViewDependencyChange {
 	line := ref.line
 	if line <= 0 {

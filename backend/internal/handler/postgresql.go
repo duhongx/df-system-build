@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"df-build-server/internal/middleware"
+	"df-build-server/internal/model"
 	"df-build-server/internal/service"
 	"df-build-server/pkg/response"
 
@@ -123,6 +124,20 @@ func (h *PostgreSQLHandler) CreateSQLViewDependencyTask(c *gin.Context) {
 	response.OK(c, task)
 }
 
+func (h *PostgreSQLHandler) respondSQLViewDependencyTask(c *gin.Context, task *model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) {
+	changes, err := h.svc.GetSQLViewDependencyChanges(task.ID)
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	steps, err := h.svc.GetSQLViewDependencySteps(task.ID)
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"task": task, "items": items, "changes": changes, "steps": steps})
+}
+
 func (h *PostgreSQLHandler) GetSQLViewDependencyTask(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -134,12 +149,7 @@ func (h *PostgreSQLHandler) GetSQLViewDependencyTask(c *gin.Context) {
 		response.Fail(c, 14018, err.Error())
 		return
 	}
-	changes, err := h.svc.GetSQLViewDependencyChanges(uint(id))
-	if err != nil {
-		response.Fail(c, 14018, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"task": task, "items": items, "changes": changes})
+	h.respondSQLViewDependencyTask(c, task, items)
 }
 
 func (h *PostgreSQLHandler) AnalyzeSQLViewDependencyTask(c *gin.Context) {
@@ -153,12 +163,7 @@ func (h *PostgreSQLHandler) AnalyzeSQLViewDependencyTask(c *gin.Context) {
 		response.Fail(c, 14018, err.Error())
 		return
 	}
-	changes, err := h.svc.GetSQLViewDependencyChanges(uint(id))
-	if err != nil {
-		response.Fail(c, 14018, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"task": task, "items": items, "changes": changes})
+	h.respondSQLViewDependencyTask(c, task, items)
 }
 
 func (h *PostgreSQLHandler) PrecheckSQLViewDependencyTask(c *gin.Context) {
@@ -172,12 +177,7 @@ func (h *PostgreSQLHandler) PrecheckSQLViewDependencyTask(c *gin.Context) {
 		response.Fail(c, 14018, err.Error())
 		return
 	}
-	changes, err := h.svc.GetSQLViewDependencyChanges(uint(id))
-	if err != nil {
-		response.Fail(c, 14018, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"task": task, "items": items, "changes": changes})
+	h.respondSQLViewDependencyTask(c, task, items)
 }
 
 func (h *PostgreSQLHandler) ExecuteSQLViewDependencyTask(c *gin.Context) {
@@ -191,12 +191,7 @@ func (h *PostgreSQLHandler) ExecuteSQLViewDependencyTask(c *gin.Context) {
 		response.Fail(c, 14018, err.Error())
 		return
 	}
-	changes, err := h.svc.GetSQLViewDependencyChanges(uint(id))
-	if err != nil {
-		response.Fail(c, 14018, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"task": task, "items": items, "changes": changes})
+	h.respondSQLViewDependencyTask(c, task, items)
 }
 
 func (h *PostgreSQLHandler) RestoreSQLViewDependencyTask(c *gin.Context) {
@@ -210,12 +205,7 @@ func (h *PostgreSQLHandler) RestoreSQLViewDependencyTask(c *gin.Context) {
 		response.Fail(c, 14018, err.Error())
 		return
 	}
-	changes, err := h.svc.GetSQLViewDependencyChanges(uint(id))
-	if err != nil {
-		response.Fail(c, 14018, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"task": task, "items": items, "changes": changes})
+	h.respondSQLViewDependencyTask(c, task, items)
 }
 
 func (h *PostgreSQLHandler) ExportSQLViewDependencyPlan(c *gin.Context) {

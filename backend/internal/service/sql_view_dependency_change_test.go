@@ -164,6 +164,38 @@ ALTER TABLE his.visit ALTER COLUMN code TYPE varchar(64);
 	}
 }
 
+func TestGetSQLViewDependencyStepsOrdersByStepOrder(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	svc := NewPostgreSQLService()
+
+	task, err := svc.CreateSQLViewDependencyTask(SQLViewDependencyTaskRequest{
+		AlterSQL: "ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(64);",
+	}, "tester")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	steps := []model.SQLViewDependencyStep{
+		{TaskID: task.ID, StepName: "ALTER_TABLE", StepOrder: 2, SQLContent: "ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(64);", Status: "PENDING"},
+		{TaskID: task.ID, StepName: "DROP_DEPENDENCY", StepOrder: 1, SQLContent: "DROP VIEW his.v_patient;", Status: "SUCCESS"},
+	}
+	for _, step := range steps {
+		if err := repository.DB.Create(&step).Error; err != nil {
+			t.Fatalf("create step: %v", err)
+		}
+	}
+
+	got, err := svc.GetSQLViewDependencySteps(task.ID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected two steps, got %+v", got)
+	}
+	if got[0].StepName != "DROP_DEPENDENCY" || got[1].StepName != "ALTER_TABLE" {
+		t.Fatalf("expected steps ordered by step_order, got %+v", got)
+	}
+}
+
 func TestCreateSQLViewDependencyTaskAcceptsTransactionExecutionMode(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	svc := NewPostgreSQLService()

@@ -8,6 +8,8 @@ const viewPath = new URL('../views/PostgreSQLViewDependencyChangeView.vue', impo
 const view = fs.existsSync(viewPath) ? fs.readFileSync(viewPath, 'utf8') : ''
 
 assert.match(api, /SQLViewDependencyTask/, 'PostgreSQL API should expose view dependency task types')
+assert.match(api, /SQLViewDependencyStep/, 'PostgreSQL API should expose view dependency execution steps')
+assert.match(api, /steps: SQLViewDependencyStep\[\]/, 'view dependency task responses should include execution steps')
 assert.match(api, /executionMode/, 'PostgreSQL API should expose view dependency execution mode')
 assert.match(api, /createSQLViewDependencyTask/, 'PostgreSQL API should create view dependency tasks')
 assert.match(api, /analyzeSQLViewDependencyTask/, 'PostgreSQL API should analyze view dependency tasks')
@@ -21,6 +23,7 @@ assert.match(router, /PostgreSQLViewDependencyChangeView/, 'router should load P
 assert.match(layout, /\/postgresql\/view-dependency-change/, 'PostgreSQL menu should link to view dependency change page')
 
 assert.match(view, /视图依赖变更/, 'page should be titled around view dependency changes')
+assert.doesNotMatch(view, /class="page-header"/, 'page should not reserve a separate explanatory header card')
 assert.doesNotMatch(view, /事务执行/, 'page should not expose transaction execution mode')
 assert.doesNotMatch(view, /分步执行/, 'page should not expose step execution mode')
 assert.match(view, />分析</, 'page should expose a direct analyze action')
@@ -39,6 +42,16 @@ assert.match(view, /catch \(err\)/, 'page should handle failed execution respons
 assert.match(view, /el-input[\s\S]*type="textarea"[\s\S]*alterSql/, 'page should provide one SQL textarea')
 assert.match(view, /多条 ALTER TABLE/, 'page should allow a batch of ALTER COLUMN SQL statements')
 assert.match(view, /字段变更/, 'page should show parsed field changes before dependency objects')
+assert.match(view, /hasAnalysisResult/, 'page should hide analysis result sections before analyzing')
+assert.match(view, /v-if="hasAnalysisResult" class="summary-card"/, 'summary should only appear after analysis')
+assert.match(view, /v-if="hasAnalysisResult" class="change-card"/, 'field changes should only appear after analysis')
+assert.match(view, /v-if="hasAnalysisResult" class="dependency-card"/, 'dependency objects should only appear after analysis')
+assert.match(view, /class="process-card"/, 'page should show execution process after analysis')
+assert.match(view, /备份视图/, 'execution process should show view backup stage')
+assert.match(view, /删除视图/, 'execution process should show dependency drop stage')
+assert.match(view, /执行SQL/, 'execution process should show ALTER SQL execution stage')
+assert.match(view, /恢复视图/, 'execution process should show restore stage')
+assert.match(view, /视图检测/, 'execution process should show view verification stage')
 assert.match(view, /getSettings/, 'view dependency page should load centralized SQL execution settings')
 assert.match(view, /sql_execute_lock_timeout/, 'view dependency page should use configured lock timeout')
 assert.match(view, /sql_execute_statement_timeout/, 'view dependency page should use configured statement timeout')

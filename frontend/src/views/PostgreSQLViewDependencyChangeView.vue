@@ -9,7 +9,9 @@ import {
   restoreSQLViewDependencyTask,
   type SQLViewDependencyChange,
   type SQLViewDependencyItem,
+  type SQLViewDependencyStep,
   type SQLViewDependencyTask,
+  type SQLViewDependencyTaskResult,
 } from '../api/postgresql'
 import { getSettings } from '../api/settings'
 
@@ -20,6 +22,7 @@ const restoring = ref(false)
 const currentTask = ref<SQLViewDependencyTask | null>(null)
 const dependencyChanges = ref<SQLViewDependencyChange[]>([])
 const dependencyItems = ref<SQLViewDependencyItem[]>([])
+const executionSteps = ref<SQLViewDependencyStep[]>([])
 const lastTaskSQL = ref('')
 
 const form = ref({
@@ -33,6 +36,98 @@ const dependencyCount = computed(() => dependencyItems.value.length)
 const changeCount = computed(() => dependencyChanges.value.length)
 const materializedCount = computed(() => dependencyItems.value.filter(item => item.objectKind === 'm').length)
 const canRestore = computed(() => Boolean(currentTask.value?.id && dependencyItems.value.length > 0))
+const hasAnalysisResult = computed(() => {
+  const status = currentTask.value?.status || ''
+  return Boolean(
+    dependencyChanges.value.length > 0 ||
+      dependencyItems.value.length > 0 ||
+      executionSteps.value.length > 0 ||
+      currentTask.value?.analyzedAt ||
+      ['ANALYZED', 'PRECHECKED', 'PRECHECK_PASSED', 'PRECHECK_FAILED', 'EXECUTING', 'SUCCESS', 'FAILED', 'RESTORING', 'RESTORE_FAILED', 'RESTORED'].includes(status),
+  )
+})
+
+type ProcessStageStatus = 'pending' | 'running' | 'success' | 'failed'
+
+function stageStatusText(status: ProcessStageStatus) {
+  return ({
+    pending: '待处理',
+    running: '执行中',
+    success: '完成',
+    failed: '失败',
+  } as Record<ProcessStageStatus, string>)[status]
+}
+
+function stageStatusType(status: ProcessStageStatus) {
+  if (status === 'success') return 'success'
+  if (status === 'failed') return 'danger'
+  if (status === 'running') return 'warning'
+  return 'info'
+}
+
+function stageFromStepNames(names: string[]): { status: ProcessStageStatus; count: number; error: string } {
+  const matched = executionSteps.value.filter(step => names.includes(step.stepName))
+  if (matched.some(step => step.status === 'FAILED')) {
+    return { status: 'failed', count: matched.length, error: matched.find(step => step.status === 'FAILED')?.errorMessage || '' }
+  }
+  if (matched.some(step => step.status === 'RUNNING')) {
+    return { status: 'running', count: matched.length, error: '' }
+  }
+  if (matched.length > 0 && matched.every(step => step.status === 'SUCCESS')) {
+    return { status: 'success', count: matched.length, error: '' }
+  }
+  return { status: 'pending', count: matched.length, error: '' }
+}
+
+const executionStages = computed(() => {
+  const backupStatus: ProcessStageStatus = hasAnalysisResult.value ? 'success' : 'pending'
+  const drop = stageFromStepNames(['DROP_DEPENDENCY'])
+  const alter = stageFromStepNames(['ALTER_TABLE'])
+  const restore = stageFromStepNames(['RESTORE_OBJECT', 'REFRESH_MATERIALIZED_VIEW', 'RESTORE_COMMENT', 'RESTORE_GRANT'])
+  const verify = stageFromStepNames(['VERIFY'])
+  return [
+    {
+      key: 'backup',
+      order: 1,
+      title: '备份视图',
+      status: backupStatus,
+      summary: backupStatus === 'success' ? `已保存 ${dependencyItems.value.length} 个依赖对象定义、权限、注释和索引信息` : '分析后生成依赖对象备份',
+      error: '',
+    },
+    {
+      key: 'drop',
+      order: 2,
+      title: '删除视图',
+      status: drop.status,
+      summary: drop.count > 0 ? `已处理 ${drop.count} 条删除依赖对象 SQL` : '执行时按依赖层级删除阻塞对象',
+      error: drop.error,
+    },
+    {
+      key: 'alter',
+      order: 3,
+      title: '执行SQL',
+      status: alter.status,
+      summary: alter.count > 0 ? `已处理 ${alter.count} 条字段变更 SQL` : '删除依赖后执行原始字段变更 SQL',
+      error: alter.error,
+    },
+    {
+      key: 'restore',
+      order: 4,
+      title: '恢复视图',
+      status: restore.status,
+      summary: restore.count > 0 ? `已处理 ${restore.count} 条重建、权限和注释恢复 SQL` : '字段变更后按备份恢复视图和附属对象',
+      error: restore.error,
+    },
+    {
+      key: 'verify',
+      order: 5,
+      title: '视图检测',
+      status: verify.status,
+      summary: verify.count > 0 ? `已处理 ${verify.count} 条存在性检测 SQL` : '恢复后校验视图存在并可访问',
+      error: verify.error,
+    },
+  ]
+})
 
 function taskStatusText(status?: string) {
   return ({
@@ -44,6 +139,7 @@ function taskStatusText(status?: string) {
     EXECUTING: '执行中',
     SUCCESS: '成功',
     FAILED: '失败',
+    RESTORING: '恢复中',
     RESTORE_FAILED: '恢复失败',
     RESTORED: '已恢复',
   } as Record<string, string>)[status || ''] || status || '-'
@@ -52,7 +148,7 @@ function taskStatusText(status?: string) {
 function taskStatusType(status?: string) {
   if (status === 'SUCCESS' || status === 'RESTORED') return 'success'
   if (status === 'FAILED' || status === 'PRECHECK_FAILED' || status === 'RESTORE_FAILED') return 'danger'
-  if (status === 'EXECUTING' || status === 'PRECHECK_PASSED') return 'warning'
+  if (status === 'EXECUTING' || status === 'RESTORING' || status === 'PRECHECK_PASSED') return 'warning'
   return 'info'
 }
 
@@ -60,10 +156,11 @@ function objectKindText(kind: string) {
   return kind === 'm' ? '物化视图' : '视图'
 }
 
-function applyTaskResult(data: { task: SQLViewDependencyTask; items?: SQLViewDependencyItem[]; changes?: SQLViewDependencyChange[] }) {
+function applyTaskResult(data: SQLViewDependencyTaskResult) {
   currentTask.value = data.task
   dependencyItems.value = data.items || []
   dependencyChanges.value = data.changes || []
+  executionSteps.value = data.steps || []
 }
 
 async function loadSQLExecutionSettings() {
@@ -94,6 +191,7 @@ async function ensureTaskForCurrentSQL() {
   currentTask.value = task
   dependencyChanges.value = []
   dependencyItems.value = []
+  executionSteps.value = []
   lastTaskSQL.value = sql
   return task
 }
@@ -181,17 +279,10 @@ onMounted(loadSQLExecutionSettings)
 
 <template>
   <div class="view-dependency-page" v-loading="loading">
-    <section class="page-header">
-      <div>
-        <h2>视图依赖变更</h2>
-        <p>输入被视图依赖阻塞的字段变更 SQL，先分析依赖，再执行备份、变更和视图重建；失败后可按备份恢复。</p>
-      </div>
-      <el-button size="small" :disabled="!currentTask" @click="refreshCurrentTask">刷新当前结果</el-button>
-    </section>
-
     <section class="work-card">
       <div class="sql-header">
         <div>
+          <h2>视图依赖变更</h2>
           <h3>变更 SQL</h3>
           <p>可粘贴多条 ALTER TABLE ... ALTER COLUMN ... TYPE ... SQL；系统会统一分析依赖、备份、执行和恢复。</p>
         </div>
@@ -211,7 +302,28 @@ onMounted(loadSQLExecutionSettings)
       />
     </section>
 
-    <section class="summary-card">
+    <section v-if="hasAnalysisResult" class="process-card">
+      <div class="table-header">
+        <div>
+          <h3>执行过程</h3>
+          <p>展示本次任务从备份、删除依赖、执行变更到恢复检测的处理过程。</p>
+        </div>
+        <el-button size="small" :disabled="!currentTask" @click="refreshCurrentTask">刷新</el-button>
+      </div>
+      <div class="stage-list">
+        <div v-for="stage in executionStages" :key="stage.key" :class="['stage-item', `is-${stage.status}`]">
+          <div class="stage-title">
+            <span class="stage-index">{{ stage.order }}</span>
+            <strong>{{ stage.title }}</strong>
+            <el-tag size="small" :type="stageStatusType(stage.status)">{{ stageStatusText(stage.status) }}</el-tag>
+          </div>
+          <p>{{ stage.summary }}</p>
+          <span v-if="stage.error" class="stage-error">{{ stage.error }}</span>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="hasAnalysisResult" class="summary-card">
       <div class="summary-item">
         <span>字段变更</span>
         <strong>{{ changeCount }}</strong>
@@ -235,7 +347,7 @@ onMounted(loadSQLExecutionSettings)
       </div>
     </section>
 
-    <section class="change-card">
+    <section v-if="hasAnalysisResult" class="change-card">
       <div class="table-header">
         <div>
           <h3>字段变更</h3>
@@ -260,7 +372,7 @@ onMounted(loadSQLExecutionSettings)
       </el-table>
     </section>
 
-    <section class="dependency-card">
+    <section v-if="hasAnalysisResult" class="dependency-card">
       <div class="table-header">
         <div>
           <h3>依赖对象</h3>
@@ -296,8 +408,8 @@ onMounted(loadSQLExecutionSettings)
   padding: 16px;
 }
 
-.page-header,
 .work-card,
+.process-card,
 .summary-card,
 .change-card,
 .dependency-card {
@@ -306,28 +418,25 @@ onMounted(loadSQLExecutionSettings)
   border-radius: 6px;
 }
 
-.page-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px 18px;
-}
-
-.page-header h2,
+.work-card h2,
 .work-card h3,
+.process-card h3,
 .change-card h3,
 .dependency-card h3 {
   margin: 0;
   color: #303133;
 }
 
-.page-header p,
 .work-card p,
+.process-card p,
 .change-card p,
 .dependency-card p {
   margin: 8px 0 0;
   color: #909399;
+}
+
+.work-card h2 {
+  margin-bottom: 12px;
 }
 
 .work-card {
@@ -352,6 +461,67 @@ onMounted(loadSQLExecutionSettings)
 .sql-input :deep(.el-textarea__inner) {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   line-height: 1.55;
+}
+
+.process-card {
+  padding: 16px 18px;
+}
+
+.stage-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.stage-item {
+  min-height: 112px;
+  padding: 12px;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.stage-item.is-success {
+  border-color: #b3e19d;
+  background: #f0f9eb;
+}
+
+.stage-item.is-running {
+  border-color: #f3d19e;
+  background: #fdf6ec;
+}
+
+.stage-item.is-failed {
+  border-color: #fab6b6;
+  background: #fef0f0;
+}
+
+.stage-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stage-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  color: #fff;
+  background: #409eff;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.stage-error {
+  display: block;
+  margin-top: 8px;
+  color: #f56c6c;
+  font-size: 12px;
+  word-break: break-all;
 }
 
 .summary-card {
@@ -392,8 +562,11 @@ onMounted(loadSQLExecutionSettings)
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .sql-header,
-  .page-header {
+  .stage-list {
+    grid-template-columns: 1fr;
+  }
+
+  .sql-header {
     flex-direction: column;
   }
 }
