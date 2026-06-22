@@ -93,6 +93,21 @@ type SQLViewDependencyTask struct {
 	UpdatedAt        time.Time  `json:"updatedAt"`
 }
 
+type SQLViewDependencyChange struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	TaskID       uint      `gorm:"index" json:"taskId"`
+	ChangeOrder  int       `gorm:"index" json:"changeOrder"`
+	LineNumber   int       `json:"lineNumber"`
+	SchemaName   string    `gorm:"size:64;index" json:"schemaName"`
+	TableName    string    `gorm:"size:128;index" json:"tableName"`
+	ColumnName   string    `gorm:"size:128;index" json:"columnName"`
+	AlterSQL     string    `gorm:"type:text" json:"alterSql"`
+	Status       string    `gorm:"size:32;index" json:"status"`
+	ErrorMessage string    `gorm:"type:text" json:"errorMessage"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
 type SQLViewDependencyItem struct {
 	ID                 uint      `gorm:"primaryKey" json:"id"`
 	TaskID             uint      `gorm:"index" json:"taskId"`

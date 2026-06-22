@@ -167,6 +167,21 @@ export interface SQLViewDependencyItem {
   errorMessage: string
 }
 
+export interface SQLViewDependencyChange {
+  id: number
+  taskId: number
+  changeOrder: number
+  lineNumber: number
+  schemaName: string
+  tableName: string
+  columnName: string
+  alterSql: string
+  status: string
+  errorMessage: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface SQLViewDependencyTaskRequest {
   schemaName?: string
   tableName?: string
@@ -193,19 +208,19 @@ export const createSQLViewDependencyTask = (data: SQLViewDependencyTaskRequest) 
   request.post<any, SQLViewDependencyTask>('/postgresql/view-dependency-tasks', data)
 
 export const getSQLViewDependencyTask = (id: number) =>
-  request.get<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}`)
+  request.get<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[]; changes: SQLViewDependencyChange[] }>(`/postgresql/view-dependency-tasks/${id}`)
 
 export const analyzeSQLViewDependencyTask = (id: number) =>
-  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/analyze`)
+  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[]; changes: SQLViewDependencyChange[] }>(`/postgresql/view-dependency-tasks/${id}/analyze`)
 
 export const precheckSQLViewDependencyTask = (id: number) =>
-  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/precheck`)
+  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[]; changes: SQLViewDependencyChange[] }>(`/postgresql/view-dependency-tasks/${id}/precheck`)
 
 export const executeSQLViewDependencyTask = (id: number) =>
-  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/execute`)
+  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[]; changes: SQLViewDependencyChange[] }>(`/postgresql/view-dependency-tasks/${id}/execute`)
 
 export const restoreSQLViewDependencyTask = (id: number) =>
-  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/restore`)
+  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[]; changes: SQLViewDependencyChange[] }>(`/postgresql/view-dependency-tasks/${id}/restore`)
 
 export const parseSQLFile = (data: ParseSQLRequest) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/parse', data)

@@ -48,6 +48,22 @@ function updateForceBlockedSQL(value: string | number | boolean) {
   updateSwitchValue('sql_execute_force_blocked_sql', Boolean(value))
 }
 
+function isValidTimeoutLiteral(value: string) {
+  return /^\d+(ms|s|m|min|h)?$/i.test(value.trim().replace(/\s+/g, ''))
+}
+
+function validateTimeoutConfig() {
+  if (!isValidTimeoutLiteral(form.value.sql_execute_lock_timeout)) {
+    ElMessage.error('锁等待超时格式不正确，请填写 500ms、5s、10min 或 1h 这类值')
+    return false
+  }
+  if (!isValidTimeoutLiteral(form.value.sql_execute_statement_timeout)) {
+    ElMessage.error('语句执行超时格式不正确，请填写 500ms、5s、10min 或 1h 这类值')
+    return false
+  }
+  return true
+}
+
 async function loadSettings() {
   loading.value = true
   try {
@@ -70,6 +86,7 @@ async function loadSettings() {
 }
 
 async function saveSettings() {
+  if (!validateTimeoutConfig()) return
   saving.value = true
   try {
     await updateSettings(form.value)

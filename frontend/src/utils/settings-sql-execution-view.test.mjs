@@ -24,3 +24,5 @@ assert.match(view, /getSQLForceWhitelist/, 'settings page should load force whit
 assert.match(view, /saveSQLForceWhitelist/, 'settings page should save force whitelist')
 assert.match(view, /sql_execute_lock_timeout/, 'settings should persist lock timeout with a dedicated key')
 assert.match(view, /sql_execute_statement_timeout/, 'settings should persist statement timeout with a dedicated key')
+assert.match(view, /validateTimeoutConfig/, 'settings page should validate timeout format before saving')
+assert.match(view, /isValidTimeoutLiteral/, 'settings page should reject invalid timeout literals')

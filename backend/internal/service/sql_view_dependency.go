@@ -100,65 +100,128 @@ func quoteIdent(name string) string {
 }
 
 func validateViewDependencyAlterSQL(req SQLViewDependencyTaskRequest) (alterColumnRef, error) {
+	refs, err := validateViewDependencyAlterSQLs(req)
+	if err != nil {
+		return alterColumnRef{}, err
+	}
+	if len(refs) == 0 {
+		return alterColumnRef{}, fmt.Errorf("ALTER SQL 不能为空")
+	}
+	return refs[0], nil
+}
+
+func validateViewDependencyAlterSQLs(req SQLViewDependencyTaskRequest) ([]alterColumnRef, error) {
 	req.SchemaName = strings.TrimSpace(req.SchemaName)
 	req.TableName = strings.TrimSpace(req.TableName)
 	req.ColumnName = strings.TrimSpace(req.ColumnName)
 	req.AlterSQL = strings.TrimSpace(req.AlterSQL)
 	if req.AlterSQL == "" {
-		return alterColumnRef{}, fmt.Errorf("ALTER SQL 不能为空")
+		return nil, fmt.Errorf("ALTER SQL 不能为空")
 	}
 	if err := validateSchemaName(req.SchemaName); err != nil {
-		return alterColumnRef{}, err
+		return nil, err
 	}
-	ref, err := parseSingleAlterColumnTypeRef(req.AlterSQL)
+	refs, err := parseAlterColumnTypeRefs(req.AlterSQL)
 	if err != nil {
-		return alterColumnRef{}, err
+		return nil, err
 	}
-	if ref.schema == "" {
-		return alterColumnRef{}, fmt.Errorf("ALTER SQL 必须显式指定 schema.table")
+	for _, ref := range refs {
+		if ref.schema == "" {
+			return nil, fmt.Errorf("ALTER SQL 必须显式指定 schema.table")
+		}
+		if err := validateSchemaName(ref.schema); err != nil {
+			return nil, err
+		}
+		if req.SchemaName != "" && !strings.EqualFold(ref.schema, req.SchemaName) {
+			return nil, fmt.Errorf("ALTER SQL 目标 schema 与入参不一致")
+		}
+		if req.TableName != "" && !strings.EqualFold(ref.table, req.TableName) {
+			return nil, fmt.Errorf("ALTER SQL 目标表与入参不一致")
+		}
+		if req.ColumnName != "" && !strings.EqualFold(ref.column, req.ColumnName) {
+			return nil, fmt.Errorf("ALTER SQL 目标字段与入参不一致")
+		}
 	}
-	if err := validateSchemaName(ref.schema); err != nil {
-		return alterColumnRef{}, err
-	}
-	if req.SchemaName != "" && !strings.EqualFold(ref.schema, req.SchemaName) {
-		return alterColumnRef{}, fmt.Errorf("ALTER SQL 目标 schema 与入参不一致")
-	}
-	if req.TableName != "" && !strings.EqualFold(ref.table, req.TableName) {
-		return alterColumnRef{}, fmt.Errorf("ALTER SQL 目标表与入参不一致")
-	}
-	if req.ColumnName != "" && !strings.EqualFold(ref.column, req.ColumnName) {
-		return alterColumnRef{}, fmt.Errorf("ALTER SQL 目标字段与入参不一致")
-	}
-	return ref, nil
+	return refs, nil
 }
 
 func parseSingleAlterColumnTypeRef(sqlText string) (alterColumnRef, error) {
-	tree, err := pg_query.Parse(sqlText)
+	refs, err := parseAlterColumnTypeRefs(sqlText)
 	if err != nil {
-		return alterColumnRef{}, fmt.Errorf("ALTER SQL 解析失败: %w", err)
+		return alterColumnRef{}, err
 	}
-	if len(tree.GetStmts()) != 1 {
+	if len(refs) != 1 {
 		return alterColumnRef{}, fmt.Errorf("只允许一条 ALTER TABLE 语句")
 	}
-	stmt := tree.GetStmts()[0].GetStmt()
-	alterStmt := stmt.GetAlterTableStmt()
-	if alterStmt == nil || alterStmt.GetRelation() == nil {
-		return alterColumnRef{}, fmt.Errorf("只支持 ALTER TABLE 修改字段类型语句")
+	return refs[0], nil
+}
+
+func parseAlterColumnTypeRefs(sqlText string) ([]alterColumnRef, error) {
+	tree, err := pg_query.Parse(sqlText)
+	if err != nil {
+		return nil, fmt.Errorf("ALTER SQL 解析失败: %w", err)
 	}
-	cmds := alterStmt.GetCmds()
-	if len(cmds) != 1 {
-		return alterColumnRef{}, fmt.Errorf("视图依赖变更只允许单个字段类型变更，不允许在同一 ALTER TABLE 中包含其他操作")
+	rawStmts := tree.GetStmts()
+	if len(rawStmts) == 0 {
+		return nil, fmt.Errorf("ALTER SQL 不能为空")
 	}
-	cmd := cmds[0].GetAlterTableCmd()
-	if cmd == nil || cmd.GetSubtype() != pg_query.AlterTableType_AT_AlterColumnType {
-		return alterColumnRef{}, fmt.Errorf("只支持 ALTER TABLE 修改字段类型语句")
+	refs := make([]alterColumnRef, 0, len(rawStmts))
+	for idx, raw := range rawStmts {
+		stmt := raw.GetStmt()
+		alterStmt := stmt.GetAlterTableStmt()
+		if alterStmt == nil || alterStmt.GetRelation() == nil {
+			return nil, fmt.Errorf("第 %d 条 SQL 只支持 ALTER TABLE 修改字段类型语句", idx+1)
+		}
+		cmds := alterStmt.GetCmds()
+		if len(cmds) != 1 {
+			return nil, fmt.Errorf("第 %d 条 SQL 只允许单个字段类型变更，不允许在同一 ALTER TABLE 中包含其他操作", idx+1)
+		}
+		cmd := cmds[0].GetAlterTableCmd()
+		if cmd == nil || cmd.GetSubtype() != pg_query.AlterTableType_AT_AlterColumnType {
+			return nil, fmt.Errorf("第 %d 条 SQL 只支持 ALTER TABLE 修改字段类型语句", idx+1)
+		}
+		relation := alterStmt.GetRelation()
+		refs = append(refs, alterColumnRef{
+			schema: strings.TrimSpace(relation.GetSchemaname()),
+			table:  strings.TrimSpace(relation.GetRelname()),
+			column: strings.TrimSpace(cmd.GetName()),
+			sql:    extractRawStatementSQL(sqlText, raw),
+			line:   lineNumberAtOffset(sqlText, int(raw.GetStmtLocation())),
+			order:  idx + 1,
+		})
 	}
-	relation := alterStmt.GetRelation()
-	return alterColumnRef{
-		schema: strings.TrimSpace(relation.GetSchemaname()),
-		table:  strings.TrimSpace(relation.GetRelname()),
-		column: strings.TrimSpace(cmd.GetName()),
-	}, nil
+	return refs, nil
+}
+
+func extractRawStatementSQL(sqlText string, raw *pg_query.RawStmt) string {
+	start := int(raw.GetStmtLocation())
+	if start < 0 || start > len(sqlText) {
+		start = 0
+	}
+	end := len(sqlText)
+	if stmtLen := int(raw.GetStmtLen()); stmtLen > 0 && start+stmtLen <= len(sqlText) {
+		end = start + stmtLen
+	} else if semicolon := strings.Index(sqlText[start:], ";"); semicolon >= 0 {
+		end = start + semicolon + 1
+	}
+	statement := strings.TrimSpace(sqlText[start:end])
+	if statement == "" {
+		return ""
+	}
+	if !strings.HasSuffix(statement, ";") {
+		statement += ";"
+	}
+	return statement
+}
+
+func lineNumberAtOffset(sqlText string, offset int) int {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(sqlText) {
+		offset = len(sqlText)
+	}
+	return strings.Count(sqlText[:offset], "\n") + 1
 }
 
 func BuildSQLViewDependencyManualPlan(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) string {
@@ -179,13 +242,15 @@ func BuildSQLViewDependencyManualPlan(task model.SQLViewDependencyTask, items []
 
 	var b strings.Builder
 	b.WriteString("-- View dependency change plan\n")
-	b.WriteString(fmt.Sprintf("-- Target: %s.%s.%s\n\n", task.SchemaName, task.TableName, task.ColumnName))
+	b.WriteString(fmt.Sprintf("-- Target summary: %s.%s.%s\n\n", task.SchemaName, task.TableName, task.ColumnName))
 	b.WriteString("-- Drop dependent views\n")
 	for _, item := range dropItems {
 		writeSQLLine(&b, item.DropSQL)
 	}
-	b.WriteString("\n-- Original ALTER SQL\n")
-	writeSQLLine(&b, task.AlterSQL)
+	b.WriteString("\n-- ALTER SQL\n")
+	for _, alterSQL := range alterSQLStatementsForTask(task) {
+		writeSQLLine(&b, alterSQL)
+	}
 	b.WriteString("\n-- Restore dependent views\n")
 	for _, item := range restoreItems {
 		writeSQLLine(&b, item.CreateSQL)
@@ -208,7 +273,7 @@ func BuildSQLViewDependencyRestorePlan(task model.SQLViewDependencyTask, items [
 	restoreItems := orderedViewDependencyRestoreItems(items)
 	var b strings.Builder
 	b.WriteString("-- View dependency restore plan\n")
-	b.WriteString(fmt.Sprintf("-- Target: %s.%s.%s\n\n", task.SchemaName, task.TableName, task.ColumnName))
+	b.WriteString(fmt.Sprintf("-- Target summary: %s.%s.%s\n\n", task.SchemaName, task.TableName, task.ColumnName))
 	b.WriteString("-- Restore dependent views\n")
 	for _, item := range restoreItems {
 		writeSQLLine(&b, item.CreateSQL)
@@ -232,7 +297,9 @@ func BuildSQLViewDependencyTransactionalSteps(task model.SQLViewDependencyTask, 
 	for _, item := range orderedViewDependencyDropItems(items) {
 		appendSQLStep(&steps, item.DropSQL)
 	}
-	appendSQLStep(&steps, task.AlterSQL)
+	for _, alterSQL := range alterSQLStatementsForTask(task) {
+		appendSQLStep(&steps, alterSQL)
+	}
 	appendSQLViewDependencyRestoreSteps(&steps, items)
 	steps = append(steps, "COMMIT;")
 	return steps
@@ -257,9 +324,27 @@ func BuildSQLViewDependencyStepExecutionPlan(task model.SQLViewDependencyTask, i
 	for _, item := range orderedViewDependencyDropItems(items) {
 		appendSQLStep(&plan.DropSteps, item.DropSQL)
 	}
-	appendSQLStep(&plan.AlterSteps, task.AlterSQL)
+	for _, alterSQL := range alterSQLStatementsForTask(task) {
+		appendSQLStep(&plan.AlterSteps, alterSQL)
+	}
 	appendSQLViewDependencyRestoreSteps(&plan.RestoreSteps, items)
 	return plan
+}
+
+func alterSQLStatementsForTask(task model.SQLViewDependencyTask) []string {
+	refs, err := parseAlterColumnTypeRefs(task.AlterSQL)
+	if err != nil || len(refs) == 0 {
+		sqlText := strings.TrimSpace(task.AlterSQL)
+		if sqlText == "" {
+			return nil
+		}
+		return []string{sqlText}
+	}
+	statements := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		statements = append(statements, ref.sql)
+	}
+	return statements
 }
 
 func BuildSQLViewDependencyRestoreTransactionalSteps(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) []string {

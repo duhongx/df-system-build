@@ -437,9 +437,12 @@ func forceWhitelistContains(whitelist []string, sqlType string) bool {
 }
 
 func (s *PostgreSQLService) CreateSQLViewDependencyTask(req SQLViewDependencyTaskRequest, username string) (*model.SQLViewDependencyTask, error) {
-	ref, err := validateViewDependencyAlterSQL(req)
+	refs, err := validateViewDependencyAlterSQLs(req)
 	if err != nil {
 		return nil, err
+	}
+	if len(refs) == 0 {
+		return nil, fmt.Errorf("ALTER SQL 不能为空")
 	}
 	lockTimeout := strings.TrimSpace(req.LockTimeout)
 	if lockTimeout == "" {
@@ -453,10 +456,11 @@ func (s *PostgreSQLService) CreateSQLViewDependencyTask(req SQLViewDependencyTas
 	if err != nil {
 		return nil, err
 	}
+	firstRef := refs[0]
 	task := &model.SQLViewDependencyTask{
-		SchemaName:       ref.schema,
-		TableName:        ref.table,
-		ColumnName:       ref.column,
+		SchemaName:       firstRef.schema,
+		TableName:        firstRef.table,
+		ColumnName:       firstRef.column,
 		AlterSQL:         strings.TrimSpace(req.AlterSQL),
 		Status:           "CREATED",
 		ExecutionMode:    executionMode,
@@ -466,7 +470,18 @@ func (s *PostgreSQLService) CreateSQLViewDependencyTask(req SQLViewDependencyTas
 		StatementTimeout: statementTimeout,
 		Operator:         strings.TrimSpace(username),
 	}
-	if err := repository.DB.Create(task).Error; err != nil {
+	if err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(task).Error; err != nil {
+			return err
+		}
+		for _, ref := range refs {
+			change := buildSQLViewDependencyChange(task.ID, ref, "CREATED")
+			if err := tx.Create(&change).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	return task, nil
@@ -482,6 +497,69 @@ func (s *PostgreSQLService) GetSQLViewDependencyTask(id uint) (*model.SQLViewDep
 		return nil, nil, err
 	}
 	return &task, items, nil
+}
+
+func (s *PostgreSQLService) GetSQLViewDependencyChanges(taskID uint) ([]model.SQLViewDependencyChange, error) {
+	var changes []model.SQLViewDependencyChange
+	if err := repository.DB.Where("task_id = ?", taskID).Order("change_order ASC, id ASC").Find(&changes).Error; err != nil {
+		return nil, err
+	}
+	if len(changes) > 0 {
+		return changes, nil
+	}
+	var task model.SQLViewDependencyTask
+	if err := repository.DB.Where("is_deleted = ?", false).First(&task, taskID).Error; err != nil {
+		return nil, err
+	}
+	return ensureSQLViewDependencyChanges(task)
+}
+
+func buildSQLViewDependencyChange(taskID uint, ref alterColumnRef, status string) model.SQLViewDependencyChange {
+	line := ref.line
+	if line <= 0 {
+		line = 1
+	}
+	order := ref.order
+	if order <= 0 {
+		order = 1
+	}
+	return model.SQLViewDependencyChange{
+		TaskID:      taskID,
+		ChangeOrder: order,
+		LineNumber:  line,
+		SchemaName:  ref.schema,
+		TableName:   ref.table,
+		ColumnName:  ref.column,
+		AlterSQL:    strings.TrimSpace(ref.sql),
+		Status:      status,
+	}
+}
+
+func ensureSQLViewDependencyChanges(task model.SQLViewDependencyTask) ([]model.SQLViewDependencyChange, error) {
+	var changes []model.SQLViewDependencyChange
+	if err := repository.DB.Where("task_id = ?", task.ID).Order("change_order ASC, id ASC").Find(&changes).Error; err != nil {
+		return nil, err
+	}
+	if len(changes) > 0 {
+		return changes, nil
+	}
+	refs, err := validateViewDependencyAlterSQLs(SQLViewDependencyTaskRequest{
+		AlterSQL: task.AlterSQL,
+	})
+	if err != nil {
+		return nil, err
+	}
+	err = repository.DB.Transaction(func(tx *gorm.DB) error {
+		for _, ref := range refs {
+			change := buildSQLViewDependencyChange(task.ID, ref, task.Status)
+			if err := tx.Create(&change).Error; err != nil {
+				return err
+			}
+			changes = append(changes, change)
+		}
+		return nil
+	})
+	return changes, err
 }
 
 func (s *PostgreSQLService) ListSQLViewDependencyTasks(page, pageSize int) ([]model.SQLViewDependencyTask, int64, error) {
@@ -506,19 +584,15 @@ func (s *PostgreSQLService) AnalyzeSQLViewDependencyTask(ctx context.Context, id
 	if err := repository.DB.Where("is_deleted = ?", false).First(&task, id).Error; err != nil {
 		return nil, nil, err
 	}
-	if _, err := validateViewDependencyAlterSQL(SQLViewDependencyTaskRequest{
-		SchemaName: task.SchemaName,
-		TableName:  task.TableName,
-		ColumnName: task.ColumnName,
-		AlterSQL:   task.AlterSQL,
-	}); err != nil {
+	changes, err := ensureSQLViewDependencyChanges(task)
+	if err != nil {
 		return nil, nil, err
 	}
 	db, err := s.getDB()
 	if err != nil {
 		return nil, nil, err
 	}
-	snapshots, err := s.loadViewDependencySnapshots(ctx, db, task.SchemaName, task.TableName, task.ColumnName)
+	snapshots, err := s.loadViewDependencySnapshotsForChanges(ctx, db, changes)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -534,11 +608,19 @@ func (s *PostgreSQLService) AnalyzeSQLViewDependencyTask(ctx context.Context, id
 			}
 			items = append(items, item)
 		}
+		if err := tx.Model(&model.SQLViewDependencyChange{}).
+			Where("task_id = ?", task.ID).
+			Updates(map[string]interface{}{
+				"status":        "ANALYZED",
+				"error_message": "",
+			}).Error; err != nil {
+			return err
+		}
 		now := time.Now()
 		task.Status = "ANALYZED"
 		task.Operator = strings.TrimSpace(username)
 		task.AnalyzedAt = &now
-		task.ExecuteMessage = fmt.Sprintf("已分析依赖视图 %d 个，默认只生成执行计划", len(items))
+		task.ExecuteMessage = fmt.Sprintf("已分析字段变更 %d 条，依赖视图 %d 个", len(changes), len(items))
 		return tx.Save(&task).Error
 	})
 	if err != nil {
@@ -577,31 +659,44 @@ func (s *PostgreSQLService) PrecheckSQLViewDependencyTask(ctx context.Context, i
 	if len(items) == 0 {
 		return nil, nil, fmt.Errorf("请先分析依赖并生成备份计划")
 	}
+	changes, err := ensureSQLViewDependencyChanges(*task)
+	if err != nil {
+		return nil, nil, err
+	}
 	db, err := s.getDB()
 	if err != nil {
 		return nil, nil, err
 	}
 	precheckCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	if _, err := NewSQLMetadataInspector(db).GetColumnInfo(precheckCtx, task.SchemaName, task.TableName, task.ColumnName); err != nil {
-		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", "目标字段不存在或无法读取: "+err.Error(), username)
-		return nil, nil, err
+	inspector := NewSQLMetadataInspector(db)
+	tableSeen := make(map[string]alterColumnRef)
+	for _, change := range changes {
+		if _, err := inspector.GetColumnInfo(precheckCtx, change.SchemaName, change.TableName, change.ColumnName); err != nil {
+			msg := fmt.Sprintf("目标字段 %s.%s.%s 不存在或无法读取: %s", change.SchemaName, change.TableName, change.ColumnName, err.Error())
+			_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", msg, username)
+			return nil, nil, err
+		}
+		key := strings.ToLower(strings.TrimSpace(change.SchemaName)) + "." + strings.ToLower(strings.TrimSpace(change.TableName))
+		tableSeen[key] = alterColumnRef{schema: change.SchemaName, table: change.TableName}
 	}
-	waitingLocks, err := countWaitingLocksForRelation(precheckCtx, db, task.SchemaName, task.TableName)
-	if err != nil {
-		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", "锁检查失败: "+err.Error(), username)
-		return nil, nil, err
+	for _, table := range tableSeen {
+		waitingLocks, err := countWaitingLocksForRelation(precheckCtx, db, table.schema, table.table)
+		if err != nil {
+			_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", "锁检查失败: "+err.Error(), username)
+			return nil, nil, err
+		}
+		if waitingLocks > 0 {
+			msg := fmt.Sprintf("目标表 %s.%s 当前存在 %d 个等待锁，建议稍后再执行", table.schema, table.table, waitingLocks)
+			_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", msg, username)
+			return nil, nil, errors.New(msg)
+		}
 	}
-	if waitingLocks > 0 {
-		msg := fmt.Sprintf("目标表当前存在 %d 个等待锁，建议稍后再执行", waitingLocks)
-		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", msg, username)
-		return nil, nil, errors.New(msg)
-	}
-	if err := s.validateCurrentViewDependencyBackup(precheckCtx, db, *task, items); err != nil {
+	if err := s.validateCurrentViewDependencyBackup(precheckCtx, db, *task, changes, items); err != nil {
 		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", err.Error(), username)
 		return nil, nil, err
 	}
-	msg := fmt.Sprintf("预检通过，依赖视图 %d 个；执行变更将使用 lock_timeout=%s", len(items), task.LockTimeout)
+	msg := fmt.Sprintf("预检通过，字段变更 %d 条，依赖视图 %d 个；执行变更将使用 lock_timeout=%s", len(changes), len(items), task.LockTimeout)
 	updated, err := markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_PASSED", msg, username)
 	if err != nil {
 		return nil, nil, err
@@ -610,7 +705,22 @@ func (s *PostgreSQLService) PrecheckSQLViewDependencyTask(ctx context.Context, i
 }
 
 func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id uint, username string) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
+	taskForPrecheck, itemsForPrecheck, err := s.GetSQLViewDependencyTask(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if taskForPrecheck.Status != "PRECHECK_PASSED" {
+		if _, _, err := s.PrecheckSQLViewDependencyTask(ctx, id, username); err != nil {
+			return nil, nil, err
+		}
+	} else if len(itemsForPrecheck) == 0 {
+		return nil, nil, fmt.Errorf("请先分析依赖并生成备份计划")
+	}
 	task, items, err := s.markSQLViewDependencyTaskRunning(id, "EXECUTING", "开始执行字段变更", username, ensureSQLViewDependencyTaskCanExecute)
+	if err != nil {
+		return nil, nil, err
+	}
+	changes, err := ensureSQLViewDependencyChanges(*task)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -618,7 +728,7 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.validateCurrentViewDependencyBackup(ctx, db, *task, items); err != nil {
+	if err := s.validateCurrentViewDependencyBackup(ctx, db, *task, changes, items); err != nil {
 		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", err.Error(), username)
 		if saveErr != nil {
 			return nil, nil, saveErr
@@ -660,11 +770,21 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 	task.Operator = strings.TrimSpace(username)
 	task.ExecutedAt = &now
 	if executionMode == SQLViewDependencyExecutionModeTransaction {
-		task.ExecuteMessage = fmt.Sprintf("事务执行完成，恢复视图 %d 个", len(items))
+		task.ExecuteMessage = fmt.Sprintf("事务执行完成，字段变更 %d 条，恢复视图 %d 个", len(changes), len(items))
 	} else {
-		task.ExecuteMessage = fmt.Sprintf("分步执行完成，恢复视图 %d 个", len(items))
+		task.ExecuteMessage = fmt.Sprintf("分步执行完成，字段变更 %d 条，恢复视图 %d 个", len(changes), len(items))
 	}
-	if err := repository.DB.Save(task).Error; err != nil {
+	if err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(task).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.SQLViewDependencyChange{}).
+			Where("task_id = ?", task.ID).
+			Updates(map[string]interface{}{
+				"status":        "SUCCESS",
+				"error_message": "",
+			}).Error
+	}); err != nil {
 		return nil, nil, err
 	}
 	return task, items, nil
@@ -804,12 +924,64 @@ func (s *PostgreSQLService) runSQLViewDependencyStepExecutionOnDB(ctx context.Co
 	return nil
 }
 
-func (s *PostgreSQLService) validateCurrentViewDependencyBackup(ctx context.Context, db *sql.DB, task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) error {
-	current, err := s.loadViewDependencySnapshots(ctx, db, task.SchemaName, task.TableName, task.ColumnName)
+func (s *PostgreSQLService) validateCurrentViewDependencyBackup(ctx context.Context, db *sql.DB, task model.SQLViewDependencyTask, changes []model.SQLViewDependencyChange, items []model.SQLViewDependencyItem) error {
+	if len(changes) == 0 {
+		var err error
+		changes, err = ensureSQLViewDependencyChanges(task)
+		if err != nil {
+			return err
+		}
+	}
+	current, err := s.loadViewDependencySnapshotsForChanges(ctx, db, changes)
 	if err != nil {
 		return err
 	}
 	return validateViewDependencyBackupFresh(items, current)
+}
+
+func (s *PostgreSQLService) loadViewDependencySnapshotsForChanges(ctx context.Context, db *sql.DB, changes []model.SQLViewDependencyChange) ([]viewDependencySnapshot, error) {
+	all := make([]viewDependencySnapshot, 0)
+	for _, change := range changes {
+		snapshots, err := s.loadViewDependencySnapshots(ctx, db, change.SchemaName, change.TableName, change.ColumnName)
+		if err != nil {
+			return nil, fmt.Errorf("分析 %s.%s.%s 依赖失败: %w", change.SchemaName, change.TableName, change.ColumnName, err)
+		}
+		all = append(all, snapshots...)
+	}
+	return mergeViewDependencySnapshots(all), nil
+}
+
+func mergeViewDependencySnapshots(snapshots []viewDependencySnapshot) []viewDependencySnapshot {
+	if len(snapshots) == 0 {
+		return nil
+	}
+	mergedByKey := make(map[string]viewDependencySnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		key := viewDependencyObjectKey(snapshot.Schema, snapshot.Name, snapshot.Kind)
+		existing, ok := mergedByKey[key]
+		if !ok || snapshot.Depth > existing.Depth {
+			mergedByKey[key] = snapshot
+		}
+	}
+	merged := make([]viewDependencySnapshot, 0, len(mergedByKey))
+	for _, snapshot := range mergedByKey {
+		merged = append(merged, snapshot)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		if merged[i].Depth != merged[j].Depth {
+			return merged[i].Depth > merged[j].Depth
+		}
+		if !strings.EqualFold(merged[i].Schema, merged[j].Schema) {
+			return strings.ToLower(merged[i].Schema) < strings.ToLower(merged[j].Schema)
+		}
+		return strings.ToLower(merged[i].Name) < strings.ToLower(merged[j].Name)
+	})
+	total := len(merged)
+	for idx := range merged {
+		merged[idx].DropOrder = idx + 1
+		merged[idx].RestoreOrder = total - idx
+	}
+	return merged
 }
 
 func (s *PostgreSQLService) markSQLViewDependencyTaskRunning(id uint, status, message, username string, validate func(model.SQLViewDependencyTask, []model.SQLViewDependencyItem) error) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
@@ -1648,6 +1820,9 @@ type alterColumnRef struct {
 	schema string
 	table  string
 	column string
+	sql    string
+	line   int
+	order  int
 }
 
 type tableRef struct {

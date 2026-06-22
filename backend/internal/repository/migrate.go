@@ -38,6 +38,7 @@ func AutoMigrate() error {
 		&model.SQLChangeStatement{},
 		&model.SQLViewBackup{},
 		&model.SQLViewDependencyTask{},
+		&model.SQLViewDependencyChange{},
 		&model.SQLViewDependencyItem{},
 		&model.SQLViewDependencyStep{},
 		// Deployment-management models (replaces legacy DeployPlan/* set).

@@ -38,13 +38,37 @@ func TestValidateViewDependencyAlterSQLInfersTargetColumnFromSQL(t *testing.T) {
 	}
 }
 
+func TestValidateViewDependencyAlterSQLAcceptsMultipleAlterColumnStatements(t *testing.T) {
+	refs, err := validateViewDependencyAlterSQLs(SQLViewDependencyTaskRequest{
+		AlterSQL: `
+ALTER TABLE his.patient ALTER COLUMN code TYPE text;
+ALTER TABLE his.visit ALTER COLUMN code TYPE varchar(64);
+`,
+	})
+	if err != nil {
+		t.Fatalf("expected multiple ALTER COLUMN TYPE statements to be accepted, got %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("expected two parsed ALTER statements, got %+v", refs)
+	}
+	if refs[0].schema != "his" || refs[0].table != "patient" || refs[0].column != "code" {
+		t.Fatalf("unexpected first ref: %+v", refs[0])
+	}
+	if refs[1].schema != "his" || refs[1].table != "visit" || refs[1].column != "code" {
+		t.Fatalf("unexpected second ref: %+v", refs[1])
+	}
+	if !strings.Contains(refs[0].sql, "ALTER TABLE his.patient") || !strings.HasSuffix(refs[0].sql, ";") {
+		t.Fatalf("expected original first SQL statement to be preserved, got %q", refs[0].sql)
+	}
+}
+
 func TestValidateViewDependencyAlterSQLRejectsUnsafeSQL(t *testing.T) {
 	tests := []struct {
 		name string
 		req  SQLViewDependencyTaskRequest
 	}{
 		{
-			name: "multi statement",
+			name: "multi statement with unsafe drop",
 			req:  SQLViewDependencyTaskRequest{SchemaName: "his", TableName: "patient", ColumnName: "code", AlterSQL: "ALTER TABLE his.patient ALTER COLUMN code TYPE text; DROP TABLE his.x;"},
 		},
 		{
@@ -108,6 +132,35 @@ func TestCreateSQLViewDependencyTaskPersistsValidatedTask(t *testing.T) {
 	}
 	if got.SchemaName != "his" || got.TableName != "patient" || got.ColumnName != "code" {
 		t.Fatalf("unexpected persisted task: %+v", got)
+	}
+}
+
+func TestCreateSQLViewDependencyTaskPersistsMultipleChanges(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	svc := NewPostgreSQLService()
+
+	task, err := svc.CreateSQLViewDependencyTask(SQLViewDependencyTaskRequest{
+		AlterSQL: `
+ALTER TABLE his.patient ALTER COLUMN code TYPE text;
+ALTER TABLE his.visit ALTER COLUMN code TYPE varchar(64);
+`,
+	}, "tester")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	var changes []model.SQLViewDependencyChange
+	if err := repository.DB.Where("task_id = ?", task.ID).Order("change_order ASC").Find(&changes).Error; err != nil {
+		t.Fatalf("load changes: %v", err)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("expected two persisted changes, got %+v", changes)
+	}
+	if changes[0].TableName != "patient" || changes[1].TableName != "visit" {
+		t.Fatalf("unexpected changes: %+v", changes)
+	}
+	if task.SchemaName != "his" || task.TableName != "patient" || task.ColumnName != "code" {
+		t.Fatalf("task summary should keep first change target, got %+v", task)
 	}
 }
 
@@ -421,6 +474,47 @@ func TestBuildSQLViewDependencyStepExecutionPlanDoesNotWrapInTransaction(t *test
 	}
 	if plan.AlterSteps[0] != task.AlterSQL {
 		t.Fatalf("expected original ALTER SQL as alter step, got %+v", plan.AlterSteps)
+	}
+}
+
+func TestBuildSQLViewDependencyStepExecutionPlanIncludesMultipleAlterStatements(t *testing.T) {
+	task := model.SQLViewDependencyTask{
+		AlterSQL: `
+ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(64);
+ALTER TABLE his.visit ALTER COLUMN code TYPE text;
+`,
+	}
+	items := []model.SQLViewDependencyItem{
+		{DropOrder: 1, RestoreOrder: 1, DropSQL: `DROP VIEW IF EXISTS "his"."v_patient";`, CreateSQL: `CREATE OR REPLACE VIEW "his"."v_patient" AS SELECT code FROM his.patient;`, VerifySQL: `SELECT to_regclass('"his"."v_patient"');`},
+	}
+
+	plan := BuildSQLViewDependencyStepExecutionPlan(task, items)
+
+	if len(plan.AlterSteps) != 2 {
+		t.Fatalf("expected two ALTER steps, got %+v", plan.AlterSteps)
+	}
+	if !strings.Contains(plan.AlterSteps[0], "his.patient") || !strings.Contains(plan.AlterSteps[1], "his.visit") {
+		t.Fatalf("expected ALTER steps to preserve source order, got %+v", plan.AlterSteps)
+	}
+}
+
+func TestMergeViewDependencySnapshotsDeduplicatesAndOrdersByDepth(t *testing.T) {
+	snapshots := []viewDependencySnapshot{
+		{Schema: "his", Name: "v_root", Kind: "v", Depth: 1, Definition: "select 1"},
+		{Schema: "his", Name: "v_child", Kind: "v", Depth: 3, Definition: "select 1"},
+		{Schema: "his", Name: "v_root", Kind: "v", Depth: 2, Definition: "select 1"},
+	}
+
+	merged := mergeViewDependencySnapshots(snapshots)
+
+	if len(merged) != 2 {
+		t.Fatalf("expected duplicate views to be merged, got %+v", merged)
+	}
+	if merged[0].Name != "v_child" || merged[0].DropOrder != 1 || merged[0].RestoreOrder != 2 {
+		t.Fatalf("expected deepest view to drop first and restore last, got %+v", merged)
+	}
+	if merged[1].Name != "v_root" || merged[1].Depth != 2 || merged[1].DropOrder != 2 || merged[1].RestoreOrder != 1 {
+		t.Fatalf("expected duplicate view to keep deepest snapshot and restore first, got %+v", merged)
 	}
 }
 
