@@ -195,6 +195,10 @@ type UpdateSQLFileContentRequest struct {
 	Content     string `json:"content" binding:"required"`
 }
 
+type UpdateSQLStatementContentRequest struct {
+	Content string `json:"content" binding:"required"`
+}
+
 type RiskAnalysis struct {
 	SQLType       string
 	RiskLevel     string
@@ -1505,28 +1509,7 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 func (s *PostgreSQLService) createSQLStatementsForFile(db *gorm.DB, fileID uint, content, schemaName string, statements []string) ([]model.SQLChangeStatement, error) {
 	items := make([]model.SQLChangeStatement, 0, len(statements))
 	for _, sqlText := range statements {
-		analysis := AnalyzeSQLRisk(sqlText)
-		var viewDeps []ViewDependency
-		if analysis.SQLType == "ALTER_COLUMN_TYPE" {
-			analysis = s.enrichColumnTypeRiskWithMetadata(schemaName, sqlText, analysis)
-			if deps, err := s.findViewDependenciesWithDefinitions(context.Background(), schemaName, sqlText); err == nil && len(deps) > 0 {
-				viewDeps = deps
-				analysis = applyColumnTypeViewDependencyWarning(analysis, deps)
-			}
-		}
-		if analysis.SQLType == "DROP_TABLE" || analysis.SQLType == "TRUNCATE" {
-			analysis = s.enrichDestructiveTableRiskWithMetadata(schemaName, sqlText, analysis)
-		}
-		if isDMLRiskWithAffectedRows(analysis.SQLType) {
-			analysis = s.enrichDMLRiskWithExplainEstimate(sqlText, analysis)
-		}
-		if isLargeTableSensitiveSQLType(analysis.SQLType) {
-			analysis = s.enrichLargeTableSensitiveRiskWithMetadata(schemaName, sqlText, analysis)
-		}
-		if analysis.SQLType == "CREATE_VIEW" {
-			analysis = s.enrichReplaceViewRiskWithMetadata(schemaName, sqlText, analysis)
-		}
-		strategy := DetermineExecutionStrategy(analysis)
+		analysis, viewDeps, strategy := s.analyzeSQLForChangeStatement(schemaName, sqlText)
 		item := model.SQLChangeStatement{
 			FileID:              fileID,
 			LineNumber:          lineNumberForSQL(content, sqlText),
@@ -1550,6 +1533,31 @@ func (s *PostgreSQLService) createSQLStatementsForFile(db *gorm.DB, fileID uint,
 		items = append(items, item)
 	}
 	return items, nil
+}
+
+func (s *PostgreSQLService) analyzeSQLForChangeStatement(schemaName, sqlText string) (RiskAnalysis, []ViewDependency, SQLExecutionStrategy) {
+	analysis := AnalyzeSQLRisk(sqlText)
+	var viewDeps []ViewDependency
+	if analysis.SQLType == "ALTER_COLUMN_TYPE" {
+		analysis = s.enrichColumnTypeRiskWithMetadata(schemaName, sqlText, analysis)
+		if deps, err := s.findViewDependenciesWithDefinitions(context.Background(), schemaName, sqlText); err == nil && len(deps) > 0 {
+			viewDeps = deps
+			analysis = applyColumnTypeViewDependencyWarning(analysis, deps)
+		}
+	}
+	if analysis.SQLType == "DROP_TABLE" || analysis.SQLType == "TRUNCATE" {
+		analysis = s.enrichDestructiveTableRiskWithMetadata(schemaName, sqlText, analysis)
+	}
+	if isDMLRiskWithAffectedRows(analysis.SQLType) {
+		analysis = s.enrichDMLRiskWithExplainEstimate(sqlText, analysis)
+	}
+	if isLargeTableSensitiveSQLType(analysis.SQLType) {
+		analysis = s.enrichLargeTableSensitiveRiskWithMetadata(schemaName, sqlText, analysis)
+	}
+	if analysis.SQLType == "CREATE_VIEW" {
+		analysis = s.enrichReplaceViewRiskWithMetadata(schemaName, sqlText, analysis)
+	}
+	return analysis, viewDeps, DetermineExecutionStrategy(analysis)
 }
 
 func (s *PostgreSQLService) UpdateSQLFileContent(fileID uint, req UpdateSQLFileContentRequest, username string) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
@@ -1646,6 +1654,94 @@ func (s *PostgreSQLService) UpdateSQLFileContent(fileID uint, req UpdateSQLFileC
 		return nil
 	})
 	if err != nil {
+		return nil, nil, err
+	}
+	return file, statements, nil
+}
+
+func (s *PostgreSQLService) UpdateSQLStatementContent(statementID uint, req UpdateSQLStatementContentRequest, username string) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		return nil, nil, fmt.Errorf("SQL 内容为空")
+	}
+
+	var fileID uint
+	err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		var stmt model.SQLChangeStatement
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&stmt, statementID).Error; err != nil {
+			return err
+		}
+		switch stmt.ExecuteStatus {
+		case "RUNNING":
+			return fmt.Errorf("SQL 正在执行中，不能修改")
+		case "SUCCESS":
+			return fmt.Errorf("已执行成功的 SQL 不能修改")
+		}
+
+		var file model.SQLChangeFile
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("is_deleted = ?", false).First(&file, stmt.FileID).Error; err != nil {
+			return err
+		}
+		switch file.ExecuteStatus {
+		case "RUNNING":
+			return fmt.Errorf("SQL 文件正在执行中，不能修改")
+		case "SUCCESS":
+			return fmt.Errorf("已执行成功的 SQL 文件不能原地修改，请重新上传为新文件")
+		}
+
+		analysis, viewDeps, strategy := s.analyzeSQLForChangeStatement(file.SchemaName, content)
+		if err := tx.Model(&model.SQLChangeStatement{}).Where("id = ?", stmt.ID).Updates(map[string]any{
+			"sql_content":            content,
+			"sql_type":               analysis.SQLType,
+			"risk_level":             analysis.RiskLevel,
+			"risk_reason":            analysis.RiskReason,
+			"estimated_rows":         analysis.EstimatedRows,
+			"can_run_in_transaction": strategy.CanRunInTransaction,
+			"execution_strategy":     strategy.Name,
+			"execute_status":         defaultStatementStatus(analysis),
+			"execute_message":        "",
+			"sql_state":              "",
+			"affected_rows":          int64(0),
+			"duration_ms":            int64(0),
+			"execute_time":           nil,
+		}).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Where("statement_id = ?", stmt.ID).Delete(&model.SQLViewBackup{}).Error; err != nil {
+			return err
+		}
+		if len(viewDeps) > 0 {
+			if err := saveViewDependencyBackupsWithDB(tx, file.ID, stmt.ID, viewDeps); err != nil {
+				return err
+			}
+		}
+
+		file.ExecuteStatus = "PENDING"
+		file.ExecuteMessage = "SQL 语句已修改，请重新执行"
+		file.ExecuteUser = strings.TrimSpace(username)
+		file.ExecuteTime = nil
+		if err := tx.Save(&file).Error; err != nil {
+			return err
+		}
+		if file.BatchID > 0 {
+			if err := markSQLBatchPendingAfterFileEdit(tx, file.BatchID, username); err != nil {
+				return err
+			}
+		}
+		fileID = file.ID
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	file, err := recomputeSQLFileStatus(fileID, username)
+	if err != nil {
+		return nil, nil, err
+	}
+	var statements []model.SQLChangeStatement
+	if err := repository.DB.Where("file_id = ?", fileID).Order("line_number ASC, id ASC").Find(&statements).Error; err != nil {
 		return nil, nil, err
 	}
 	return file, statements, nil

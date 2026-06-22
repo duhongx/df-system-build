@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
@@ -1001,6 +1002,66 @@ func TestSkipSQLStatementRecomputesFileStatus(t *testing.T) {
 	}
 	if got.ExecuteStatus != "SKIPPED" {
 		t.Fatalf("expected file status recomputed to SKIPPED, got %+v", got)
+	}
+}
+
+func TestUpdateSQLStatementContentReanalyzesAndResetsStatement(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	now := time.Now()
+	file := model.SQLChangeFile{
+		FileName:       "missing-schema.sql",
+		SchemaName:     "df_zhushuju",
+		ExecuteStatus:  "PARTIAL_FAILED",
+		ExecuteMessage: "旧的执行结果",
+		ExecuteUser:    "tester",
+		ExecuteTime:    &now,
+	}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	stmt := model.SQLChangeStatement{
+		FileID:         file.ID,
+		LineNumber:     1,
+		SQLContent:     "ALTER TABLE gy_taocanmx ADD COLUMN zhuxiangid varchar(64)",
+		SQLType:        "MISSING_SCHEMA",
+		RiskLevel:      "BLOCKED",
+		RiskReason:     "旧的风险",
+		ExecuteStatus:  "NOT_EXECUTABLE",
+		ExecuteMessage: "旧的错误",
+		SQLState:       "55P03",
+		AffectedRows:   12,
+		DurationMs:     5000,
+		ExecuteTime:    &now,
+	}
+	if err := repository.DB.Create(&stmt).Error; err != nil {
+		t.Fatalf("create statement: %v", err)
+	}
+
+	updatedFile, statements, err := NewPostgreSQLService().UpdateSQLStatementContent(stmt.ID, UpdateSQLStatementContentRequest{
+		Content: "ALTER TABLE df_zhushuju.gy_taocanmx ADD COLUMN zhuxiangid varchar(64)",
+	}, "editor")
+	if err != nil {
+		t.Fatalf("update statement content: %v", err)
+	}
+
+	if updatedFile.ExecuteStatus != "PENDING" {
+		t.Fatalf("expected file to become pending after statement edit, got %+v", updatedFile)
+	}
+	if len(statements) != 1 {
+		t.Fatalf("expected one statement, got %d", len(statements))
+	}
+	updated := statements[0]
+	if !strings.Contains(updated.SQLContent, "df_zhushuju.gy_taocanmx") {
+		t.Fatalf("expected updated SQL content, got %q", updated.SQLContent)
+	}
+	if updated.SQLType == "MISSING_SCHEMA" || updated.RiskLevel == "BLOCKED" {
+		t.Fatalf("expected edited statement to be re-analyzed as executable, got type=%q risk=%q reason=%q", updated.SQLType, updated.RiskLevel, updated.RiskReason)
+	}
+	if updated.ExecuteStatus != "PENDING" {
+		t.Fatalf("expected edited statement to reset to PENDING, got %q", updated.ExecuteStatus)
+	}
+	if updated.ExecuteMessage != "" || updated.SQLState != "" || updated.AffectedRows != 0 || updated.DurationMs != 0 || updated.ExecuteTime != nil {
+		t.Fatalf("expected old execution result to be cleared, got %+v", updated)
 	}
 }
 

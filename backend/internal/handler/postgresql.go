@@ -54,6 +54,7 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.POST("/sql-files/execute-content", h.ExecuteSQLContent)
 		g.POST("/sql-files/:id/skip", h.SkipSQLFile)
 		g.DELETE("/sql-files/:id", h.DeleteSQLFile)
+		g.PUT("/sql-statements/:id/content", h.UpdateSQLStatementContent)
 		g.POST("/sql-statements/:id/skip", h.SkipSQLStatement)
 	}
 }
@@ -273,6 +274,25 @@ func (h *PostgreSQLHandler) UpdateSQLFileContent(c *gin.Context) {
 		return
 	}
 	file, statements, err := h.svc.UpdateSQLFileContent(uint(id), req, middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"file": file, "statements": statements})
+}
+
+func (h *PostgreSQLHandler) UpdateSQLStatementContent(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	var req service.UpdateSQLStatementContentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 14018, "参数错误")
+		return
+	}
+	file, statements, err := h.svc.UpdateSQLStatementContent(uint(id), req, middleware.GetCurrentUsername(c))
 	if err != nil {
 		response.Fail(c, 14018, err.Error())
 		return
