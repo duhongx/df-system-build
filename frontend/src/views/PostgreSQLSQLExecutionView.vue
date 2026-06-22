@@ -5,6 +5,7 @@ import JSZip from 'jszip'
 import {
   autocompleteSQLStatementSchema,
   deleteSQLFile,
+  executeSQLFileWithOptions,
   executeSQLStatementWithOptions,
   getSQLBatch,
   getSQLFile,
@@ -89,16 +90,8 @@ const summaryFileCount = computed(() => {
   if (currentBatch.value?.totalFiles) return currentBatch.value.totalFiles
   return todoTotal.value || doneTotal.value || 0
 })
-const executeOptionSummary = computed(() => {
-  const items: string[] = []
-  if (options.value.skipExistsTable) items.push('已存在表')
-  if (options.value.skipExistsColumn) items.push('已存在字段')
-  if (options.value.skipUniqueConstraint) items.push('唯一约束冲突')
-  items.push(`锁等待 ${options.value.lockTimeout || '5s'}`)
-  items.push(`语句超时 ${options.value.statementTimeout || '10min'}`)
-  items.push(`强制执行 ${options.value.forceBlockedSql ? '开启' : '关闭'}`)
-  return items.join(' / ')
-})
+const currentFileExecutableStatements = computed(() => statements.value.filter(s => !['SUCCESS', 'SKIPPED', 'RUNNING'].includes(s.executeStatus || 'PENDING')))
+const canExecuteCurrentFile = computed(() => !!currentFile.value && currentFileExecutableStatements.value.length > 0)
 const fileModeOptions = computed(() => {
   const modes = []
   if (batchFiles.value.length > 0) modes.push({ label: `本次导入(${batchFiles.value.length})`, value: 'local' })
@@ -286,7 +279,28 @@ async function handleExecuteStatement(row: SQLChangeStatement) {
     if (refreshed) {
       selectedStatement.value = refreshed
     }
-    ElMessage.success(refreshed?.executeMessage || '执行完成')
+    showStatementExecuteMessage(refreshed)
+    await Promise.all([loadBatches(), loadTodo(), loadDone()])
+  } finally {
+    executing.value = false
+  }
+}
+
+async function handleExecuteCurrentFile() {
+  if (!currentFile.value) {
+    ElMessage.warning('请选择要执行的 SQL 文件')
+    return
+  }
+  if (currentFileExecutableStatements.value.length === 0) {
+    ElMessage.warning('当前文件没有可执行的 SQL')
+    return
+  }
+  executing.value = true
+  try {
+    const confirmedOptions = await buildConfirmedOptions(currentFileExecutableStatements.value)
+    const data = await executeSQLFileWithOptions(currentFile.value.id, confirmedOptions)
+    applyLoadedFile(data.file, data.statements || [])
+    showFileExecuteMessage(data.file)
     await Promise.all([loadBatches(), loadTodo(), loadDone()])
   } finally {
     executing.value = false
@@ -509,6 +523,48 @@ function statementStatusText(status: string) {
   } as Record<string, string>)[status] || status || '待执行'
 }
 
+function showStatementExecuteMessage(row?: SQLChangeStatement) {
+  if (!row) {
+    ElMessage.warning('执行完成，但未获取到 SQL 执行结果')
+    return
+  }
+  const message = row.executeMessage || statementStatusText(row.executeStatus)
+  if (row.executeStatus === 'SUCCESS') {
+    ElMessage.success(message || '执行成功')
+    return
+  }
+  if (['FAILED', 'NOT_EXECUTABLE', 'TIMEOUT', 'CANCELED'].includes(row.executeStatus)) {
+    ElMessage.error(message || '执行失败')
+    return
+  }
+  if (row.executeStatus === 'SKIPPED') {
+    ElMessage.warning(message || '已跳过')
+    return
+  }
+  ElMessage.info(message || '执行完成')
+}
+
+function showFileExecuteMessage(file?: SQLChangeFile) {
+  if (!file) {
+    ElMessage.warning('执行完成，但未获取到文件执行结果')
+    return
+  }
+  const message = file.executeMessage || statementStatusText(file.executeStatus)
+  if (file.executeStatus === 'SUCCESS') {
+    ElMessage.success(message || '执行成功')
+    return
+  }
+  if (['FAILED', 'PARTIAL_FAILED', 'NOT_EXECUTABLE', 'TIMEOUT', 'CANCELED'].includes(file.executeStatus)) {
+    ElMessage.error(message || '执行失败')
+    return
+  }
+  if (file.executeStatus === 'SKIPPED') {
+    ElMessage.warning(message || '已跳过')
+    return
+  }
+  ElMessage.info(message || '执行完成')
+}
+
 async function buildConfirmedOptions(targetStatements: SQLChangeStatement[]) {
   const blockedStatements = targetStatements.filter(s => (s.riskLevel === 'BLOCKED' || s.executeStatus === 'NOT_EXECUTABLE') && s.executeStatus !== 'SUCCESS' && s.executeStatus !== 'SKIPPED')
   if (options.value.forceBlockedSql && blockedStatements.length > 0) {
@@ -577,11 +633,15 @@ function isAnomalyStatement(row: SQLChangeStatement) {
           <el-button size="small" style="pointer-events: none;">上传SQL/ZIP</el-button>
         </label>
         <el-button size="small" :loading="parsing" @click="handleParse">解析</el-button>
+        <el-button size="small" type="primary" :disabled="!canExecuteCurrentFile" :loading="executing" @click="handleExecuteCurrentFile">执行当前文件</el-button>
         <el-dropdown trigger="click">
           <el-button size="small">更多</el-button>
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item :disabled="!anomalyStatements.length" @click="handleExportAnomalySQL">导出异常SQL</el-dropdown-item>
+              <el-dropdown-item>
+                <router-link class="dropdown-link" to="/settings/sql-execution">SQL执行配置</router-link>
+              </el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -667,13 +727,6 @@ function isAnomalyStatement(row: SQLChangeStatement) {
         <div class="sql-context-row">
           <div class="current-file-block">
             <div class="current-file-title">当前文件：{{ form.fileName || '-' }}</div>
-          </div>
-          <div class="sql-context-actions">
-            <div class="option-chips">
-              <span class="option-label">当前执行选项</span>
-              <span>{{ executeOptionSummary }}</span>
-              <router-link class="settings-link" to="/settings/sql-execution">SQL执行配置</router-link>
-            </div>
           </div>
         </div>
 
