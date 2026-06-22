@@ -65,6 +65,7 @@ assert.match(view, /修改/, 'SQL list operation column should expose a statemen
 assert.match(view, /handleAutocompleteSchema/, 'SQL execution page should expose schema completion for parsed statements')
 assert.match(view, /row\.sqlType === 'MISSING_SCHEMA'/, 'schema completion should only appear for missing schema statements')
 assert.match(view, /补全/, 'SQL list operation column should expose schema completion action')
+assert.match(view, /已部分补全 schema/, 'schema completion should warn when re-analysis still finds missing schema')
 assert.match(view, /handleExecuteStatement\(row\)/, 'SQL row execute action should execute only the selected statement')
 assert.doesNotMatch(view, /handleRetryCurrentFile/, 'SQL row retry must not execute the whole current file')
 assert.doesNotMatch(view, /重试异常/, 'SQL execution page should not expose file-level retry anomaly action')

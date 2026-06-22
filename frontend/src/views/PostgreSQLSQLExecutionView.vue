@@ -402,7 +402,11 @@ async function handleAutocompleteSchema(row: SQLChangeStatement) {
     if (refreshed) {
       selectedStatement.value = refreshed
     }
-    ElMessage.success('已补全 schema 并重新分析')
+    if (refreshed?.sqlType === 'MISSING_SCHEMA') {
+      ElMessage.warning(`已部分补全 schema，仍有缺失：${refreshed.riskReason || '请查看执行信息'}`)
+    } else {
+      ElMessage.success('已补全 schema 并重新分析')
+    }
     await Promise.all([loadBatches(), loadTodo(), loadDone()])
   } finally {
     completingSchema.value = false

@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -1784,113 +1785,131 @@ func (s *PostgreSQLService) AutocompleteSQLStatementSchema(ctx context.Context, 
 	return s.UpdateSQLStatementContent(statementID, UpdateSQLStatementContentRequest{Content: completed}, username)
 }
 
-type schemaCompletionPattern struct {
-	re         *regexp.Regexp
-	prefixName string
-	targetName string
+type schemaCompletionRef struct {
+	relationName string
+	location     int
 }
 
 var (
-	schemaCompletionIdentifierPattern = `"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*`
-	schemaCompletionSchemaNameRegexp  = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
-	schemaCompletionPatternList       = buildSchemaCompletionPatterns()
+	schemaCompletionSchemaNameRegexp = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 )
 
-func buildSchemaCompletionPatterns() []schemaCompletionPattern {
-	identifier := schemaCompletionIdentifierPattern
-	target := `(?:` + identifier + `)(?:\s*\.\s*(?:` + identifier + `))?`
-	patterns := []string{
-		`(?is)(?P<prefix>\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?)(?P<target>` + target + `)`,
-		`(?is)(?P<prefix>\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?P<target>` + target + `)`,
-		`(?is)(?P<prefix>\bCREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+)(?P<target>` + target + `)`,
-		`(?is)(?P<prefix>\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?:` + identifier + `)\s+ON\s+)(?P<target>` + target + `)`,
-		`(?is)(?P<prefix>\bUPDATE\s+)(?P<target>` + target + `)`,
-		`(?is)(?P<prefix>\bINSERT\s+INTO\s+)(?P<target>` + target + `)`,
-		`(?is)(?P<prefix>\bDELETE\s+FROM\s+)(?P<target>` + target + `)`,
-		`(?is)(?P<prefix>\b(?:FROM|JOIN)\s+)(?P<target>` + target + `)`,
-	}
-	result := make([]schemaCompletionPattern, 0, len(patterns))
-	for _, pattern := range patterns {
-		result = append(result, schemaCompletionPattern{
-			re:         regexp.MustCompile(pattern),
-			prefixName: "prefix",
-			targetName: "target",
-		})
-	}
-	return result
-}
-
 func autocompleteMissingSchemaSQL(ctx context.Context, db *sql.DB, sqlText string) (string, error) {
-	targets := collectSchemaCompletionTargets(sqlText)
-	if len(targets) == 0 {
+	refs, err := collectSchemaCompletionRefsFromAST(sqlText)
+	if err != nil {
+		return "", err
+	}
+	if len(refs) == 0 {
 		return "", fmt.Errorf("未找到可补全 schema 的对象")
 	}
+
+	targets := make(map[string]struct{})
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.relationName) != "" {
+			targets[ref.relationName] = struct{}{}
+		}
+	}
+
 	schemas := make(map[string]string, len(targets))
 	for target := range targets {
-		lookupName := normalizePGIdentifier(target)
-		if lookupName == "" {
-			continue
-		}
-		schema, err := lookupUniqueRelationSchema(ctx, db, lookupName)
+		schema, err := lookupUniqueRelationSchema(ctx, db, target)
 		if err != nil {
 			return "", err
 		}
-		schemas[lookupName] = schema
+		schemas[target] = schema
 	}
 	if len(schemas) == 0 {
 		return "", fmt.Errorf("未找到可补全 schema 的对象")
 	}
 
-	completed := sqlText
-	for _, pattern := range schemaCompletionPatternList {
-		completed = rewriteSchemaCompletionPattern(completed, pattern, schemas)
-	}
-	return completed, nil
+	return rewriteSchemaCompletionRefs(sqlText, refs, schemas), nil
 }
 
-func collectSchemaCompletionTargets(sqlText string) map[string]struct{} {
-	targets := make(map[string]struct{})
-	for _, pattern := range schemaCompletionPatternList {
-		targetIndex := pattern.re.SubexpIndex(pattern.targetName)
-		if targetIndex < 0 {
+func collectSchemaCompletionTargetsFromAST(sqlText string) (map[string]struct{}, error) {
+	refs, err := collectSchemaCompletionRefsFromAST(sqlText)
+	if err != nil {
+		return nil, err
+	}
+	targets := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.relationName) != "" {
+			targets[ref.relationName] = struct{}{}
+		}
+	}
+	return targets, nil
+}
+
+func collectSchemaCompletionRefsFromAST(sqlText string) ([]schemaCompletionRef, error) {
+	tree, err := pg_query.Parse(sqlText)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]schemaCompletionRef, 0)
+	seenLocations := make(map[int]struct{})
+	for _, rawStmt := range tree.GetStmts() {
+		if rawStmt == nil || rawStmt.GetStmt() == nil {
 			continue
 		}
-		matches := pattern.re.FindAllStringSubmatch(sqlText, -1)
-		for _, match := range matches {
-			if targetIndex >= len(match) {
-				continue
-			}
-			target := strings.TrimSpace(match[targetIndex])
-			if target == "" || isQualifiedSQLIdentifier(target) {
-				continue
-			}
-			targets[target] = struct{}{}
-		}
+		cteNames := collectCTENames(rawStmt.GetStmt().ProtoReflect(), nil)
+		collectSchemaCompletionRefs(rawStmt.GetStmt().ProtoReflect(), cteNames, seenLocations, &refs)
 	}
-	return targets
+	sort.SliceStable(refs, func(i, j int) bool {
+		return refs[i].location > refs[j].location
+	})
+	return refs, nil
 }
 
-func rewriteSchemaCompletionPattern(sqlText string, pattern schemaCompletionPattern, schemas map[string]string) string {
-	prefixIndex := pattern.re.SubexpIndex(pattern.prefixName)
-	targetIndex := pattern.re.SubexpIndex(pattern.targetName)
-	if prefixIndex < 0 || targetIndex < 0 {
-		return sqlText
+func collectSchemaCompletionRefs(message protoreflect.Message, cteNames map[string]struct{}, seenLocations map[int]struct{}, refs *[]schemaCompletionRef) {
+	if !message.IsValid() {
+		return
 	}
-	return pattern.re.ReplaceAllStringFunc(sqlText, func(match string) string {
-		parts := pattern.re.FindStringSubmatch(match)
-		if prefixIndex >= len(parts) || targetIndex >= len(parts) {
-			return match
+	if rel, ok := message.Interface().(*pg_query.RangeVar); ok {
+		relName := strings.TrimSpace(rel.GetRelname())
+		if relName != "" && strings.TrimSpace(rel.GetSchemaname()) == "" {
+			if _, isCTE := cteNames[strings.ToLower(relName)]; !isCTE {
+				location := int(rel.GetLocation())
+				if location >= 0 {
+					if _, exists := seenLocations[location]; !exists {
+						seenLocations[location] = struct{}{}
+						*refs = append(*refs, schemaCompletionRef{relationName: relName, location: location})
+					}
+				}
+			}
 		}
-		target := strings.TrimSpace(parts[targetIndex])
-		if target == "" || isQualifiedSQLIdentifier(target) {
-			return match
+	}
+	fields := message.Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
+			continue
 		}
-		schema, ok := schemas[normalizePGIdentifier(target)]
-		if !ok || strings.TrimSpace(schema) == "" {
-			return match
+		value := message.Get(field)
+		if field.IsList() {
+			list := value.List()
+			for j := 0; j < list.Len(); j++ {
+				collectSchemaCompletionRefs(list.Get(j).Message(), cteNames, seenLocations, refs)
+			}
+			continue
 		}
-		return parts[prefixIndex] + qualifySQLIdentifier(schema, target)
-	})
+		if value.Message().IsValid() {
+			collectSchemaCompletionRefs(value.Message(), cteNames, seenLocations, refs)
+		}
+	}
+}
+
+func rewriteSchemaCompletionRefs(sqlText string, refs []schemaCompletionRef, schemas map[string]string) string {
+	completed := sqlText
+	for _, ref := range refs {
+		if ref.location < 0 || ref.location > len(completed) {
+			continue
+		}
+		schema := strings.TrimSpace(schemas[ref.relationName])
+		if schema == "" {
+			continue
+		}
+		completed = completed[:ref.location] + quotePGIdentifierIfNeeded(schema) + "." + completed[ref.location:]
+	}
+	return completed
 }
 
 func lookupUniqueRelationSchema(ctx context.Context, db *sql.DB, relationName string) (string, error) {
@@ -1927,22 +1946,6 @@ ORDER BY n.nspname`, relationName)
 	default:
 		return "", fmt.Errorf("对象 %s 存在多个 schema：%s，请人工确认后修改", relationName, strings.Join(schemas, "、"))
 	}
-}
-
-func isQualifiedSQLIdentifier(identifier string) bool {
-	return strings.Contains(identifier, ".")
-}
-
-func normalizePGIdentifier(identifier string) string {
-	identifier = strings.TrimSpace(identifier)
-	if len(identifier) >= 2 && strings.HasPrefix(identifier, `"`) && strings.HasSuffix(identifier, `"`) {
-		return strings.ReplaceAll(identifier[1:len(identifier)-1], `""`, `"`)
-	}
-	return strings.ToLower(identifier)
-}
-
-func qualifySQLIdentifier(schema, target string) string {
-	return quotePGIdentifierIfNeeded(schema) + "." + strings.TrimSpace(target)
 }
 
 func quotePGIdentifierIfNeeded(identifier string) string {

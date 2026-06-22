@@ -1174,6 +1174,118 @@ func TestAutocompleteSQLStatementSchemaFillsUniqueRelation(t *testing.T) {
 	}
 }
 
+func TestAutocompleteSQLStatementSchemaFillsCreateViewReferencesFromAST(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	setSQLExecutionSettingsToTestDatabase(t)
+	if err := repository.DB.Exec(`DROP SCHEMA IF EXISTS schema_autocomplete_ast CASCADE`).Error; err != nil {
+		t.Fatalf("drop schema: %v", err)
+	}
+	if err := repository.DB.Exec(`CREATE SCHEMA schema_autocomplete_ast`).Error; err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	for _, table := range []string{"patient", "invoice", "doctor", "charge_item", "order_item", "visit"} {
+		if err := repository.DB.Exec(`CREATE TABLE schema_autocomplete_ast.` + table + ` (id bigint, patient_id bigint, doctor_id bigint)`).Error; err != nil {
+			t.Fatalf("create table %s: %v", table, err)
+		}
+	}
+	defer repository.DB.Exec(`DROP SCHEMA IF EXISTS schema_autocomplete_ast CASCADE`)
+
+	file := model.SQLChangeFile{FileName: "view-missing-schema.sql", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	stmt := model.SQLChangeStatement{
+		FileID:     file.ID,
+		LineNumber: 1,
+		SQLContent: `CREATE OR REPLACE VIEW schema_autocomplete_ast.v_patient_bill AS
+WITH recent_charge AS (
+  SELECT id, patient_id FROM charge_item
+)
+SELECT p.id, c.id, d.id,
+       (SELECT max(o.id) FROM order_item o WHERE o.patient_id = p.id) AS latest_order
+FROM patient p, invoice c
+JOIN doctor d ON d.id = c.doctor_id
+JOIN recent_charge rc ON rc.patient_id = p.id
+WHERE EXISTS (SELECT 1 FROM visit v WHERE v.patient_id = p.id)`,
+		SQLType:       "MISSING_SCHEMA",
+		RiskLevel:     "BLOCKED",
+		ExecuteStatus: "NOT_EXECUTABLE",
+	}
+	if err := repository.DB.Create(&stmt).Error; err != nil {
+		t.Fatalf("create statement: %v", err)
+	}
+
+	_, statements, err := NewPostgreSQLService().AutocompleteSQLStatementSchema(context.Background(), stmt.ID, "tester")
+	if err != nil {
+		t.Fatalf("autocomplete schema: %v", err)
+	}
+	if len(statements) != 1 {
+		t.Fatalf("expected one statement, got %d", len(statements))
+	}
+	updated := statements[0]
+	for _, want := range []string{
+		"schema_autocomplete_ast.patient p",
+		"schema_autocomplete_ast.invoice c",
+		"schema_autocomplete_ast.doctor d",
+		"schema_autocomplete_ast.charge_item",
+		"schema_autocomplete_ast.order_item o",
+		"schema_autocomplete_ast.visit v",
+	} {
+		if !strings.Contains(updated.SQLContent, want) {
+			t.Fatalf("expected %s to be completed, got %q", want, updated.SQLContent)
+		}
+	}
+	if strings.Contains(updated.SQLContent, "schema_autocomplete_ast.recent_charge") {
+		t.Fatalf("cte name must not be schema-qualified, got %q", updated.SQLContent)
+	}
+	if updated.SQLType == "MISSING_SCHEMA" || updated.RiskLevel == "BLOCKED" {
+		t.Fatalf("expected completed view statement to be executable, got type=%q risk=%q reason=%q sql=%q", updated.SQLType, updated.RiskLevel, updated.RiskReason, updated.SQLContent)
+	}
+}
+
+func TestCollectSchemaCompletionTargetsFromASTIncludesCreateViewReferences(t *testing.T) {
+	sqlText := `CREATE OR REPLACE VIEW his.v_patient_bill AS
+WITH recent_charge AS (
+  SELECT id, patient_id FROM charge_item
+)
+SELECT p.id, c.id, d.id,
+       (SELECT max(o.id) FROM order_item o WHERE o.patient_id = p.id) AS latest_order
+FROM patient p, invoice c
+JOIN doctor d ON d.id = c.doctor_id
+JOIN recent_charge rc ON rc.patient_id = p.id
+WHERE EXISTS (SELECT 1 FROM visit v WHERE v.patient_id = p.id)`
+	targets, err := collectSchemaCompletionTargetsFromAST(sqlText)
+	if err != nil {
+		t.Fatalf("collect targets: %v", err)
+	}
+	for _, table := range []string{"charge_item", "order_item", "patient", "invoice", "doctor", "visit"} {
+		if _, ok := targets[table]; !ok {
+			t.Fatalf("expected target %s, got %+v", table, targets)
+		}
+	}
+	if _, ok := targets["recent_charge"]; ok {
+		t.Fatalf("cte name recent_charge must not be collected, got %+v", targets)
+	}
+
+	refs, err := collectSchemaCompletionRefsFromAST(sqlText)
+	if err != nil {
+		t.Fatalf("collect refs: %v", err)
+	}
+	schemas := make(map[string]string)
+	for target := range targets {
+		schemas[target] = "his"
+	}
+	completed := rewriteSchemaCompletionRefs(sqlText, refs, schemas)
+	for _, want := range []string{"FROM his.patient p, his.invoice c", "FROM his.charge_item", "FROM his.order_item o", "JOIN his.doctor d", "FROM his.visit v"} {
+		if !strings.Contains(completed, want) {
+			t.Fatalf("expected completed SQL to contain %q, got %q", want, completed)
+		}
+	}
+	if strings.Contains(completed, "his.recent_charge") {
+		t.Fatalf("cte name must not be schema-qualified, got %q", completed)
+	}
+}
+
 func TestAutocompleteSQLStatementSchemaRejectsAmbiguousRelation(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	setSQLExecutionSettingsToTestDatabase(t)
