@@ -231,11 +231,17 @@ export const updateSQLFileContent = (id: number, data: ParseSQLRequest) =>
 export const updateSQLStatementContent = (id: number, data: { content: string }) =>
   request.put<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-statements/${id}/content`, data)
 
+export const autocompleteSQLStatementSchema = (id: number) =>
+  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-statements/${id}/schema-autocomplete`)
+
 export const executeSQLFile = (id: number) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/execute`)
 
 export const executeSQLFileWithOptions = (id: number, options: SQLExecuteOptions) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/execute`, { options })
+
+export const executeSQLStatementWithOptions = (id: number, options: SQLExecuteOptions) =>
+  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-statements/${id}/execute`, { options })
 
 export const executeSQLContent = (data: ParseSQLRequest & { options: SQLExecuteOptions }) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/execute-content', data)

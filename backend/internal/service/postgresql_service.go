@@ -1747,6 +1747,212 @@ func (s *PostgreSQLService) UpdateSQLStatementContent(statementID uint, req Upda
 	return file, statements, nil
 }
 
+func (s *PostgreSQLService) AutocompleteSQLStatementSchema(ctx context.Context, statementID uint, username string) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	var stmt model.SQLChangeStatement
+	if err := repository.DB.First(&stmt, statementID).Error; err != nil {
+		return nil, nil, err
+	}
+	if stmt.ExecuteStatus == "SUCCESS" {
+		return nil, nil, fmt.Errorf("已执行成功的 SQL 不能补全 schema")
+	}
+	if stmt.ExecuteStatus == "RUNNING" {
+		return nil, nil, fmt.Errorf("SQL 正在执行中，不能补全 schema")
+	}
+
+	analysis := AnalyzeSQLRisk(stmt.SQLContent)
+	if stmt.SQLType != "MISSING_SCHEMA" && analysis.SQLType != "MISSING_SCHEMA" {
+		return nil, nil, fmt.Errorf("当前 SQL 不需要 schema 补全")
+	}
+
+	cfg, _, err := s.loadSQLExecutionConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	db, err := openPostgreSQL(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer db.Close()
+
+	completed, err := autocompleteMissingSchemaSQL(ctx, db, stmt.SQLContent)
+	if err != nil {
+		return nil, nil, err
+	}
+	if strings.TrimSpace(completed) == strings.TrimSpace(stmt.SQLContent) {
+		return nil, nil, fmt.Errorf("未找到可补全的 schema")
+	}
+	return s.UpdateSQLStatementContent(statementID, UpdateSQLStatementContentRequest{Content: completed}, username)
+}
+
+type schemaCompletionPattern struct {
+	re         *regexp.Regexp
+	prefixName string
+	targetName string
+}
+
+var (
+	schemaCompletionIdentifierPattern = `"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*`
+	schemaCompletionSchemaNameRegexp  = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+	schemaCompletionPatternList       = buildSchemaCompletionPatterns()
+)
+
+func buildSchemaCompletionPatterns() []schemaCompletionPattern {
+	identifier := schemaCompletionIdentifierPattern
+	target := `(?:` + identifier + `)(?:\s*\.\s*(?:` + identifier + `))?`
+	patterns := []string{
+		`(?is)(?P<prefix>\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?)(?P<target>` + target + `)`,
+		`(?is)(?P<prefix>\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?P<target>` + target + `)`,
+		`(?is)(?P<prefix>\bCREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+)(?P<target>` + target + `)`,
+		`(?is)(?P<prefix>\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?:` + identifier + `)\s+ON\s+)(?P<target>` + target + `)`,
+		`(?is)(?P<prefix>\bUPDATE\s+)(?P<target>` + target + `)`,
+		`(?is)(?P<prefix>\bINSERT\s+INTO\s+)(?P<target>` + target + `)`,
+		`(?is)(?P<prefix>\bDELETE\s+FROM\s+)(?P<target>` + target + `)`,
+		`(?is)(?P<prefix>\b(?:FROM|JOIN)\s+)(?P<target>` + target + `)`,
+	}
+	result := make([]schemaCompletionPattern, 0, len(patterns))
+	for _, pattern := range patterns {
+		result = append(result, schemaCompletionPattern{
+			re:         regexp.MustCompile(pattern),
+			prefixName: "prefix",
+			targetName: "target",
+		})
+	}
+	return result
+}
+
+func autocompleteMissingSchemaSQL(ctx context.Context, db *sql.DB, sqlText string) (string, error) {
+	targets := collectSchemaCompletionTargets(sqlText)
+	if len(targets) == 0 {
+		return "", fmt.Errorf("未找到可补全 schema 的对象")
+	}
+	schemas := make(map[string]string, len(targets))
+	for target := range targets {
+		lookupName := normalizePGIdentifier(target)
+		if lookupName == "" {
+			continue
+		}
+		schema, err := lookupUniqueRelationSchema(ctx, db, lookupName)
+		if err != nil {
+			return "", err
+		}
+		schemas[lookupName] = schema
+	}
+	if len(schemas) == 0 {
+		return "", fmt.Errorf("未找到可补全 schema 的对象")
+	}
+
+	completed := sqlText
+	for _, pattern := range schemaCompletionPatternList {
+		completed = rewriteSchemaCompletionPattern(completed, pattern, schemas)
+	}
+	return completed, nil
+}
+
+func collectSchemaCompletionTargets(sqlText string) map[string]struct{} {
+	targets := make(map[string]struct{})
+	for _, pattern := range schemaCompletionPatternList {
+		targetIndex := pattern.re.SubexpIndex(pattern.targetName)
+		if targetIndex < 0 {
+			continue
+		}
+		matches := pattern.re.FindAllStringSubmatch(sqlText, -1)
+		for _, match := range matches {
+			if targetIndex >= len(match) {
+				continue
+			}
+			target := strings.TrimSpace(match[targetIndex])
+			if target == "" || isQualifiedSQLIdentifier(target) {
+				continue
+			}
+			targets[target] = struct{}{}
+		}
+	}
+	return targets
+}
+
+func rewriteSchemaCompletionPattern(sqlText string, pattern schemaCompletionPattern, schemas map[string]string) string {
+	prefixIndex := pattern.re.SubexpIndex(pattern.prefixName)
+	targetIndex := pattern.re.SubexpIndex(pattern.targetName)
+	if prefixIndex < 0 || targetIndex < 0 {
+		return sqlText
+	}
+	return pattern.re.ReplaceAllStringFunc(sqlText, func(match string) string {
+		parts := pattern.re.FindStringSubmatch(match)
+		if prefixIndex >= len(parts) || targetIndex >= len(parts) {
+			return match
+		}
+		target := strings.TrimSpace(parts[targetIndex])
+		if target == "" || isQualifiedSQLIdentifier(target) {
+			return match
+		}
+		schema, ok := schemas[normalizePGIdentifier(target)]
+		if !ok || strings.TrimSpace(schema) == "" {
+			return match
+		}
+		return parts[prefixIndex] + qualifySQLIdentifier(schema, target)
+	})
+}
+
+func lookupUniqueRelationSchema(ctx context.Context, db *sql.DB, relationName string) (string, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT n.nspname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = $1
+  AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname`, relationName)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var schemas []string
+	for rows.Next() {
+		var schema string
+		if err := rows.Scan(&schema); err != nil {
+			return "", err
+		}
+		schemas = append(schemas, schema)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	switch len(schemas) {
+	case 0:
+		return "", fmt.Errorf("数据库中未找到对象 %s，无法自动补全 schema", relationName)
+	case 1:
+		return schemas[0], nil
+	default:
+		return "", fmt.Errorf("对象 %s 存在多个 schema：%s，请人工确认后修改", relationName, strings.Join(schemas, "、"))
+	}
+}
+
+func isQualifiedSQLIdentifier(identifier string) bool {
+	return strings.Contains(identifier, ".")
+}
+
+func normalizePGIdentifier(identifier string) string {
+	identifier = strings.TrimSpace(identifier)
+	if len(identifier) >= 2 && strings.HasPrefix(identifier, `"`) && strings.HasSuffix(identifier, `"`) {
+		return strings.ReplaceAll(identifier[1:len(identifier)-1], `""`, `"`)
+	}
+	return strings.ToLower(identifier)
+}
+
+func qualifySQLIdentifier(schema, target string) string {
+	return quotePGIdentifierIfNeeded(schema) + "." + strings.TrimSpace(target)
+}
+
+func quotePGIdentifierIfNeeded(identifier string) string {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" || schemaCompletionSchemaNameRegexp.MatchString(identifier) {
+		return identifier
+	}
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+}
+
 func markSQLBatchPendingAfterFileEdit(db *gorm.DB, batchID uint, username string) error {
 	var batch model.SQLChangeBatch
 	if err := db.Where("is_deleted = ?", false).First(&batch, batchID).Error; err != nil {
@@ -2435,6 +2641,107 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 	file.ExecuteMessage = fmt.Sprintf("成功 %d，失败 %d，不可执行 %d，跳过 %d，取消 %d", successCount, failedCount, blockedCount, skippedCount, canceledCount)
 	repository.DB.Save(&file)
 	return &file, statements, nil
+}
+
+func (s *PostgreSQLService) ExecuteSQLStatementWithOptions(ctx context.Context, statementID uint, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	options = s.applySQLExecuteSettings(options)
+
+	var stmt model.SQLChangeStatement
+	if err := repository.DB.First(&stmt, statementID).Error; err != nil {
+		return nil, nil, err
+	}
+	var file model.SQLChangeFile
+	if err := repository.DB.Where("is_deleted = ?", false).First(&file, stmt.FileID).Error; err != nil {
+		return nil, nil, err
+	}
+	if stmt.ExecuteStatus == "SUCCESS" {
+		return nil, nil, fmt.Errorf("SQL 已执行成功，不能重复执行")
+	}
+	if stmt.ExecuteStatus == "RUNNING" {
+		return nil, nil, fmt.Errorf("SQL 正在执行中")
+	}
+
+	refreshed := []model.SQLChangeStatement{stmt}
+	if refreshStatementsStaticRiskBeforeExecution(refreshed) {
+		stmt = refreshed[0]
+		if err := repository.DB.Save(&stmt).Error; err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := requireWarnConfirmation([]model.SQLChangeStatement{stmt}, options); err != nil {
+		return nil, nil, err
+	}
+	forceWhitelist, err := s.loadSQLForceWhitelist()
+	if err != nil {
+		return nil, nil, err
+	}
+	if shouldBlockStatementWithWhitelist(stmt, options, forceWhitelist) {
+		stmt.ExecuteStatus = "NOT_EXECUTABLE"
+		stmt.ExecuteMessage = stmt.RiskReason
+		stmt.AffectedRows = 0
+		stmt.DurationMs = 0
+		stmt.SQLState = ""
+		now := time.Now()
+		stmt.ExecuteTime = &now
+		if err := repository.DB.Save(&stmt).Error; err != nil {
+			return nil, nil, err
+		}
+		return s.finishSQLStatementExecution(stmt.FileID, username)
+	}
+
+	cfg, ownerUser, err := s.loadSQLExecutionConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	db, err := openPostgreSQL(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer db.Close()
+
+	execCtx, cancel := context.WithTimeout(ctx, sqlExecutionContextTimeout(stmt.SQLType, options))
+	defer cancel()
+	start := time.Now()
+	stmt.ExecuteStatus = "RUNNING"
+	stmt.ExecuteMessage = ""
+	if err := repository.DB.Save(&stmt).Error; err != nil {
+		return nil, nil, err
+	}
+
+	affected, sqlState, execErr := executeOneSQL(execCtx, db, file.SchemaName, stmt.SQLContent, stmt.SQLType, ownerUser, options)
+	now := time.Now()
+	stmt.ExecuteTime = &now
+	stmt.DurationMs = time.Since(start).Milliseconds()
+	stmt.AffectedRows = affected
+	stmt.SQLState = sqlState
+	if execErr != nil {
+		if shouldSkip, skipMessage := skipMessageForSQLError(execErr, options); shouldSkip {
+			stmt.ExecuteStatus = "SKIPPED"
+			stmt.ExecuteMessage = skipMessage
+		} else {
+			stmt.ExecuteStatus = "FAILED"
+			stmt.ExecuteMessage = execErr.Error()
+		}
+	} else {
+		stmt.ExecuteStatus = "SUCCESS"
+		stmt.ExecuteMessage = "执行成功"
+	}
+	if err := repository.DB.Save(&stmt).Error; err != nil {
+		return nil, nil, err
+	}
+	return s.finishSQLStatementExecution(stmt.FileID, username)
+}
+
+func (s *PostgreSQLService) finishSQLStatementExecution(fileID uint, username string) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	file, err := recomputeSQLFileStatus(fileID, username)
+	if err != nil {
+		return nil, nil, err
+	}
+	var statements []model.SQLChangeStatement
+	if err := repository.DB.Where("file_id = ?", fileID).Order("line_number ASC, id ASC").Find(&statements).Error; err != nil {
+		return nil, nil, err
+	}
+	return file, statements, nil
 }
 
 func persistSQLFileTerminalStatus(fileID uint, status, message, username string) model.SQLChangeFile {

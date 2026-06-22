@@ -26,6 +26,55 @@ func setupSQLChangeServiceTestDB(t *testing.T) {
 	}
 }
 
+func setSQLExecutionSettingsToTestDatabase(t *testing.T) {
+	t.Helper()
+	settings := repository.NewSettingsRepo()
+	values := map[string]string{
+		"postgresql_host":           os.Getenv("TEST_DB_HOST"),
+		"postgresql_port":           os.Getenv("TEST_DB_PORT"),
+		"postgresql_database":       os.Getenv("TEST_DB_NAME"),
+		"postgresql_user":           os.Getenv("TEST_DB_USER"),
+		"postgresql_password":       os.Getenv("TEST_DB_PASSWORD"),
+		"postgresql_admin_password": os.Getenv("TEST_DB_PASSWORD"),
+	}
+	if values["postgresql_port"] == "" {
+		values["postgresql_port"] = "5432"
+	}
+	if values["postgresql_host"] == "" || values["postgresql_database"] == "" || values["postgresql_user"] == "" {
+		for key, value := range parseTestPostgresDSN(os.Getenv("TEST_DATABASE_DSN")) {
+			switch key {
+			case "host":
+				values["postgresql_host"] = value
+			case "port":
+				values["postgresql_port"] = value
+			case "dbname":
+				values["postgresql_database"] = value
+			case "user":
+				values["postgresql_user"] = value
+			case "password":
+				values["postgresql_password"] = value
+				values["postgresql_admin_password"] = value
+			}
+		}
+	}
+	for key, value := range values {
+		if err := settings.Set(key, value); err != nil {
+			t.Fatalf("set %s: %v", key, err)
+		}
+	}
+}
+
+func parseTestPostgresDSN(dsn string) map[string]string {
+	values := map[string]string{}
+	for _, part := range strings.Fields(dsn) {
+		key, value, ok := strings.Cut(part, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	return values
+}
+
 func TestSplitSQLStatementsHandlesSemicolonsInStringsAndComments(t *testing.T) {
 	input := `
 -- comment with ;
@@ -1062,6 +1111,164 @@ func TestUpdateSQLStatementContentReanalyzesAndResetsStatement(t *testing.T) {
 	}
 	if updated.ExecuteMessage != "" || updated.SQLState != "" || updated.AffectedRows != 0 || updated.DurationMs != 0 || updated.ExecuteTime != nil {
 		t.Fatalf("expected old execution result to be cleared, got %+v", updated)
+	}
+}
+
+func TestAutocompleteSQLStatementSchemaFillsUniqueRelation(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	setSQLExecutionSettingsToTestDatabase(t)
+	if err := repository.DB.Exec(`DROP SCHEMA IF EXISTS schema_autocomplete CASCADE`).Error; err != nil {
+		t.Fatalf("drop schema: %v", err)
+	}
+	if err := repository.DB.Exec(`CREATE SCHEMA schema_autocomplete`).Error; err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if err := repository.DB.Exec(`CREATE TABLE schema_autocomplete.gy_taocanmx (id bigint)`).Error; err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	defer repository.DB.Exec(`DROP SCHEMA IF EXISTS schema_autocomplete CASCADE`)
+
+	now := time.Now()
+	file := model.SQLChangeFile{FileName: "missing-schema.sql", ExecuteStatus: "PARTIAL_FAILED", ExecuteMessage: "旧状态", ExecuteUser: "tester", ExecuteTime: &now}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	stmt := model.SQLChangeStatement{
+		FileID:         file.ID,
+		LineNumber:     1,
+		SQLContent:     "ALTER TABLE gy_taocanmx ADD COLUMN zhuxiangid varchar(64)",
+		SQLType:        "MISSING_SCHEMA",
+		RiskLevel:      "BLOCKED",
+		RiskReason:     "ALTER TABLE 目标对象 未显式指定 schema，请使用 schema.object 形式",
+		ExecuteStatus:  "NOT_EXECUTABLE",
+		ExecuteMessage: "旧错误",
+		SQLState:       "55P03",
+		AffectedRows:   12,
+		DurationMs:     5000,
+		ExecuteTime:    &now,
+	}
+	if err := repository.DB.Create(&stmt).Error; err != nil {
+		t.Fatalf("create statement: %v", err)
+	}
+
+	updatedFile, statements, err := NewPostgreSQLService().AutocompleteSQLStatementSchema(context.Background(), stmt.ID, "tester")
+	if err != nil {
+		t.Fatalf("autocomplete schema: %v", err)
+	}
+
+	if updatedFile.ExecuteStatus != "PENDING" {
+		t.Fatalf("expected file to become pending, got %+v", updatedFile)
+	}
+	if len(statements) != 1 {
+		t.Fatalf("expected one statement, got %d", len(statements))
+	}
+	updated := statements[0]
+	if !strings.Contains(updated.SQLContent, "schema_autocomplete.gy_taocanmx") {
+		t.Fatalf("expected schema to be completed, got %q", updated.SQLContent)
+	}
+	if updated.SQLType == "MISSING_SCHEMA" || updated.RiskLevel == "BLOCKED" {
+		t.Fatalf("expected completed statement to be re-analyzed as executable, got type=%q risk=%q reason=%q", updated.SQLType, updated.RiskLevel, updated.RiskReason)
+	}
+	if updated.ExecuteStatus != "PENDING" || updated.ExecuteMessage != "" || updated.SQLState != "" || updated.AffectedRows != 0 || updated.DurationMs != 0 || updated.ExecuteTime != nil {
+		t.Fatalf("expected old execution result to be cleared, got %+v", updated)
+	}
+}
+
+func TestAutocompleteSQLStatementSchemaRejectsAmbiguousRelation(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	setSQLExecutionSettingsToTestDatabase(t)
+	for _, schema := range []string{"schema_autocomplete_a", "schema_autocomplete_b"} {
+		if err := repository.DB.Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`).Error; err != nil {
+			t.Fatalf("drop schema %s: %v", schema, err)
+		}
+		if err := repository.DB.Exec(`CREATE SCHEMA ` + schema).Error; err != nil {
+			t.Fatalf("create schema %s: %v", schema, err)
+		}
+		if err := repository.DB.Exec(`CREATE TABLE ` + schema + `.gy_dup (id bigint)`).Error; err != nil {
+			t.Fatalf("create table %s.gy_dup: %v", schema, err)
+		}
+		defer repository.DB.Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`)
+	}
+
+	file := model.SQLChangeFile{FileName: "ambiguous-schema.sql", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	stmt := model.SQLChangeStatement{
+		FileID:        file.ID,
+		LineNumber:    1,
+		SQLContent:    "ALTER TABLE gy_dup ADD COLUMN zhuxiangid varchar(64)",
+		SQLType:       "MISSING_SCHEMA",
+		RiskLevel:     "BLOCKED",
+		ExecuteStatus: "NOT_EXECUTABLE",
+	}
+	if err := repository.DB.Create(&stmt).Error; err != nil {
+		t.Fatalf("create statement: %v", err)
+	}
+
+	_, _, err := NewPostgreSQLService().AutocompleteSQLStatementSchema(context.Background(), stmt.ID, "tester")
+	if err == nil || !strings.Contains(err.Error(), "多个 schema") {
+		t.Fatalf("expected ambiguous schema error, got %v", err)
+	}
+	var got model.SQLChangeStatement
+	if err := repository.DB.First(&got, stmt.ID).Error; err != nil {
+		t.Fatalf("reload statement: %v", err)
+	}
+	if got.SQLContent != stmt.SQLContent {
+		t.Fatalf("ambiguous completion must not change SQL, got %q", got.SQLContent)
+	}
+}
+
+func TestExecuteSQLStatementWithOptionsOnlyProcessesSelectedStatement(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	file := model.SQLChangeFile{FileName: "single-statement.sql", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	statements := []model.SQLChangeStatement{
+		{
+			FileID:         file.ID,
+			LineNumber:     1,
+			SQLContent:     "ALTER TABLE gy_taocanmx ADD COLUMN zhuxiangid varchar(64)",
+			SQLType:        "MISSING_SCHEMA",
+			RiskLevel:      "BLOCKED",
+			RiskReason:     "ALTER TABLE 目标对象 未显式指定 schema，请使用 schema.object 形式",
+			ExecuteStatus:  "NOT_EXECUTABLE",
+			ExecuteMessage: "旧错误",
+		},
+		{
+			FileID:         file.ID,
+			LineNumber:     2,
+			SQLContent:     "SELECT 1",
+			SQLType:        "SELECT",
+			RiskLevel:      "LOW",
+			ExecuteStatus:  "PENDING",
+			ExecuteMessage: "不要改动",
+		},
+	}
+	if err := repository.DB.Create(&statements).Error; err != nil {
+		t.Fatalf("create statements: %v", err)
+	}
+
+	updatedFile, gotStatements, err := NewPostgreSQLService().ExecuteSQLStatementWithOptions(context.Background(), statements[0].ID, "tester", SQLExecuteOptions{})
+	if err != nil {
+		t.Fatalf("execute selected statement: %v", err)
+	}
+
+	if updatedFile.ExecuteStatus != "PENDING" {
+		t.Fatalf("expected file to remain pending because another statement is untouched, got %+v", updatedFile)
+	}
+	if len(gotStatements) != 2 {
+		t.Fatalf("expected two statements, got %d", len(gotStatements))
+	}
+	if gotStatements[0].ExecuteStatus != "NOT_EXECUTABLE" {
+		t.Fatalf("expected selected blocked statement to remain not executable, got %+v", gotStatements[0])
+	}
+	if gotStatements[0].ExecuteMessage == "旧错误" || gotStatements[0].ExecuteMessage == "" {
+		t.Fatalf("expected selected statement execution message to be refreshed, got %+v", gotStatements[0])
+	}
+	if gotStatements[1].ExecuteStatus != "PENDING" || gotStatements[1].ExecuteMessage != "不要改动" {
+		t.Fatalf("unselected statement must not be executed or reset, got %+v", gotStatements[1])
 	}
 }
 

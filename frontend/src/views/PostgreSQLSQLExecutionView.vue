@@ -3,10 +3,9 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import JSZip from 'jszip'
 import {
-  cancelSQLBatch,
-  cancelSQLFile,
+  autocompleteSQLStatementSchema,
   deleteSQLFile,
-  executeSQLFileWithOptions,
+  executeSQLStatementWithOptions,
   getSQLBatch,
   getSQLFile,
   listSQLBatches,
@@ -35,6 +34,7 @@ const loadingTodo = ref(false)
 const loadingDone = ref(false)
 const statementEditVisible = ref(false)
 const savingStatementContent = ref(false)
+const completingSchema = ref(false)
 
 const selectedTab = ref<FileListMode>('todo')
 const sqlViewMode = ref<SQLViewMode>('list')
@@ -267,54 +267,29 @@ async function handleParseBatch() {
   }
 }
 
-async function handleExecuteContent() {
-  if (!form.value.content.trim()) {
-    ElMessage.warning('请粘贴 SQL 内容或上传文件')
+async function handleExecuteStatement(row: SQLChangeStatement) {
+  if (!row) return
+  if (row.executeStatus === 'SUCCESS') {
+    ElMessage.warning('SQL 已执行成功，不能重复执行')
+    return
+  }
+  if (row.executeStatus === 'RUNNING') {
+    ElMessage.warning('SQL 正在执行中')
     return
   }
   executing.value = true
   try {
-    const parsed = await parseSQLFile(form.value)
-    const confirmedOptions = await buildConfirmedOptions(parsed.statements || [])
-    const data = await executeSQLFileWithOptions(parsed.file.id, confirmedOptions)
+    const confirmedOptions = await buildConfirmedOptions([row])
+    const data = await executeSQLStatementWithOptions(row.id, confirmedOptions)
     applyLoadedFile(data.file, data.statements || [])
-    ElMessage.success(data.file.executeMessage || '执行完成')
+    const refreshed = (data.statements || []).find(item => item.id === row.id)
+    if (refreshed) {
+      selectedStatement.value = refreshed
+    }
+    ElMessage.success(refreshed?.executeMessage || '执行完成')
     await Promise.all([loadBatches(), loadTodo(), loadDone()])
   } finally {
     executing.value = false
-  }
-}
-
-async function handleExecuteFile(row = currentFile.value) {
-  if (!row) {
-    ElMessage.warning('请选择 SQL 文件')
-    return
-  }
-  executing.value = true
-  try {
-    const loaded = await getSQLFile(row.id)
-    const confirmedOptions = await buildConfirmedOptions(loaded.statements || [])
-    const data = await executeSQLFileWithOptions(row.id, confirmedOptions)
-    applyLoadedFile(data.file, data.statements || [])
-    ElMessage.success(data.file.executeMessage || '执行完成')
-    await Promise.all([loadBatches(), loadTodo(), loadDone()])
-  } finally {
-    executing.value = false
-  }
-}
-
-async function handleCancelExecution() {
-  if (currentFile.value) {
-    await cancelSQLFile(currentFile.value.id)
-    ElMessage.warning('已提交取消请求')
-  }
-}
-
-async function handleCancelBatch() {
-  if (currentBatch.value) {
-    const b = await cancelSQLBatch(currentBatch.value.id)
-    currentBatch.value = b
-    ElMessage.warning('已提交取消请求')
   }
 }
 
@@ -401,6 +376,39 @@ async function handleSaveStatementContent() {
   }
 }
 
+async function handleAutocompleteSchema(row: SQLChangeStatement) {
+  if (!row) return
+  if (row.sqlType !== 'MISSING_SCHEMA') {
+    ElMessage.warning('当前 SQL 不需要 schema 补全')
+    return
+  }
+  if (row.executeStatus === 'SUCCESS') {
+    ElMessage.warning('已执行成功的 SQL 不能补全 schema')
+    return
+  }
+  if (row.executeStatus === 'RUNNING') {
+    ElMessage.warning('SQL 正在执行中，不能补全 schema')
+    return
+  }
+  const previousMode = sqlViewMode.value
+  completingSchema.value = true
+  try {
+    const data = await autocompleteSQLStatementSchema(row.id)
+    applyLoadedFile(data.file, data.statements || [])
+    if (previousMode === 'anomaly' && anomalyStatements.value.length > 0) {
+      sqlViewMode.value = 'anomaly'
+    }
+    const refreshed = (data.statements || []).find(item => item.id === row.id)
+    if (refreshed) {
+      selectedStatement.value = refreshed
+    }
+    ElMessage.success('已补全 schema 并重新分析')
+    await Promise.all([loadBatches(), loadTodo(), loadDone()])
+  } finally {
+    completingSchema.value = false
+  }
+}
+
 async function handleSkipFile(row: SQLChangeFile) {
   await ElMessageBox.confirm(`确定跳过 "${row.fileName}" 吗？`, '确认', { type: 'warning' })
   await skipSQLFile(row.id)
@@ -424,14 +432,6 @@ async function handleSkipStatement(row: SQLChangeStatement) {
     await handleOpen(currentFile.value)
     await Promise.all([loadTodo(), loadDone()])
   }
-}
-
-async function handleRetryCurrentFile() {
-  if (!currentFile.value) {
-    ElMessage.warning('请选择 SQL 文件')
-    return
-  }
-  await handleExecuteFile(currentFile.value)
 }
 
 function handleExportAnomalySQL() {
@@ -573,14 +573,10 @@ function isAnomalyStatement(row: SQLChangeStatement) {
           <el-button size="small" style="pointer-events: none;">上传SQL/ZIP</el-button>
         </label>
         <el-button size="small" :loading="parsing" @click="handleParse">解析</el-button>
-        <el-button size="small" type="warning" :loading="executing" @click="handleExecuteContent">执行</el-button>
         <el-dropdown trigger="click">
           <el-button size="small">更多</el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item :disabled="!currentFile" @click="handleRetryCurrentFile">重试异常</el-dropdown-item>
-              <el-dropdown-item :disabled="!currentFile" @click="handleCancelExecution">取消当前</el-dropdown-item>
-              <el-dropdown-item :disabled="!currentBatch" @click="handleCancelBatch">取消批次</el-dropdown-item>
               <el-dropdown-item :disabled="!anomalyStatements.length" @click="handleExportAnomalySQL">导出异常SQL</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -629,7 +625,6 @@ function isAnomalyStatement(row: SQLChangeStatement) {
                 <span>{{ formatTimeStr(f.createdAt)?.slice(5) }}</span>
               </div>
               <div class="file-actions">
-                <el-button size="small" link type="primary" @click.stop="handleExecuteFile(f)">执行</el-button>
                 <el-button size="small" link type="warning" @click.stop="handleSkipFile(f)">跳过</el-button>
                 <el-button size="small" link type="danger" @click.stop="handleDeleteFile(f)">删除</el-button>
               </div>
@@ -701,10 +696,11 @@ function isAnomalyStatement(row: SQLChangeStatement) {
                 <el-table-column label="耗时" width="85" align="right">
                   <template #default="{ row }">{{ formatDuration(row.durationMs) }}</template>
                 </el-table-column>
-                <el-table-column label="操作" width="185" fixed="right" align="center">
+                <el-table-column label="操作" width="225" fixed="right" align="center">
                   <template #default="{ row }">
-                    <el-button size="small" link type="primary" :disabled="row.executeStatus === 'SUCCESS'" @click.stop="handleRetryCurrentFile">重试</el-button>
+                    <el-button size="small" link type="primary" :disabled="row.executeStatus === 'SUCCESS' || row.executeStatus === 'RUNNING'" @click.stop="handleExecuteStatement(row)">执行</el-button>
                     <el-button size="small" link type="warning" :disabled="row.executeStatus === 'SUCCESS' || row.executeStatus === 'SKIPPED'" @click.stop="handleSkipStatement(row)">跳过</el-button>
+                    <el-button v-if="row.sqlType === 'MISSING_SCHEMA'" size="small" link type="success" :loading="completingSchema" :disabled="row.executeStatus === 'SUCCESS' || row.executeStatus === 'RUNNING'" @click.stop="handleAutocompleteSchema(row)">补全</el-button>
                     <el-button size="small" link type="primary" :disabled="row.executeStatus === 'SUCCESS' || row.executeStatus === 'RUNNING'" @click.stop="handleStartEditStatement(row)">修改</el-button>
                     <el-button size="small" link type="primary" @click.stop="selectStatement(row)">查看</el-button>
                   </template>
@@ -739,10 +735,11 @@ function isAnomalyStatement(row: SQLChangeStatement) {
                 <el-table-column label="原因" min-width="300" show-overflow-tooltip>
                   <template #default="{ row }">{{ reasonText(row) }}</template>
                 </el-table-column>
-                <el-table-column label="操作" width="215" fixed="right" align="center">
+                <el-table-column label="操作" width="260" fixed="right" align="center">
                   <template #default="{ row }">
-                    <el-button size="small" link type="primary" @click.stop="handleRetryCurrentFile">重试</el-button>
+                    <el-button size="small" link type="primary" :disabled="row.executeStatus === 'SUCCESS' || row.executeStatus === 'RUNNING'" @click.stop="handleExecuteStatement(row)">执行</el-button>
                     <el-button size="small" link type="warning" @click.stop="handleSkipStatement(row)">跳过</el-button>
+                    <el-button v-if="row.sqlType === 'MISSING_SCHEMA'" size="small" link type="success" :loading="completingSchema" :disabled="row.executeStatus === 'SUCCESS' || row.executeStatus === 'RUNNING'" @click.stop="handleAutocompleteSchema(row)">补全</el-button>
                     <el-button size="small" link type="primary" :disabled="row.executeStatus === 'SUCCESS' || row.executeStatus === 'RUNNING'" @click.stop="handleStartEditStatement(row)">修改</el-button>
                     <el-button size="small" link type="primary" @click.stop="selectStatement(row)">查看</el-button>
                     <el-button size="small" link type="primary" @click.stop="handleExportSelectedSQL(row)">导出</el-button>

@@ -55,6 +55,8 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.POST("/sql-files/:id/skip", h.SkipSQLFile)
 		g.DELETE("/sql-files/:id", h.DeleteSQLFile)
 		g.PUT("/sql-statements/:id/content", h.UpdateSQLStatementContent)
+		g.POST("/sql-statements/:id/schema-autocomplete", h.AutocompleteSQLStatementSchema)
+		g.POST("/sql-statements/:id/execute", h.ExecuteSQLStatement)
 		g.POST("/sql-statements/:id/skip", h.SkipSQLStatement)
 	}
 }
@@ -300,6 +302,20 @@ func (h *PostgreSQLHandler) UpdateSQLStatementContent(c *gin.Context) {
 	response.OK(c, gin.H{"file": file, "statements": statements})
 }
 
+func (h *PostgreSQLHandler) AutocompleteSQLStatementSchema(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	file, statements, err := h.svc.AutocompleteSQLStatementSchema(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"file": file, "statements": statements})
+}
+
 func (h *PostgreSQLHandler) ExecuteSQLFile(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -311,6 +327,24 @@ func (h *PostgreSQLHandler) ExecuteSQLFile(c *gin.Context) {
 	}
 	_ = c.ShouldBindJSON(&req)
 	file, statements, err := h.svc.ExecuteSQLFileWithOptions(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
+	if err != nil {
+		response.Fail(c, 14003, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"file": file, "statements": statements})
+}
+
+func (h *PostgreSQLHandler) ExecuteSQLStatement(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	var req struct {
+		Options service.SQLExecuteOptions `json:"options"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	file, statements, err := h.svc.ExecuteSQLStatementWithOptions(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
 	if err != nil {
 		response.Fail(c, 14003, err.Error())
 		return
