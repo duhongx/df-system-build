@@ -33,6 +33,9 @@ assert.doesNotMatch(artifactList, /label="更新批次"/, 'artifact management t
 assert.match(artifactBatches, />详情</, 'artifact versions should enter detail rather than deploy directly')
 assert.doesNotMatch(artifactBatches, /进入部署/, 'artifact versions should not expose deploy action')
 assert.doesNotMatch(artifactBatches, /path:\s*['"]\/batch-deploy['"]|router\.push\([^)]*\/batch-deploy/, 'artifact versions should not route to deployment')
+assert.match(artifactBatches, /formatBeijingTime/, 'artifact versions should render update time explicitly in Beijing time')
+assert.match(artifactBatches, /sortArtifactVersions/, 'artifact versions should defensively sort latest versions first')
+assert.match(artifactBatches, /new Date\(b\.updatedAt\).*new Date\(a\.updatedAt\)/s, 'artifact versions should sort by updatedAt descending')
 
 assert.match(artifactVersionDetail, /应用匹配/, 'version detail should show application matching')
 assert.match(artifactVersionDetail, /校验状态/, 'version detail should show validation status')

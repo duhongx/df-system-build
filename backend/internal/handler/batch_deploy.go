@@ -3210,10 +3210,15 @@ func resolveArtifactPath(sourceDir, fileName string) (string, error) {
 
 func newBatchID() string {
 	var b [4]byte
+	timestamp := batchIDTimestamp(time.Now())
 	if _, err := rand.Read(b[:]); err != nil {
-		return time.Now().UTC().Format("20060102150405")
+		return timestamp
 	}
-	return time.Now().UTC().Format("20060102150405") + "-" + hex.EncodeToString(b[:])
+	return timestamp + "-" + hex.EncodeToString(b[:])
+}
+
+func batchIDTimestamp(t time.Time) string {
+	return t.In(time.FixedZone("Asia/Shanghai", 8*60*60)).Format("20060102150405")
 }
 
 func safeArtifactFileName(name string) (string, error) {

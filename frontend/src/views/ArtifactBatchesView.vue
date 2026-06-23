@@ -8,7 +8,7 @@ import {
   syncArtifactVersionsFromWorkspace,
   type ArtifactVersion,
 } from '../api/batch-deploy'
-import { formatTime } from '../utils/time'
+import { formatBeijingTime } from '../utils/time'
 
 const router = useRouter()
 const loading = ref(false)
@@ -24,7 +24,7 @@ async function loadBatches() {
   loading.value = true
   try {
     const result = await listArtifactVersions()
-    batches.value = result.versions || []
+    batches.value = sortArtifactVersions(result.versions || [])
   } finally {
     loading.value = false
   }
@@ -48,11 +48,19 @@ async function syncWorkspaceVersions() {
   syncing.value = true
   try {
     const result = await syncArtifactVersionsFromWorkspace()
-    batches.value = result.versions || []
+    batches.value = sortArtifactVersions(result.versions || [])
     ElMessage.success('工作区版本同步完成')
   } finally {
     syncing.value = false
   }
+}
+
+function sortArtifactVersions(versions: ArtifactVersion[]) {
+  return [...versions].sort((a, b) => {
+    const updatedDiff = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    if (updatedDiff !== 0) return updatedDiff
+    return String(b.versionNo || '').localeCompare(String(a.versionNo || ''))
+  })
 }
 
 function isReady(batch: ArtifactVersion) {
@@ -152,7 +160,7 @@ async function deleteVersion(batch: ArtifactVersion) {
           <template #default="{ row }">{{ row.targetPath || row.localDir || '-' }}</template>
         </el-table-column>
         <el-table-column label="更新时间" width="180">
-          <template #default="{ row }">{{ formatTime(row.updatedAt) }}</template>
+          <template #default="{ row }">{{ formatBeijingTime(row.updatedAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="170" fixed="right">
           <template #default="{ row }">

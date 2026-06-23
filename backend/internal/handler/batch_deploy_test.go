@@ -43,6 +43,13 @@ func TestSafeArtifactFileNameStripsPathAndRejectsUnsupportedExt(t *testing.T) {
 	}
 }
 
+func TestBatchIDTimestampUsesBeijingTime(t *testing.T) {
+	utcTime := time.Date(2026, 6, 23, 1, 2, 3, 0, time.UTC)
+	if got := batchIDTimestamp(utcTime); got != "20260623090203" {
+		t.Fatalf("expected batch timestamp to use Beijing time, got %s", got)
+	}
+}
+
 func TestResolveBatchSourceDirRejectsPathOutsideUploadRoot(t *testing.T) {
 	outside := t.TempDir()
 	if _, err := resolveBatchSourceDir(outside, ""); err == nil {
