@@ -34,6 +34,8 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.POST("/view-dependency-tasks/:id/precheck", h.PrecheckSQLViewDependencyTask)
 		g.POST("/view-dependency-tasks/:id/execute", h.ExecuteSQLViewDependencyTask)
 		g.POST("/view-dependency-tasks/:id/restore", h.RestoreSQLViewDependencyTask)
+		g.POST("/view-dependency-tasks/:id/items/:itemId/restore", h.RestoreSQLViewDependencyItem)
+		g.POST("/view-dependency-tasks/:id/items/:itemId/verify", h.VerifySQLViewDependencyItem)
 		g.GET("/view-dependency-tasks/:id/plan.sql", h.ExportSQLViewDependencyPlan)
 		g.GET("/view-dependency-tasks/:id/restore.sql", h.ExportSQLViewDependencyRestorePlan)
 		g.GET("/sql-files", h.ListSQLFiles)
@@ -201,6 +203,44 @@ func (h *PostgreSQLHandler) RestoreSQLViewDependencyTask(c *gin.Context) {
 		return
 	}
 	task, items, err := h.svc.RestoreSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	h.respondSQLViewDependencyTask(c, task, items)
+}
+
+func (h *PostgreSQLHandler) RestoreSQLViewDependencyItem(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	itemID, err := strconv.ParseUint(c.Param("itemId"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的依赖对象 ID 参数")
+		return
+	}
+	task, items, err := h.svc.RestoreSQLViewDependencyItem(c.Request.Context(), uint(id), uint(itemID), middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14018, err.Error())
+		return
+	}
+	h.respondSQLViewDependencyTask(c, task, items)
+}
+
+func (h *PostgreSQLHandler) VerifySQLViewDependencyItem(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	itemID, err := strconv.ParseUint(c.Param("itemId"), 10, 64)
+	if err != nil {
+		response.Fail(c, 14000, "无效的依赖对象 ID 参数")
+		return
+	}
+	task, items, err := h.svc.VerifySQLViewDependencyItem(c.Request.Context(), uint(id), uint(itemID), middleware.GetCurrentUsername(c))
 	if err != nil {
 		response.Fail(c, 14018, err.Error())
 		return

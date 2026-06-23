@@ -6,7 +6,9 @@ import {
   createSQLViewDependencyTask,
   executeSQLViewDependencyTask,
   getSQLViewDependencyTask,
+  restoreSQLViewDependencyItem,
   restoreSQLViewDependencyTask,
+  verifySQLViewDependencyItem,
   type SQLViewDependencyChange,
   type SQLViewDependencyItem,
   type SQLViewDependencyStep,
@@ -19,6 +21,10 @@ const loading = ref(false)
 const analyzing = ref(false)
 const executing = ref(false)
 const restoring = ref(false)
+const backupActionLoading = ref(false)
+const backupDrawerVisible = ref(false)
+const selectedBackupItem = ref<SQLViewDependencyItem | null>(null)
+const backupActiveTab = ref('definition')
 const currentTask = ref<SQLViewDependencyTask | null>(null)
 const dependencyChanges = ref<SQLViewDependencyChange[]>([])
 const dependencyItems = ref<SQLViewDependencyItem[]>([])
@@ -156,11 +162,130 @@ function objectKindText(kind: string) {
   return kind === 'm' ? '物化视图' : '视图'
 }
 
+function backupObjectName(item: SQLViewDependencyItem) {
+  return `${item.objectSchema}.${item.objectName}`
+}
+
+function joinSQLParts(parts: Array<string | undefined>) {
+  return parts.map(part => (part || '').trim()).filter(Boolean).join('\n\n')
+}
+
+function backupRestoreSQL(item: SQLViewDependencyItem) {
+  return joinSQLParts([
+    item.createSql,
+    item.restoreRefreshSql,
+    item.restoreRulesSql,
+    item.restoreTriggersSql,
+    item.restoreOwnerSql,
+    item.restoreGrantsSql,
+    item.restoreCommentsSql,
+    item.restoreIndexesSql,
+    item.verifySql,
+  ])
+}
+
+function backupSupplementSQL(item: SQLViewDependencyItem) {
+  return joinSQLParts([
+    item.restoreRulesSql,
+    item.restoreTriggersSql,
+    item.restoreOwnerSql,
+    item.restoreGrantsSql,
+    item.restoreCommentsSql,
+    item.restoreIndexesSql,
+  ])
+}
+
+function prettyBackupJSON(text?: string) {
+  const trimmed = (text || '').trim()
+  if (!trimmed) return '-'
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2)
+  } catch {
+    return trimmed
+  }
+}
+
+function syncSelectedBackupItem() {
+  if (!selectedBackupItem.value) return
+  selectedBackupItem.value = dependencyItems.value.find(item => item.id === selectedBackupItem.value?.id) || selectedBackupItem.value
+}
+
+function openBackupDrawer(item?: SQLViewDependencyItem) {
+  const target = item || dependencyItems.value[0]
+  if (!target) {
+    ElMessage.warning('当前任务没有可查看的视图备份')
+    return
+  }
+  selectedBackupItem.value = target
+  backupActiveTab.value = 'definition'
+  backupDrawerVisible.value = true
+}
+
+async function copyBackupSQL() {
+  if (!selectedBackupItem.value) return
+  const content = backupRestoreSQL(selectedBackupItem.value)
+  if (!content) {
+    ElMessage.warning('当前备份没有可复制的恢复 SQL')
+    return
+  }
+  await navigator.clipboard.writeText(content)
+  ElMessage.success('已复制恢复 SQL')
+}
+
+async function handleRestoreBackupItem(item?: SQLViewDependencyItem) {
+  const target = item || selectedBackupItem.value
+  if (!currentTask.value?.id || !target?.id) {
+    ElMessage.warning('请先选择一个视图备份')
+    return
+  }
+  backupActionLoading.value = true
+  try {
+    await ElMessageBox.confirm(`将按备份恢复 ${backupObjectName(target)}，确认继续？`, '恢复当前视图', {
+      type: 'warning',
+      confirmButtonText: '恢复当前视图',
+    })
+    const result = await restoreSQLViewDependencyItem(currentTask.value.id, target.id)
+    applyTaskResult(result)
+    syncSelectedBackupItem()
+    ElMessage.success(result.task.executeMessage || '当前视图恢复完成')
+  } catch (err) {
+    if (err !== 'cancel') {
+      await refreshCurrentTask()
+      syncSelectedBackupItem()
+      ElMessage.error(err instanceof Error ? err.message : '当前视图恢复失败')
+    }
+  } finally {
+    backupActionLoading.value = false
+  }
+}
+
+async function handleVerifyBackupItem(item?: SQLViewDependencyItem) {
+  const target = item || selectedBackupItem.value
+  if (!currentTask.value?.id || !target?.id) {
+    ElMessage.warning('请先选择一个视图备份')
+    return
+  }
+  backupActionLoading.value = true
+  try {
+    const result = await verifySQLViewDependencyItem(currentTask.value.id, target.id)
+    applyTaskResult(result)
+    syncSelectedBackupItem()
+    ElMessage.success(result.task.executeMessage || '当前视图校验完成')
+  } catch (err) {
+    await refreshCurrentTask()
+    syncSelectedBackupItem()
+    ElMessage.error(err instanceof Error ? err.message : '当前视图校验失败')
+  } finally {
+    backupActionLoading.value = false
+  }
+}
+
 function applyTaskResult(data: SQLViewDependencyTaskResult) {
   currentTask.value = data.task
   dependencyItems.value = data.items || []
   dependencyChanges.value = data.changes || []
   executionSteps.value = data.steps || []
+  syncSelectedBackupItem()
 }
 
 async function loadSQLExecutionSettings() {
@@ -319,6 +444,16 @@ onMounted(loadSQLExecutionSettings)
           </div>
           <p>{{ stage.summary }}</p>
           <span v-if="stage.error" class="stage-error">{{ stage.error }}</span>
+          <el-button
+            v-if="stage.key === 'backup' && dependencyItems.length"
+            class="stage-action"
+            size="small"
+            text
+            type="primary"
+            @click="openBackupDrawer()"
+          >
+            查看备份
+          </el-button>
         </div>
       </div>
     </section>
@@ -395,8 +530,93 @@ onMounted(loadSQLExecutionSettings)
         <el-table-column prop="ownerName" label="Owner" width="140" show-overflow-tooltip />
         <el-table-column prop="status" label="状态" width="110" show-overflow-tooltip />
         <el-table-column prop="errorMessage" label="错误" min-width="240" show-overflow-tooltip />
+        <el-table-column label="操作" width="210" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" size="small" @click="openBackupDrawer(row)">查看备份</el-button>
+            <el-button link type="warning" size="small" :loading="backupActionLoading" @click="handleRestoreBackupItem(row)">恢复</el-button>
+            <el-button link type="success" size="small" :loading="backupActionLoading" @click="handleVerifyBackupItem(row)">校验</el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </section>
+
+    <el-drawer v-model="backupDrawerVisible" title="视图备份详情" size="58%" append-to-body>
+      <div v-if="selectedBackupItem" class="backup-drawer">
+        <div class="backup-summary">
+          <div>
+            <span>对象</span>
+            <strong>{{ backupObjectName(selectedBackupItem) }}</strong>
+          </div>
+          <div>
+            <span>类型</span>
+            <strong>{{ objectKindText(selectedBackupItem.objectKind) }}</strong>
+          </div>
+          <div>
+            <span>Owner</span>
+            <strong>{{ selectedBackupItem.ownerName || '-' }}</strong>
+          </div>
+          <div>
+            <span>备份哈希</span>
+            <strong>{{ selectedBackupItem.backupHash || '-' }}</strong>
+          </div>
+          <div>
+            <span>状态</span>
+            <strong>{{ selectedBackupItem.status || '-' }}</strong>
+          </div>
+        </div>
+
+        <el-tabs v-model="backupActiveTab">
+          <el-tab-pane label="视图定义" name="definition">
+            <h4>原始定义</h4>
+            <pre class="backup-code">{{ selectedBackupItem.definition || '-' }}</pre>
+            <h4>重建 SQL</h4>
+            <pre class="backup-code">{{ selectedBackupItem.createSql || '-' }}</pre>
+          </el-tab-pane>
+          <el-tab-pane label="恢复脚本" name="restore">
+            <div class="backup-toolbar">
+              <el-button size="small" @click="copyBackupSQL">复制恢复 SQL</el-button>
+            </div>
+            <pre class="backup-code">{{ backupRestoreSQL(selectedBackupItem) || '-' }}</pre>
+          </el-tab-pane>
+          <el-tab-pane label="权限注释索引" name="metadata">
+            <h4>附属对象恢复 SQL</h4>
+            <pre class="backup-code">{{ backupSupplementSQL(selectedBackupItem) || '-' }}</pre>
+            <h4>备份元数据</h4>
+            <div class="backup-json-grid">
+              <div>
+                <span>权限</span>
+                <pre class="backup-code">{{ prettyBackupJSON(selectedBackupItem.grantsJson) }}</pre>
+              </div>
+              <div>
+                <span>注释</span>
+                <pre class="backup-code">{{ prettyBackupJSON(selectedBackupItem.commentsJson) }}</pre>
+              </div>
+              <div>
+                <span>索引</span>
+                <pre class="backup-code">{{ prettyBackupJSON(selectedBackupItem.indexesJson) }}</pre>
+              </div>
+              <div>
+                <span>规则</span>
+                <pre class="backup-code">{{ prettyBackupJSON(selectedBackupItem.rulesJson) }}</pre>
+              </div>
+              <div>
+                <span>触发器</span>
+                <pre class="backup-code">{{ prettyBackupJSON(selectedBackupItem.triggersJson) }}</pre>
+              </div>
+              <div>
+                <span>选项</span>
+                <pre class="backup-code">{{ prettyBackupJSON(selectedBackupItem.optionsJson) }}</pre>
+              </div>
+            </div>
+          </el-tab-pane>
+        </el-tabs>
+
+        <div class="backup-footer">
+          <el-button :loading="backupActionLoading" @click="handleVerifyBackupItem()">校验当前视图</el-button>
+          <el-button type="warning" :loading="backupActionLoading" @click="handleRestoreBackupItem()">恢复当前视图</el-button>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -524,6 +744,11 @@ onMounted(loadSQLExecutionSettings)
   word-break: break-all;
 }
 
+.stage-action {
+  margin-top: 8px;
+  padding-left: 0;
+}
+
 .summary-card {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -557,6 +782,78 @@ onMounted(loadSQLExecutionSettings)
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+.backup-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.backup-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.backup-summary > div {
+  padding: 10px 12px;
+  border-right: 1px solid #ebeef5;
+  background: #fafafa;
+  min-width: 0;
+}
+
+.backup-summary > div:last-child {
+  border-right: 0;
+}
+
+.backup-summary span,
+.backup-json-grid span {
+  display: block;
+  margin-bottom: 6px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.backup-summary strong {
+  display: block;
+  color: #303133;
+  word-break: break-all;
+}
+
+.backup-toolbar,
+.backup-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.backup-footer {
+  margin-top: 4px;
+}
+
+.backup-code {
+  max-height: 280px;
+  margin: 8px 0 14px;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #303133;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.backup-json-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 @media (max-width: 1100px) {
   .summary-card {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -568,6 +865,11 @@ onMounted(loadSQLExecutionSettings)
 
   .sql-header {
     flex-direction: column;
+  }
+
+  .backup-summary,
+  .backup-json-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

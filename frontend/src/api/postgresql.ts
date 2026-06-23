@@ -243,6 +243,12 @@ export const executeSQLViewDependencyTask = (id: number) =>
 export const restoreSQLViewDependencyTask = (id: number) =>
   request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}/restore`)
 
+export const restoreSQLViewDependencyItem = (taskId: number, itemId: number) =>
+  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${taskId}/items/${itemId}/restore`)
+
+export const verifySQLViewDependencyItem = (taskId: number, itemId: number) =>
+  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${taskId}/items/${itemId}/verify`)
+
 export const parseSQLFile = (data: ParseSQLRequest) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/parse', data)
 

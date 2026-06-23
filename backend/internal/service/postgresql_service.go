@@ -777,7 +777,7 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 				msg = "字段变更失败，已按备份恢复视图: " + stepErr.Err.Error()
 			} else if stepErr.RestoreAttempted && !stepErr.RestoreSucceeded {
 				status = "RESTORE_FAILED"
-				msg = "字段变更失败，且自动恢复视图失败，请导出恢复 SQL 人工处理: " + err.Error()
+				msg = "字段变更失败，且自动恢复视图失败，请查看备份并恢复视图: " + err.Error()
 			}
 		} else if executionMode == SQLViewDependencyExecutionModeTransaction {
 			msg = "事务执行失败，事务已回滚；如仍存在缺失视图，请使用恢复 SQL: " + err.Error()
@@ -825,7 +825,7 @@ func (s *PostgreSQLService) RestoreSQLViewDependencyTask(ctx context.Context, id
 	steps := BuildSQLViewDependencyRestoreTransactionalSteps(*task, items)
 	err = s.runSQLViewDependencyStepsOnDB(ctx, db, task.ID, steps)
 	if err != nil {
-		msg := "恢复视图失败，请导出恢复 SQL 人工处理: " + err.Error()
+		msg := "恢复视图失败，请查看备份并恢复视图: " + err.Error()
 		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "RESTORE_FAILED", msg, username)
 		if saveErr != nil {
 			return nil, nil, saveErr
@@ -837,6 +837,105 @@ func (s *PostgreSQLService) RestoreSQLViewDependencyTask(ctx context.Context, id
 		return nil, nil, err
 	}
 	return updated, items, nil
+}
+
+func (s *PostgreSQLService) RestoreSQLViewDependencyItem(ctx context.Context, taskID, itemID uint, username string) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
+	task, item, err := loadSQLViewDependencyTaskItemForAction(taskID, itemID)
+	if err != nil {
+		return nil, nil, err
+	}
+	steps := BuildSQLViewDependencyItemRestoreSteps(item)
+	if len(steps) == 0 {
+		return nil, nil, fmt.Errorf("依赖对象 %s.%s 没有可恢复的备份 SQL", item.ObjectSchema, item.ObjectName)
+	}
+	db, err := s.getDB()
+	if err != nil {
+		return nil, nil, err
+	}
+	err = s.runSQLViewDependencyAdhocStepsOnDB(ctx, db, task.ID, steps)
+	if saveErr := updateSQLViewDependencyItemActionResult(task.ID, item.ID, username, "RESTORED", "已恢复视图 "+viewDependencyQualifiedName(item), err, "RESTORE_FAILED"); saveErr != nil {
+		return nil, nil, saveErr
+	}
+	updatedTask, items, loadErr := s.GetSQLViewDependencyTask(task.ID)
+	if loadErr != nil {
+		return nil, nil, loadErr
+	}
+	if err != nil {
+		return updatedTask, items, err
+	}
+	return updatedTask, items, nil
+}
+
+func (s *PostgreSQLService) VerifySQLViewDependencyItem(ctx context.Context, taskID, itemID uint, username string) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
+	task, item, err := loadSQLViewDependencyTaskItemForAction(taskID, itemID)
+	if err != nil {
+		return nil, nil, err
+	}
+	steps := BuildSQLViewDependencyItemVerifySteps(item)
+	if len(steps) == 0 {
+		return nil, nil, fmt.Errorf("依赖对象 %s.%s 没有可校验的 SQL", item.ObjectSchema, item.ObjectName)
+	}
+	db, err := s.getDB()
+	if err != nil {
+		return nil, nil, err
+	}
+	err = s.runSQLViewDependencyAdhocStepsOnDB(ctx, db, task.ID, steps)
+	if saveErr := updateSQLViewDependencyItemActionResult(task.ID, item.ID, username, "VERIFIED", "视图校验通过 "+viewDependencyQualifiedName(item), err, "VERIFY_FAILED"); saveErr != nil {
+		return nil, nil, saveErr
+	}
+	updatedTask, items, loadErr := s.GetSQLViewDependencyTask(task.ID)
+	if loadErr != nil {
+		return nil, nil, loadErr
+	}
+	if err != nil {
+		return updatedTask, items, err
+	}
+	return updatedTask, items, nil
+}
+
+func loadSQLViewDependencyTaskItemForAction(taskID, itemID uint) (*model.SQLViewDependencyTask, model.SQLViewDependencyItem, error) {
+	var task model.SQLViewDependencyTask
+	var item model.SQLViewDependencyItem
+	err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("is_deleted = ?", false).First(&task, taskID).Error; err != nil {
+			return err
+		}
+		if task.Status == "EXECUTING" || task.Status == "RESTORING" {
+			return fmt.Errorf("任务正在执行中，请勿重复提交")
+		}
+		return tx.Where("task_id = ? AND id = ?", taskID, itemID).First(&item).Error
+	})
+	if err != nil {
+		return nil, model.SQLViewDependencyItem{}, err
+	}
+	return &task, item, nil
+}
+
+func updateSQLViewDependencyItemActionResult(taskID, itemID uint, username, successStatus, successMessage string, actionErr error, failureStatus string) error {
+	status := successStatus
+	message := successMessage
+	itemError := ""
+	if actionErr != nil {
+		status = failureStatus
+		message = actionErr.Error()
+		itemError = actionErr.Error()
+	}
+	return repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.SQLViewDependencyItem{}).Where("task_id = ? AND id = ?", taskID, itemID).Updates(map[string]interface{}{
+			"status":        status,
+			"error_message": itemError,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.SQLViewDependencyTask{}).Where("id = ?", taskID).Updates(map[string]interface{}{
+			"execute_message": message,
+			"operator":        strings.TrimSpace(username),
+		}).Error
+	})
+}
+
+func viewDependencyQualifiedName(item model.SQLViewDependencyItem) string {
+	return strings.Trim(strings.TrimSpace(item.ObjectSchema)+"."+strings.TrimSpace(item.ObjectName), ".")
 }
 
 type sqlConnViewDependencyExecutor struct {
@@ -851,6 +950,45 @@ func (e sqlConnViewDependencyExecutor) Exec(sqlText string) error {
 
 func (s *PostgreSQLService) runSQLViewDependencyStepsOnDB(ctx context.Context, db *sql.DB, taskID uint, steps []string) error {
 	stepModels, err := replaceSQLViewDependencySteps(taskID, steps)
+	if err != nil {
+		return err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	executor := sqlConnViewDependencyExecutor{ctx: ctx, conn: conn}
+	inTx := false
+	for idx, step := range steps {
+		if idx < len(stepModels) {
+			_ = markSQLViewDependencyStepRunning(stepModels[idx].ID)
+		}
+		if err := executor.Exec(step); err != nil {
+			if idx < len(stepModels) {
+				_ = markSQLViewDependencyStepFinished(stepModels[idx].ID, "FAILED", err.Error())
+			}
+			if inTx {
+				_ = executor.Exec("ROLLBACK;")
+				_ = appendSQLViewDependencyRollbackStep(taskID)
+			}
+			return err
+		}
+		if idx < len(stepModels) {
+			_ = markSQLViewDependencyStepFinished(stepModels[idx].ID, "SUCCESS", "")
+		}
+		switch strings.ToUpper(strings.TrimSpace(step)) {
+		case "BEGIN;":
+			inTx = true
+		case "COMMIT;", "ROLLBACK;":
+			inTx = false
+		}
+	}
+	return nil
+}
+
+func (s *PostgreSQLService) runSQLViewDependencyAdhocStepsOnDB(ctx context.Context, db *sql.DB, taskID uint, steps []string) error {
+	stepModels, err := appendSQLViewDependencySteps(taskID, steps)
 	if err != nil {
 		return err
 	}
@@ -1047,6 +1185,34 @@ func replaceSQLViewDependencySteps(taskID uint, steps []string) ([]model.SQLView
 				TaskID:     taskID,
 				StepName:   inferSQLViewDependencyStepName(step),
 				StepOrder:  idx + 1,
+				SQLContent: step,
+				Status:     "PENDING",
+			}
+			if err := tx.Create(&stepModel).Error; err != nil {
+				return err
+			}
+			stepModels = append(stepModels, stepModel)
+		}
+		return nil
+	})
+	return stepModels, err
+}
+
+func appendSQLViewDependencySteps(taskID uint, steps []string) ([]model.SQLViewDependencyStep, error) {
+	stepModels := make([]model.SQLViewDependencyStep, 0, len(steps))
+	err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		var maxOrder int
+		if err := tx.Model(&model.SQLViewDependencyStep{}).
+			Where("task_id = ?", taskID).
+			Select("COALESCE(MAX(step_order), 0)").
+			Scan(&maxOrder).Error; err != nil {
+			return err
+		}
+		for idx, step := range steps {
+			stepModel := model.SQLViewDependencyStep{
+				TaskID:     taskID,
+				StepName:   inferSQLViewDependencyStepName(step),
+				StepOrder:  maxOrder + idx + 1,
 				SQLContent: step,
 				Status:     "PENDING",
 			}

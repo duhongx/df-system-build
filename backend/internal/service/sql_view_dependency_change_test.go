@@ -457,6 +457,73 @@ func TestBuildSQLViewDependencyRestorePlanOnlyRestoresAndVerifies(t *testing.T) 
 	}
 }
 
+func TestBuildSQLViewDependencyItemRestoreStepsIncludesStoredBackupSQL(t *testing.T) {
+	item := model.SQLViewDependencyItem{
+		CreateSQL:         `CREATE OR REPLACE VIEW "his"."v_patient" AS SELECT code FROM his.patient;`,
+		RestoreRefreshSQL: `REFRESH MATERIALIZED VIEW "his"."v_patient";`,
+		RestoreOwnerSQL:   `ALTER VIEW "his"."v_patient" OWNER TO "his_owner";`,
+		RestoreGrantsSQL:  `GRANT SELECT ON "his"."v_patient" TO "app";`,
+		RestoreCommentsSQL: strings.Join([]string{
+			`COMMENT ON VIEW "his"."v_patient" IS 'patient';`,
+			`COMMENT ON COLUMN "his"."v_patient"."code" IS 'code';`,
+		}, "\n"),
+		RestoreIndexesSQL:  `CREATE INDEX idx_v_patient_code ON "his"."v_patient"(code);`,
+		RestoreRulesSQL:    `CREATE RULE v_patient_rule AS ON UPDATE TO "his"."v_patient" DO INSTEAD NOTHING;`,
+		RestoreTriggersSQL: `CREATE TRIGGER v_patient_trg INSTEAD OF UPDATE ON "his"."v_patient" FOR EACH ROW EXECUTE FUNCTION his.sync_patient();`,
+		VerifySQL:          `SELECT to_regclass('"his"."v_patient"');`,
+	}
+
+	steps := BuildSQLViewDependencyItemRestoreSteps(item)
+	joined := strings.Join(steps, "\n")
+
+	expectedOrder := []string{
+		"CREATE OR REPLACE VIEW",
+		"REFRESH MATERIALIZED VIEW",
+		"CREATE RULE",
+		"CREATE TRIGGER",
+		"ALTER VIEW",
+		"GRANT SELECT",
+		"COMMENT ON VIEW",
+		"CREATE INDEX",
+		"SELECT to_regclass",
+	}
+	lastPos := -1
+	for _, token := range expectedOrder {
+		pos := strings.Index(joined, token)
+		if pos < 0 {
+			t.Fatalf("expected restore steps to contain %q, got:\n%s", token, joined)
+		}
+		if pos < lastPos {
+			t.Fatalf("expected %q after previous restore step, got:\n%s", token, joined)
+		}
+		lastPos = pos
+	}
+}
+
+func TestBuildSQLViewDependencyItemVerifyStepsUsesOnlySelectedItem(t *testing.T) {
+	item := model.SQLViewDependencyItem{
+		CreateSQL: `CREATE OR REPLACE VIEW "his"."v_patient" AS SELECT 1;`,
+		VerifySQL: `DO $$
+BEGIN
+  IF to_regclass('"his"."v_patient"') IS NULL THEN
+    RAISE EXCEPTION 'missing';
+  END IF;
+END $$;`,
+	}
+
+	steps := BuildSQLViewDependencyItemVerifySteps(item)
+
+	if len(steps) != 1 {
+		t.Fatalf("expected one verify step, got %d: %#v", len(steps), steps)
+	}
+	if !strings.Contains(steps[0], `to_regclass('"his"."v_patient"')`) {
+		t.Fatalf("unexpected verify step: %s", steps[0])
+	}
+	if strings.Contains(steps[0], "CREATE OR REPLACE VIEW") {
+		t.Fatalf("verify steps must not recreate the object: %s", steps[0])
+	}
+}
+
 func TestBuildSQLViewDependencyTransactionalPlanUsesShortLockSettings(t *testing.T) {
 	task := model.SQLViewDependencyTask{
 		SchemaName:       "his",

@@ -354,6 +354,26 @@ func BuildSQLViewDependencyRestoreTransactionalSteps(task model.SQLViewDependenc
 	return steps
 }
 
+func BuildSQLViewDependencyItemRestoreSteps(item model.SQLViewDependencyItem) []string {
+	steps := make([]string, 0, 9)
+	appendSQLStep(&steps, item.CreateSQL)
+	appendSQLStep(&steps, item.RestoreRefreshSQL)
+	appendSQLStep(&steps, item.RestoreRulesSQL)
+	appendSQLStep(&steps, item.RestoreTriggersSQL)
+	appendSQLStep(&steps, item.RestoreOwnerSQL)
+	appendSQLStep(&steps, item.RestoreGrantsSQL)
+	appendSQLStep(&steps, item.RestoreCommentsSQL)
+	appendSQLStep(&steps, item.RestoreIndexesSQL)
+	appendSQLStep(&steps, item.VerifySQL)
+	return steps
+}
+
+func BuildSQLViewDependencyItemVerifySteps(item model.SQLViewDependencyItem) []string {
+	steps := make([]string, 0, 1)
+	appendSQLStep(&steps, item.VerifySQL)
+	return steps
+}
+
 func buildSQLViewDependencyTransactionPrefix(task model.SQLViewDependencyTask) []string {
 	lockTimeout := strings.TrimSpace(task.LockTimeout)
 	if lockTimeout == "" {

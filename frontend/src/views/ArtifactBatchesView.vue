@@ -2,11 +2,17 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deleteArtifactVersion, listArtifactVersions, type ArtifactVersion } from '../api/batch-deploy'
+import {
+  deleteArtifactVersion,
+  listArtifactVersions,
+  syncArtifactVersionsFromWorkspace,
+  type ArtifactVersion,
+} from '../api/batch-deploy'
 import { formatTime } from '../utils/time'
 
 const router = useRouter()
 const loading = ref(false)
+const syncing = ref(false)
 const batches = ref<ArtifactVersion[]>([])
 
 const readyBatches = computed(() => batches.value.filter(batch => isReady(batch)))
@@ -21,6 +27,31 @@ async function loadBatches() {
     batches.value = result.versions || []
   } finally {
     loading.value = false
+  }
+}
+
+async function syncWorkspaceVersions() {
+  try {
+    await ElMessageBox.confirm(
+      '同步工作区会扫描历史上传、下载和制品目录，并重新校验制品文件。目录或制品较多时可能耗时较长，确认继续？',
+      '同步历史更新版本',
+      {
+        type: 'warning',
+        confirmButtonText: '开始同步',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch (err) {
+    if (err === 'cancel' || err === 'close') return
+    throw err
+  }
+  syncing.value = true
+  try {
+    const result = await syncArtifactVersionsFromWorkspace()
+    batches.value = result.versions || []
+    ElMessage.success('工作区版本同步完成')
+  } finally {
+    syncing.value = false
   }
 }
 
@@ -82,6 +113,7 @@ async function deleteVersion(batch: ArtifactVersion) {
         <p>本地上传、服务器下载、制品库选择都会先形成一个更新版本；这里仅查看版本和制品详情。</p>
       </div>
       <div class="page-actions">
+        <el-button :loading="syncing" @click="syncWorkspaceVersions">同步工作区</el-button>
         <el-button type="primary" :loading="loading" @click="loadBatches">刷新</el-button>
       </div>
     </div>

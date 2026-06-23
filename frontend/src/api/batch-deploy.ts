@@ -190,6 +190,9 @@ export const listArtifactSourceBatches = () =>
 export const listArtifactVersions = (deployable = false) =>
   request.get<any, { versions: ArtifactVersion[] }>('/batch-deploy/artifact-versions', { params: deployable ? { deployable: 'true' } : {} })
 
+export const syncArtifactVersionsFromWorkspace = () =>
+  request.post<any, { versions: ArtifactVersion[] }>('/batch-deploy/artifact-versions/sync-workspace')
+
 export const getArtifactVersion = (versionNo: string) =>
   request.get<any, { version: ArtifactVersion; items: ArtifactVersionItem[] }>(`/batch-deploy/artifact-versions/${encodeURIComponent(versionNo)}`)
 

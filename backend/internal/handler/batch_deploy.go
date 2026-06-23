@@ -149,6 +149,7 @@ func (h *BatchDeployHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/download-remote-dir/latest", h.GetLatestDownloadJob)
 		g.GET("/download-remote-dir/batches", h.ListDownloadBatches)
 		g.GET("/artifact-versions", h.ListArtifactVersions)
+		g.POST("/artifact-versions/sync-workspace", h.SyncArtifactVersionsFromWorkspace)
 		g.GET("/artifact-versions/:versionNo", h.GetArtifactVersion)
 		g.DELETE("/artifact-versions/:versionNo", h.DeleteArtifactVersion)
 		g.DELETE("/artifact-versions/:versionNo/items/:itemID", h.DeleteArtifactVersionItem)
@@ -203,16 +204,29 @@ func (h *BatchDeployHandler) ListArtifactVersions(c *gin.Context) {
 		response.Fail(c, 13019, "数据库未初始化")
 		return
 	}
-	if err := backfillArtifactVersionsFromWorkspace(); err != nil {
-		response.Fail(c, 13019, "同步历史更新版本失败: "+err.Error())
-		return
-	}
 	versions := []model.ArtifactVersion{}
 	query := repository.DB.Order("updated_at DESC")
 	if c.Query("deployable") == "true" {
 		query = query.Where("status = ? AND deployable_count > 0", "available")
 	}
 	if err := query.Find(&versions).Error; err != nil {
+		response.Fail(c, 13019, "读取更新版本失败: "+err.Error())
+		return
+	}
+	response.OK(c, gin.H{"versions": versions})
+}
+
+func (h *BatchDeployHandler) SyncArtifactVersionsFromWorkspace(c *gin.Context) {
+	if repository.DB == nil {
+		response.Fail(c, 13019, "数据库未初始化")
+		return
+	}
+	if err := backfillArtifactVersionsFromWorkspace(); err != nil {
+		response.Fail(c, 13019, "同步历史更新版本失败: "+err.Error())
+		return
+	}
+	versions := []model.ArtifactVersion{}
+	if err := repository.DB.Order("updated_at DESC").Find(&versions).Error; err != nil {
 		response.Fail(c, 13019, "读取更新版本失败: "+err.Error())
 		return
 	}

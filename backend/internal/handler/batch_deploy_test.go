@@ -1192,7 +1192,7 @@ func TestMatchDoesNotRecordLatestArtifact(t *testing.T) {
 	}
 }
 
-func TestListArtifactVersionsBackfillsExistingWorkspaceBatches(t *testing.T) {
+func TestListArtifactVersionsDoesNotBackfillWorkspaceBatches(t *testing.T) {
 	setupArtifactVersionTestDB(t)
 	root, err := batchUploadRootDir()
 	if err != nil {
@@ -1219,16 +1219,55 @@ func TestListArtifactVersionsBackfillsExistingWorkspaceBatches(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if payload.Code != 0 || len(payload.Data.Versions) != 1 {
-		t.Fatalf("expected one backfilled version, got %#v", payload)
+	if payload.Code != 0 || len(payload.Data.Versions) != 0 {
+		t.Fatalf("expected list endpoint to only return stored versions, got %#v", payload)
 	}
-	version := payload.Data.Versions[0]
-	if version.VersionNo != "batch-backfill" || version.DeployableCount != 1 || version.Status != "available" {
-		t.Fatalf("unexpected backfilled version: %#v", version)
+	var versionCount int64
+	if err := repository.DB.Model(&model.ArtifactVersion{}).Count(&versionCount).Error; err != nil {
+		t.Fatalf("count artifact versions: %v", err)
+	}
+	if versionCount != 0 {
+		t.Fatalf("list endpoint should not create artifact versions, got %d", versionCount)
 	}
 }
 
-func TestListArtifactVersionsRepairsCollectingDownloadVersionFromWorkspace(t *testing.T) {
+func TestSyncArtifactVersionsFromWorkspaceBackfillsExistingWorkspaceBatches(t *testing.T) {
+	setupArtifactVersionTestDB(t)
+	root, err := batchUploadRootDir()
+	if err != nil {
+		t.Fatalf("batch root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	_ = os.RemoveAll(root)
+	mustCreateZip(t, filepath.Join(root, "upload", "batch-backfill", "his-gateway.jar"))
+
+	gin.SetMode(gin.TestMode)
+	req := httptest.NewRequest(http.MethodPost, "/batch-deploy/artifact-versions/sync-workspace", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	NewBatchDeployHandler().SyncArtifactVersionsFromWorkspace(c)
+
+	var payload struct {
+		Code int `json:"code"`
+		Data struct {
+			Versions []model.ArtifactVersion `json:"versions"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Code != 0 || len(payload.Data.Versions) != 1 {
+		t.Fatalf("expected one synced version, got %#v", payload)
+	}
+	version := payload.Data.Versions[0]
+	if version.VersionNo != "batch-backfill" || version.DeployableCount != 1 || version.Status != "available" {
+		t.Fatalf("unexpected synced version: %#v", version)
+	}
+}
+
+func TestSyncArtifactVersionsFromWorkspaceRepairsCollectingDownloadVersionFromWorkspace(t *testing.T) {
 	setupArtifactVersionTestDB(t)
 	root, err := batchUploadRootDir()
 	if err != nil {
@@ -1266,12 +1305,12 @@ func TestListArtifactVersionsRepairsCollectingDownloadVersionFromWorkspace(t *te
 	}
 
 	gin.SetMode(gin.TestMode)
-	req := httptest.NewRequest(http.MethodGet, "/batch-deploy/artifact-versions", nil)
+	req := httptest.NewRequest(http.MethodPost, "/batch-deploy/artifact-versions/sync-workspace", nil)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = req
 
-	NewBatchDeployHandler().ListArtifactVersions(c)
+	NewBatchDeployHandler().SyncArtifactVersionsFromWorkspace(c)
 
 	var payload struct {
 		Code int `json:"code"`
