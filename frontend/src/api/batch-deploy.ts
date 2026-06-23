@@ -58,6 +58,8 @@ export interface DownloadJob {
   currentPath: string
   error: string
   hasPartial: boolean
+  startedAt?: string
+  updatedAt?: string
 }
 
 export interface ArtifactSourceBatch {

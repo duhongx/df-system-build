@@ -7,6 +7,7 @@ import {
   getActiveDownloadJob,
   getDownloadProgress,
   getLatestDownloadJob,
+  listDownloadBatches,
   listPackageDownloadDir,
   startDownloadRemoteDir,
   type DownloadJob,
@@ -29,6 +30,10 @@ const remotePath = ref('/')
 const remoteFiles = ref<FileItem[]>([])
 const packageConfigured = ref(false)
 const activeDownloadJob = ref<DownloadJob | null>(null)
+const downloadHistoryVisible = ref(false)
+const downloadHistoryLoading = ref(false)
+const downloadHistoryRows = ref<DownloadJob[]>([])
+const selectedDownloadHistory = ref<DownloadJob | null>(null)
 let pollTimer: number | undefined
 
 const sortedRemoteFiles = computed(() => {
@@ -71,7 +76,19 @@ const localTargetPath = computed(() => {
   return job.targetPath || job.localDir || '下载后自动生成本地工作区目录'
 })
 
-const versionListButtonText = computed(() => (importMode.value === 'download' ? '查看已下载版本' : '查看更新版本'))
+const selectedDownloadHistoryItems = computed<DownloadJobItem[]>(() => {
+  const job = selectedDownloadHistory.value
+  if (!job) return []
+  if (job.items?.length) return job.items
+  return (job.files || []).map(name => ({
+    name,
+    remotePath: '',
+    localPath: '',
+    size: 0,
+    status: 'success',
+    artifact: true,
+  }))
+})
 
 onMounted(async () => {
   await loadSettingsAndRemoteRoot()
@@ -294,13 +311,73 @@ async function uploadEntries(entries: UploadEntry[]) {
     uploadLoading.value = false
   }
 }
+
+async function openDownloadHistory() {
+  downloadHistoryVisible.value = true
+  await loadDownloadHistory()
+}
+
+async function loadDownloadHistory() {
+  downloadHistoryLoading.value = true
+  try {
+    const result = await listDownloadBatches()
+    downloadHistoryRows.value = result.batches || []
+    if (downloadHistoryRows.value.length === 0) {
+      selectedDownloadHistory.value = null
+      return
+    }
+    const selectedId = selectedDownloadHistory.value?.id
+    selectedDownloadHistory.value =
+      downloadHistoryRows.value.find(job => job.id === selectedId)
+      || downloadHistoryRows.value[0]
+  } finally {
+    downloadHistoryLoading.value = false
+  }
+}
+
+function selectDownloadHistory(row: DownloadJob) {
+  selectedDownloadHistory.value = row
+}
+
+function downloadStatusTagType(status: DownloadJob['status']) {
+  if (status === 'success') return 'success'
+  if (status === 'failed') return 'danger'
+  if (status === 'running' || status === 'pending') return 'warning'
+  return 'info'
+}
+
+function formatBeijingTime(value?: string) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date).replace(/\//g, '-')
+}
+
+function downloadHistoryRowClassName({ row }: { row: DownloadJob }) {
+  return row.id === selectedDownloadHistory.value?.id ? 'selected-download-history-row' : ''
+}
 </script>
 
 <template>
   <div class="artifact-collect-page">
     <div class="page-header">
       <h4>制品导入</h4>
-      <el-button type="primary" plain @click="router.push('/artifacts/versions')">{{ versionListButtonText }}</el-button>
+      <el-button
+        type="primary"
+        plain
+        @click="importMode === 'download' ? openDownloadHistory() : router.push('/artifacts/versions')"
+      >
+        {{ importMode === 'download' ? '查看下载记录' : '查看更新版本' }}
+      </el-button>
     </div>
 
     <div class="source-switch">
@@ -373,9 +450,9 @@ async function uploadEntries(entries: UploadEntry[]) {
                 v-if="activeDownloadJob?.status === 'success'"
                 link
                 type="primary"
-                @click="router.push('/artifacts/versions')"
+                @click="openDownloadHistory"
               >
-                查看已下载版本
+                查看下载记录
               </el-button>
             </div>
             <div v-if="activeDownloadJob" class="download-status">
@@ -438,6 +515,115 @@ async function uploadEntries(entries: UploadEntry[]) {
         </div>
       </section>
     </div>
+
+    <el-drawer v-model="downloadHistoryVisible" title="下载记录" size="78%">
+      <div class="download-history">
+        <div class="history-toolbar">
+          <div>
+            <strong>历史下载批次</strong>
+            <span>展示从远程软件包服务器下载到本地工作区的目录、文件状态和远程路径。</span>
+          </div>
+          <el-button size="small" :loading="downloadHistoryLoading" @click="loadDownloadHistory">刷新</el-button>
+        </div>
+        <div class="history-layout">
+          <el-table
+            :data="downloadHistoryRows"
+            v-loading="downloadHistoryLoading"
+            border
+            stripe
+            size="small"
+            height="360"
+            empty-text="暂无下载记录"
+            :row-class-name="downloadHistoryRowClassName"
+            @row-click="selectDownloadHistory"
+          >
+            <el-table-column label="下载批次" min-width="180" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.batchId || row.id }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="downloadStatusTagType(row.status)">
+                  {{ downloadStatusText(row.status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="文件数" width="110">
+              <template #default="{ row }">
+                {{ row.completedFiles || 0 }} / {{ row.totalFiles || row.count || 0 }}
+              </template>
+            </el-table-column>
+            <el-table-column label="远程目录" min-width="260" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.remotePath || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="本地目录" min-width="300" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.targetPath || row.localDir || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="更新时间" width="170">
+              <template #default="{ row }">{{ formatBeijingTime(row.updatedAt || row.startedAt) }}</template>
+            </el-table-column>
+          </el-table>
+
+          <div class="history-detail">
+            <div class="history-detail-head">
+              <div>
+                <strong>文件明细</strong>
+                <span v-if="selectedDownloadHistory">
+                  {{ selectedDownloadHistory.batchId || selectedDownloadHistory.id }}
+                </span>
+              </div>
+              <el-tag v-if="selectedDownloadHistory" size="small" :type="downloadStatusTagType(selectedDownloadHistory.status)">
+                {{ downloadStatusText(selectedDownloadHistory.status) }}
+              </el-tag>
+            </div>
+            <div v-if="selectedDownloadHistory" class="history-paths">
+              <div>远程目录：{{ selectedDownloadHistory.remotePath || '-' }}</div>
+              <div>本地目录：{{ selectedDownloadHistory.targetPath || selectedDownloadHistory.localDir || '-' }}</div>
+              <div v-if="selectedDownloadHistory.error" class="download-error">
+                错误：{{ selectedDownloadHistory.error }}
+              </div>
+            </div>
+            <el-table
+              :data="selectedDownloadHistoryItems"
+              border
+              stripe
+              size="small"
+              height="360"
+              empty-text="请选择下载批次"
+            >
+              <el-table-column label="文件名" min-width="180" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span class="file-name">
+                    <el-icon color="#909399"><Document /></el-icon>
+                    {{ row.name }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="下载状态" width="96">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="downloadItemTagType(row.status)">
+                    {{ downloadItemStatusText(row.status) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="大小" width="110">
+                <template #default="{ row }">{{ formatDownloadSize(row.size) }}</template>
+              </el-table-column>
+              <el-table-column label="远程路径" min-width="260" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.remotePath || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="本地路径" min-width="260" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.localPath || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="错误" min-width="220" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span :class="{ 'download-error-inline': row.error }">{{ row.error || '-' }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -471,6 +657,20 @@ async function uploadEntries(entries: UploadEntry[]) {
 .crumb { cursor: pointer; color: #409eff; }
 .crumb-sep { color: #c0c4cc; }
 .file-name { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.download-history { display: flex; flex-direction: column; gap: 12px; }
+.history-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.history-toolbar > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.history-toolbar strong,
+.history-detail-head strong { font-size: 14px; color: #303133; }
+.history-toolbar span,
+.history-detail-head span,
+.history-paths { font-size: 12px; color: #909399; }
+.history-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.history-detail { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.history-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.history-detail-head > div { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
+.history-paths { display: grid; grid-template-columns: 1fr; gap: 4px; border: 1px solid #ebeef5; border-radius: 6px; padding: 8px 10px; background: #fbfcff; }
+:deep(.selected-download-history-row) td { background: #ecf5ff !important; }
 @media (max-width: 1200px) {
   .download-layout { grid-template-columns: 1fr; }
 }
