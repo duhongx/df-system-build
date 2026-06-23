@@ -6,6 +6,7 @@ import {
   cancelDownloadJob,
   getActiveDownloadJob,
   getDownloadProgress,
+  getLatestDownloadJob,
   listPackageDownloadDir,
   startDownloadRemoteDir,
   type DownloadJob,
@@ -70,6 +71,8 @@ const localTargetPath = computed(() => {
   return job.targetPath || job.localDir || '下载后自动生成本地工作区目录'
 })
 
+const versionListButtonText = computed(() => (importMode.value === 'download' ? '查看已下载版本' : '查看更新版本'))
+
 onMounted(async () => {
   await loadSettingsAndRemoteRoot()
   await restoreActiveDownloadJob()
@@ -102,10 +105,17 @@ async function loadSettingsAndRemoteRoot() {
 async function restoreActiveDownloadJob() {
   try {
     const job = await getActiveDownloadJob()
-    if (!job) return
-    activeDownloadJob.value = job
-    importMode.value = 'download'
-    pollDownload(job.id)
+    if (job) {
+      activeDownloadJob.value = job
+      importMode.value = 'download'
+      pollDownload(job.id)
+      return
+    }
+    const latestJob = await getLatestDownloadJob()
+    if (latestJob) {
+      activeDownloadJob.value = latestJob
+      importMode.value = 'download'
+    }
   } catch {
     // Ignore restore failures; manual refresh still works.
   }
@@ -290,7 +300,7 @@ async function uploadEntries(entries: UploadEntry[]) {
   <div class="artifact-collect-page">
     <div class="page-header">
       <h4>制品导入</h4>
-      <el-button type="primary" plain @click="router.push('/artifacts/versions')">查看更新版本</el-button>
+      <el-button type="primary" plain @click="router.push('/artifacts/versions')">{{ versionListButtonText }}</el-button>
     </div>
 
     <div class="source-switch">
@@ -365,7 +375,7 @@ async function uploadEntries(entries: UploadEntry[]) {
                 type="primary"
                 @click="router.push('/artifacts/versions')"
               >
-                查看更新版本
+                查看已下载版本
               </el-button>
             </div>
             <div v-if="activeDownloadJob" class="download-status">

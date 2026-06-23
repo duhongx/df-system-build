@@ -74,8 +74,13 @@ assert.match(artifactCollect, /downloadStatusText|downloadPercent/, 'server down
 assert.match(artifactCollect, /cancelDownloadJob/, 'server download mode should allow canceling the active download task')
 assert.match(artifactCollect, /downloadFileRows/, 'server download mode should render current task file status rows')
 assert.match(artifactCollect, /下载状态/, 'download file table should expose each file status')
+assert.match(artifactCollect, /getLatestDownloadJob/, 'artifact import should restore the latest completed download task after refresh')
+assert.match(artifactCollect, /查看已下载版本/, 'server download mode should link to downloaded update versions with explicit wording')
 assert.doesNotMatch(artifactCollect, /collect-grid/, 'artifact import should not show upload and download panels side by side')
 assert.match(batchDeployApi, /download-remote-dir\/cancel/, 'batch deploy API should expose download cancellation')
+assert.match(batchDeployApi, /deleteArtifactVersion/, 'batch deploy API should expose update version deletion')
+assert.match(artifactBatches, /deleteArtifactVersion/, 'update versions should allow deleting unused downloaded versions')
+assert.match(artifactBatches, /删除更新版本/, 'update version deletion should be confirmed before removing records and files')
 
 assert.match(kubernetesApi, /syncK8sDeploymentRuntimeVersions/, 'kubernetes API should expose runtime version sync')
 assert.match(kubernetesView, /deploymentRuntimeVersions/, 'deployment page should keep cached runtime versions from the API')

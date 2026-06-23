@@ -150,6 +150,7 @@ func (h *BatchDeployHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/download-remote-dir/batches", h.ListDownloadBatches)
 		g.GET("/artifact-versions", h.ListArtifactVersions)
 		g.GET("/artifact-versions/:versionNo", h.GetArtifactVersion)
+		g.DELETE("/artifact-versions/:versionNo", h.DeleteArtifactVersion)
 		g.DELETE("/artifact-versions/:versionNo/items/:itemID", h.DeleteArtifactVersionItem)
 		g.POST("/artifact-versions/:versionNo/items/:itemID/replace", h.ReplaceArtifactVersionItem)
 		g.POST("/artifact-versions/:versionNo/items/:itemID/redownload", h.RedownloadArtifactVersionItem)
@@ -239,6 +240,101 @@ func (h *BatchDeployHandler) GetArtifactVersion(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"version": version, "items": items})
+}
+
+func (h *BatchDeployHandler) DeleteArtifactVersion(c *gin.Context) {
+	if repository.DB == nil {
+		response.Fail(c, 13026, "数据库未初始化")
+		return
+	}
+	versionNo := safePathSegment(c.Param("versionNo"))
+	if versionNo == "" {
+		response.Fail(c, 13026, "版本号无效")
+		return
+	}
+	if err := deleteArtifactVersion(versionNo); err != nil {
+		response.Fail(c, 13026, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"versionNo": versionNo})
+}
+
+func deleteArtifactVersion(versionNo string) error {
+	var version model.ArtifactVersion
+	if err := repository.DB.Where("version_no = ?", versionNo).First(&version).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("更新版本不存在")
+		}
+		return err
+	}
+	if hasRunningDownloadJob(versionNo) {
+		return fmt.Errorf("下载任务正在执行，不能删除")
+	}
+	var deployBatchCount int64
+	if err := repository.DB.Model(&model.ArtifactDeployBatch{}).Where("version_no = ?", versionNo).Count(&deployBatchCount).Error; err != nil {
+		return err
+	}
+	if deployBatchCount > 0 {
+		return fmt.Errorf("该版本已有部署批次，不能删除")
+	}
+
+	workspaceDir, err := artifactVersionWorkspaceDir(version)
+	if err != nil {
+		return err
+	}
+	if workspaceDir != "" {
+		if err := os.RemoveAll(workspaceDir); err != nil {
+			return fmt.Errorf("删除版本目录失败: %w", err)
+		}
+	}
+
+	err = repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("version_no = ?", versionNo).Delete(&model.ArtifactVersionItem{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("batch_id = ?", versionNo).Delete(&model.DownloadJob{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("version_no = ?", versionNo).Delete(&model.ArtifactVersion{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	removeDownloadJobsFromMemoryByBatchID(versionNo)
+	return nil
+}
+
+func artifactVersionWorkspaceDir(version model.ArtifactVersion) (string, error) {
+	root, err := batchUploadRootDir()
+	if err != nil {
+		return "", err
+	}
+	rawDir := firstNonEmptyString(version.LocalDir, version.TargetPath)
+	if strings.TrimSpace(rawDir) == "" {
+		return "", nil
+	}
+	absDir, err := filepath.Abs(rawDir)
+	if err != nil {
+		return "", err
+	}
+	if !isPathInside(root, absDir) {
+		return "", fmt.Errorf("版本目录超出批量上传工作区")
+	}
+	rel, err := filepath.Rel(root, absDir)
+	if err != nil {
+		return "", err
+	}
+	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+	if len(parts) >= 2 {
+		switch parts[0] {
+		case "upload", "local", "download", "artifact":
+			return filepath.Join(root, parts[0], parts[1]), nil
+		}
+	}
+	return absDir, nil
 }
 
 func (h *BatchDeployHandler) DeleteArtifactVersionItem(c *gin.Context) {
@@ -469,14 +565,7 @@ func backfillArtifactVersionsFromWorkspace() error {
 		if batch.BatchID == "" || batch.TargetPath == "" {
 			continue
 		}
-		var count int64
-		if err := repository.DB.Model(&model.ArtifactVersion{}).Where("version_no = ?", batch.BatchID).Count(&count).Error; err != nil {
-			return err
-		}
-		if count > 0 {
-			continue
-		}
-		if _, _, err := persistArtifactVersionFromDir(artifactVersionInput{
+		input := artifactVersionInput{
 			VersionNo:   batch.BatchID,
 			SourceType:  batch.SourceType,
 			SourceLabel: batch.SourceLabel,
@@ -484,11 +573,45 @@ func backfillArtifactVersionsFromWorkspace() error {
 			LocalDir:    batch.LocalDir,
 			TargetPath:  batch.TargetPath,
 			Error:       batch.Error,
-		}); err != nil {
+		}
+		var existing model.ArtifactVersion
+		err := repository.DB.Where("version_no = ?", batch.BatchID).First(&existing).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if _, _, err := persistArtifactVersionFromDir(input); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !shouldRefreshArtifactVersionFromBatch(existing, batch, input.Status) {
+			continue
+		}
+		if _, _, err := persistArtifactVersionFromDir(input); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func shouldRefreshArtifactVersionFromBatch(version model.ArtifactVersion, batch artifactSourceBatch, nextStatus string) bool {
+	if strings.TrimSpace(version.TargetPath) == "" || strings.TrimSpace(version.LocalDir) == "" {
+		return true
+	}
+	if batch.Count > 0 && (version.Count != batch.Count || version.DeployableCount == 0) {
+		return true
+	}
+	if nextStatus == "available" {
+		switch version.Status {
+		case "", "collecting", "running", "pending":
+			return true
+		}
+	}
+	if version.Status == "" && nextStatus != "" {
+		return true
+	}
+	return false
 }
 
 func artifactVersionStatusFromBatch(batch artifactSourceBatch) string {
@@ -767,7 +890,7 @@ func (h *BatchDeployHandler) GetLatestDownloadJob(c *gin.Context) {
 			Order("updated_at DESC").
 			First(&dbJob).Error
 		if err == nil {
-			response.OK(c, downloadJobFromModel(dbJob))
+			response.OK(c, hydrateDownloadJobFromWorkspace(downloadJobFromModel(dbJob)))
 			return
 		}
 	}
@@ -962,6 +1085,13 @@ func hasRunningDownloadJob(batchID string) bool {
 }
 
 func removeDownloadJobsByBatchID(batchID string) {
+	removeDownloadJobsFromMemoryByBatchID(batchID)
+	if repository.DB != nil {
+		repository.DB.Where("batch_id = ?", batchID).Delete(&model.DownloadJob{})
+	}
+}
+
+func removeDownloadJobsFromMemoryByBatchID(batchID string) {
 	downloadJobStore.Lock()
 	for id, job := range downloadJobStore.items {
 		if job.BatchID == batchID {
@@ -969,9 +1099,6 @@ func removeDownloadJobsByBatchID(batchID string) {
 		}
 	}
 	downloadJobStore.Unlock()
-	if repository.DB != nil {
-		repository.DB.Where("batch_id = ?", batchID).Delete(&model.DownloadJob{})
-	}
 }
 
 func (h *BatchDeployHandler) CancelDownloadJob(c *gin.Context) {
@@ -1214,6 +1341,65 @@ func downloadJobFromModel(dbJob model.DownloadJob) downloadJob {
 	}
 }
 
+func hydrateDownloadJobFromWorkspace(job downloadJob) downloadJob {
+	if strings.TrimSpace(job.LocalDir) == "" {
+		return job
+	}
+	if strings.TrimSpace(job.TargetPath) == "" {
+		job.TargetPath = latestDownloadTargetDir(job.LocalDir)
+	}
+	if job.TargetPath == "" {
+		return job
+	}
+	if job.Status != "success" && job.Status != "failed" && job.Status != "canceled" {
+		return job
+	}
+	files, err := collectArtifactFilesFromDir(job.TargetPath)
+	if err != nil {
+		if job.Error == "" && job.Status == "success" {
+			job.Error = err.Error()
+		}
+		return job
+	}
+	sort.Strings(files)
+	job.Files = files
+	job.Count = len(files)
+	if job.TotalFiles == 0 {
+		job.TotalFiles = len(files)
+	}
+	if job.CompletedFiles == 0 && job.Status == "success" {
+		job.CompletedFiles = len(files)
+	}
+	if len(job.Items) == 0 {
+		job.Items = downloadJobItemsFromFiles(job, files)
+	}
+	return job
+}
+
+func downloadJobItemsFromFiles(job downloadJob, files []string) []downloadJobItem {
+	items := make([]downloadJobItem, 0, len(files))
+	for _, fileName := range files {
+		localPath := filepath.Join(job.TargetPath, fileName)
+		var size int64
+		if info, err := os.Stat(localPath); err == nil {
+			size = info.Size()
+		}
+		remotePath := fileName
+		if strings.TrimSpace(job.RemotePath) != "" {
+			remotePath = path.Join(job.RemotePath, filepath.ToSlash(fileName))
+		}
+		items = append(items, downloadJobItem{
+			Name:       fileName,
+			RemotePath: remotePath,
+			LocalPath:  localPath,
+			Size:       size,
+			Status:     "success",
+			Artifact:   true,
+		})
+	}
+	return items
+}
+
 func latestDownloadJobFromWorkspace(batchRoot string) (downloadJob, bool) {
 	downloadRoot := filepath.Join(batchRoot, "download")
 	entries, err := os.ReadDir(downloadRoot)
@@ -1253,19 +1439,23 @@ func latestDownloadJobFromWorkspace(batchRoot string) (downloadJob, bool) {
 		files = nil
 		errorMessage = err.Error()
 	}
-	return downloadJob{
-		ID:         latestName,
-		Status:     "success",
-		LocalDir:   latestDir,
-		TargetPath: targetPath,
-		BatchID:    latestName,
-		Files:      files,
-		Count:      len(files),
-		Error:      errorMessage,
-		HasPartial: false,
-		StartedAt:  latestTime,
-		UpdatedAt:  latestTime,
-	}, true
+	job := downloadJob{
+		ID:             latestName,
+		Status:         "success",
+		LocalDir:       latestDir,
+		TargetPath:     targetPath,
+		BatchID:        latestName,
+		Files:          files,
+		Count:          len(files),
+		TotalFiles:     len(files),
+		CompletedFiles: len(files),
+		Error:          errorMessage,
+		HasPartial:     false,
+		StartedAt:      latestTime,
+		UpdatedAt:      latestTime,
+	}
+	job.Items = downloadJobItemsFromFiles(job, files)
+	return job, true
 }
 
 func listDownloadBatches(batchRoot string, jobs []model.DownloadJob) ([]downloadJob, error) {
@@ -1323,6 +1513,7 @@ func listDownloadBatches(batchRoot string, jobs []model.DownloadJob) ([]download
 				job.Error = err.Error()
 			}
 		}
+		job = hydrateDownloadJobFromWorkspace(job)
 		batches = append(batches, job)
 		seen[batchID] = true
 	}
@@ -1338,6 +1529,7 @@ func listDownloadBatches(batchRoot string, jobs []model.DownloadJob) ([]download
 				job.TargetPath = latestDownloadTargetDir(job.LocalDir)
 			}
 		}
+		job = hydrateDownloadJobFromWorkspace(job)
 		batches = append(batches, job)
 	}
 
@@ -1559,12 +1751,21 @@ func refreshArtifactVersion(version model.ArtifactVersion) (model.ArtifactVersio
 		VersionNo:   version.VersionNo,
 		SourceType:  version.SourceType,
 		SourceLabel: version.SourceLabel,
-		Status:      version.Status,
+		Status:      refreshArtifactVersionStatus(version.Status),
 		LocalDir:    version.LocalDir,
 		TargetPath:  firstNonEmptyString(version.TargetPath, version.LocalDir),
 		RemotePath:  version.RemotePath,
 		Error:       version.Error,
 	})
+}
+
+func refreshArtifactVersionStatus(status string) string {
+	switch status {
+	case "", "collecting", "running", "pending":
+		return "available"
+	default:
+		return status
+	}
 }
 
 func firstNonEmptyString(values ...string) string {

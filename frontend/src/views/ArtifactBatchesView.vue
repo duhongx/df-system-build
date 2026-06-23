@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { listArtifactVersions, type ArtifactVersion } from '../api/batch-deploy'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { deleteArtifactVersion, listArtifactVersions, type ArtifactVersion } from '../api/batch-deploy'
 import { formatTime } from '../utils/time'
 
 const router = useRouter()
@@ -50,6 +51,26 @@ function sourceTypeText(type: string) {
 
 function showDetail(batch: ArtifactVersion) {
   router.push(`/artifacts/versions/${encodeURIComponent(batch.versionNo)}`)
+}
+
+async function deleteVersion(batch: ArtifactVersion) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除版本 ${batch.versionNo}？这会清理工作区文件和版本记录，已有部署批次或正在下载的版本不能删除。`,
+      '删除更新版本',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+      },
+    )
+    await deleteArtifactVersion(batch.versionNo)
+    ElMessage.success('已删除更新版本')
+    await loadBatches()
+  } catch (err) {
+    if (err === 'cancel' || err === 'close') return
+    throw err
+  }
 }
 </script>
 
@@ -101,9 +122,10 @@ function showDetail(batch: ArtifactVersion) {
         <el-table-column label="更新时间" width="180">
           <template #default="{ row }">{{ formatTime(row.updatedAt) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="130" fixed="right">
+        <el-table-column label="操作" width="170" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="showDetail(row)">详情</el-button>
+            <el-button link type="danger" @click="deleteVersion(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>

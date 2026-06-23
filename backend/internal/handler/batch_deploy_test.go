@@ -470,9 +470,8 @@ func TestLatestDownloadJobFromWorkspaceRestoresNewestDownloadedDirectory(t *test
 	if err := os.MkdirAll(oldTarget, 0755); err != nil {
 		t.Fatalf("mkdir old target: %v", err)
 	}
-	if err := os.MkdirAll(newTarget, 0755); err != nil {
-		t.Fatalf("mkdir new target: %v", err)
-	}
+	mustCreateZip(t, filepath.Join(oldTarget, "old-service.jar"))
+	mustCreateZip(t, filepath.Join(newTarget, "his-gateway.jar"))
 	if err := os.MkdirAll(incompleteTarget, 0755); err != nil {
 		t.Fatalf("mkdir incomplete target: %v", err)
 	}
@@ -498,6 +497,9 @@ func TestLatestDownloadJobFromWorkspaceRestoresNewestDownloadedDirectory(t *test
 	}
 	if job.BatchID != "batch-new" || job.LocalDir != filepath.Join(root, "download", "batch-new") || job.TargetPath != newTarget {
 		t.Fatalf("unexpected restored job: %#v", job)
+	}
+	if job.Count != 1 || len(job.Items) != 1 || job.Items[0].Name != "his-gateway.jar" || job.Items[0].Status != "success" {
+		t.Fatalf("expected latest restored job to expose downloaded files, got %#v", job)
 	}
 }
 
@@ -542,6 +544,9 @@ func TestListDownloadBatchesMergesFilesystemAndJobStatus(t *testing.T) {
 	success := byID["batch-success"]
 	if success.Status != "success" || success.Count != 1 || success.TargetPath != successTarget || success.HasPartial {
 		t.Fatalf("unexpected success batch: %#v", success)
+	}
+	if len(success.Items) != 1 || success.Items[0].Name != "his-gateway.jar" || success.Items[0].Status != "success" {
+		t.Fatalf("expected success batch to expose downloaded file items: %#v", success)
 	}
 	failed := byID["batch-failed"]
 	if failed.Status != "failed" || !failed.HasPartial || failed.Error != "network interrupted" || failed.CompletedFiles != 4 {
@@ -1223,6 +1228,150 @@ func TestListArtifactVersionsBackfillsExistingWorkspaceBatches(t *testing.T) {
 	}
 }
 
+func TestListArtifactVersionsRepairsCollectingDownloadVersionFromWorkspace(t *testing.T) {
+	setupArtifactVersionTestDB(t)
+	root, err := batchUploadRootDir()
+	if err != nil {
+		t.Fatalf("batch root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	_ = os.RemoveAll(root)
+
+	localDir := filepath.Join(root, "download", "batch-repair")
+	targetDir := filepath.Join(localDir, "HIS更新")
+	mustCreateZip(t, filepath.Join(targetDir, "his-gateway.jar"))
+	if err := repository.DB.Create(&model.ArtifactVersion{
+		VersionNo:   "batch-repair",
+		SourceType:  "download",
+		SourceLabel: "服务器下载",
+		Status:      "collecting",
+		LocalDir:    localDir,
+		TargetPath:  targetDir,
+	}).Error; err != nil {
+		t.Fatalf("seed collecting artifact version: %v", err)
+	}
+	if err := repository.DB.Create(&model.DownloadJob{
+		ID:             "job-repair",
+		Status:         "success",
+		RemotePath:     "/remote/HIS更新",
+		LocalDir:       localDir,
+		TargetPath:     targetDir,
+		BatchID:        "batch-repair",
+		TotalFiles:     1,
+		CompletedFiles: 1,
+		StartedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("seed download job: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	req := httptest.NewRequest(http.MethodGet, "/batch-deploy/artifact-versions", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	NewBatchDeployHandler().ListArtifactVersions(c)
+
+	var payload struct {
+		Code int `json:"code"`
+		Data struct {
+			Versions []model.ArtifactVersion `json:"versions"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Code != 0 || len(payload.Data.Versions) != 1 {
+		t.Fatalf("expected one repaired version, got %#v", payload)
+	}
+	version := payload.Data.Versions[0]
+	if version.VersionNo != "batch-repair" || version.Status != "available" || version.DeployableCount != 1 {
+		t.Fatalf("expected repaired available version, got %#v", version)
+	}
+
+	var stored model.ArtifactVersion
+	if err := repository.DB.Where("version_no = ?", "batch-repair").First(&stored).Error; err != nil {
+		t.Fatalf("load repaired version: %v", err)
+	}
+	if stored.Status != "available" || stored.DeployableCount != 1 {
+		t.Fatalf("expected persisted repair, got %#v", stored)
+	}
+}
+
+func TestDeleteArtifactVersionRemovesDownloadWorkspaceAndRecords(t *testing.T) {
+	setupArtifactVersionTestDB(t)
+	root, err := batchUploadRootDir()
+	if err != nil {
+		t.Fatalf("batch root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	_ = os.RemoveAll(root)
+
+	localDir := filepath.Join(root, "download", "batch-delete")
+	targetDir := filepath.Join(localDir, "HIS更新")
+	mustCreateZip(t, filepath.Join(targetDir, "his-gateway.jar"))
+	if _, _, err := persistArtifactVersionFromDir(artifactVersionInput{
+		VersionNo:   "batch-delete",
+		SourceType:  "download",
+		SourceLabel: "服务器下载",
+		Status:      "available",
+		LocalDir:    localDir,
+		TargetPath:  targetDir,
+	}); err != nil {
+		t.Fatalf("persist artifact version: %v", err)
+	}
+	if err := repository.DB.Create(&model.DownloadJob{
+		ID:             "job-delete",
+		Status:         "success",
+		RemotePath:     "/remote/HIS更新",
+		LocalDir:       localDir,
+		TargetPath:     targetDir,
+		BatchID:        "batch-delete",
+		TotalFiles:     1,
+		CompletedFiles: 1,
+		StartedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("seed download job: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	req := httptest.NewRequest(http.MethodDelete, "/batch-deploy/artifact-versions/batch-delete", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "versionNo", Value: "batch-delete"}}
+	c.Request = req
+
+	NewBatchDeployHandler().DeleteArtifactVersion(c)
+
+	var payload struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Code != 0 {
+		t.Fatalf("expected delete success, got status=%d body=%s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(localDir); !os.IsNotExist(err) {
+		t.Fatalf("expected local dir removed, stat err=%v", err)
+	}
+	var versionCount, itemCount, jobCount int64
+	if err := repository.DB.Model(&model.ArtifactVersion{}).Where("version_no = ?", "batch-delete").Count(&versionCount).Error; err != nil {
+		t.Fatalf("count versions: %v", err)
+	}
+	if err := repository.DB.Model(&model.ArtifactVersionItem{}).Where("version_no = ?", "batch-delete").Count(&itemCount).Error; err != nil {
+		t.Fatalf("count items: %v", err)
+	}
+	if err := repository.DB.Model(&model.DownloadJob{}).Where("batch_id = ?", "batch-delete").Count(&jobCount).Error; err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if versionCount != 0 || itemCount != 0 || jobCount != 0 {
+		t.Fatalf("expected all records removed, versions=%d items=%d jobs=%d", versionCount, itemCount, jobCount)
+	}
+}
+
 func setupArtifactVersionTestDB(t *testing.T) {
 	t.Helper()
 	if logger.Log == nil {
@@ -1231,7 +1380,7 @@ func setupArtifactVersionTestDB(t *testing.T) {
 	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
 		t.Fatalf("init db: %v", err)
 	}
-	if err := repository.DB.AutoMigrate(&model.Application{}, &model.ArtifactVersion{}, &model.ArtifactVersionItem{}, &model.ArtifactDeployBatch{}, &model.ArtifactDeployRecord{}, &model.DeploymentRuntimeVersion{}); err != nil {
+	if err := repository.DB.AutoMigrate(&model.Application{}, &model.ArtifactVersion{}, &model.ArtifactVersionItem{}, &model.ArtifactDeployBatch{}, &model.ArtifactDeployRecord{}, &model.DeploymentRuntimeVersion{}, &model.DownloadJob{}); err != nil {
 		t.Fatalf("migrate artifact version tables: %v", err)
 	}
 	apps := []model.Application{

@@ -193,6 +193,9 @@ export const listArtifactVersions = (deployable = false) =>
 export const getArtifactVersion = (versionNo: string) =>
   request.get<any, { version: ArtifactVersion; items: ArtifactVersionItem[] }>(`/batch-deploy/artifact-versions/${encodeURIComponent(versionNo)}`)
 
+export const deleteArtifactVersion = (versionNo: string) =>
+  request.delete<any, { versionNo: string }>(`/batch-deploy/artifact-versions/${encodeURIComponent(versionNo)}`)
+
 export const deleteArtifactVersionItem = (versionNo: string, itemId: number) =>
   request.delete<any, { version: ArtifactVersion; items: ArtifactVersionItem[] }>(`/batch-deploy/artifact-versions/${encodeURIComponent(versionNo)}/items/${itemId}`)
 
