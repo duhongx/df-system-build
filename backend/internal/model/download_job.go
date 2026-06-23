@@ -12,6 +12,7 @@ type DownloadJob struct {
 	TargetPath     string    `gorm:"size:1024" json:"targetPath"`
 	BatchID        string    `gorm:"size:64;index" json:"batchId"`
 	FilesJSON      string    `gorm:"type:text" json:"-"`
+	ItemsJSON      string    `gorm:"type:text" json:"-"`
 	Count          int       `json:"count"`
 	TotalFiles     int       `json:"totalFiles"`
 	CompletedFiles int       `json:"completedFiles"`

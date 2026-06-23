@@ -235,6 +235,83 @@ func TestDownloadRemoteDirToLocalReportsProgress(t *testing.T) {
 	}
 }
 
+func TestDownloadRemoteDirToLocalReportsFileItemStatuses(t *testing.T) {
+	fs := fakeRemoteFS{
+		dirs: map[string][]fakeRemoteEntry{
+			"/release": {
+				{name: "his-gateway.jar"},
+				{name: "nested", dir: true},
+			},
+			"/release/nested": {
+				{name: "web-main.zip"},
+				{name: "notes.txt"},
+			},
+		},
+		files: map[string]string{
+			"/release/his-gateway.jar":     mustZipString(t),
+			"/release/nested/web-main.zip": mustZipString(t),
+			"/release/nested/notes.txt":    "keep notes",
+		},
+	}
+
+	var events []downloadProgress
+	_, _, err := downloadRemoteDirToLocalWithProgress(fs, "/release", t.TempDir(), func(progress downloadProgress) {
+		events = append(events, progress)
+	})
+	if err != nil {
+		t.Fatalf("download remote dir with progress: %v", err)
+	}
+	last := events[len(events)-1]
+	if len(last.Items) != 3 {
+		t.Fatalf("expected 3 file item statuses, got %#v", last.Items)
+	}
+	for _, item := range last.Items {
+		if item.Status != "success" {
+			t.Fatalf("expected all downloaded items to be success, got %#v", last.Items)
+		}
+		if item.RemotePath == "" || item.LocalPath == "" {
+			t.Fatalf("expected item paths to be populated, got %#v", item)
+		}
+	}
+}
+
+func TestDownloadRemoteDirToLocalCancellationMarksCurrentItemCanceled(t *testing.T) {
+	fs := fakeRemoteFS{
+		dirs: map[string][]fakeRemoteEntry{
+			"/release": {
+				{name: "his-gateway.jar"},
+				{name: "web-main.zip"},
+			},
+		},
+		files: map[string]string{
+			"/release/his-gateway.jar": mustZipString(t),
+			"/release/web-main.zip":    mustZipString(t),
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var events []downloadProgress
+	_, _, err := downloadRemoteDirToLocalWithProgressContext(ctx, fs, "/release", t.TempDir(), func(progress downloadProgress) {
+		events = append(events, progress)
+		if progress.CurrentPath == "/release/his-gateway.jar" {
+			cancel()
+		}
+	})
+	if !errors.Is(err, errDownloadCanceled) {
+		t.Fatalf("expected cancellation error, got %v", err)
+	}
+	last := events[len(events)-1]
+	if len(last.Items) != 2 {
+		t.Fatalf("expected 2 file item statuses, got %#v", last.Items)
+	}
+	if last.Items[0].Status != "canceled" {
+		t.Fatalf("expected current item to be canceled, got %#v", last.Items)
+	}
+	if last.Items[1].Status != "pending" {
+		t.Fatalf("expected untouched item to remain pending, got %#v", last.Items)
+	}
+}
+
 func TestListArtifactSourceBatchesScansUploadDownloadAndArtifactWorkspaces(t *testing.T) {
 	root, err := batchUploadRootDir()
 	if err != nil {
@@ -326,8 +403,12 @@ func TestDownloadJobPersistsAndRestoresActiveJob(t *testing.T) {
 		TotalFiles:     3,
 		CompletedFiles: 1,
 		CurrentPath:    "/release/his-gateway.jar",
-		StartedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		Items: []downloadJobItem{
+			{Name: "his-gateway.jar", RemotePath: "/release/his-gateway.jar", LocalPath: "/tmp/batch-download/his-gateway.jar", Status: "running", Artifact: true},
+			{Name: "web-main.zip", RemotePath: "/release/web-main.zip", LocalPath: "/tmp/batch-download/web-main.zip", Status: "pending", Artifact: true},
+		},
+		StartedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	persistDownloadJob(job)
 
@@ -338,6 +419,9 @@ func TestDownloadJobPersistsAndRestoresActiveJob(t *testing.T) {
 	restored := downloadJobFromModel(dbJob)
 	if restored.Status != "running" || restored.CurrentPath != job.CurrentPath || restored.CompletedFiles != 1 {
 		t.Fatalf("unexpected restored job: %#v", restored)
+	}
+	if len(restored.Items) != 2 || restored.Items[0].Status != "running" || restored.Items[1].Status != "pending" {
+		t.Fatalf("expected restored job items, got %#v", restored.Items)
 	}
 }
 

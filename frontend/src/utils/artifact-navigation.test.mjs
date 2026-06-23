@@ -10,6 +10,7 @@ const batchDeploy = fs.readFileSync(new URL('../views/BatchDeployView.vue', impo
 const artifactCollect = fs.readFileSync(new URL('../views/ArtifactCollectView.vue', import.meta.url), 'utf8')
 const kubernetesView = fs.readFileSync(new URL('../views/KubernetesView.vue', import.meta.url), 'utf8')
 const kubernetesApi = fs.readFileSync(new URL('../api/kubernetes.ts', import.meta.url), 'utf8')
+const batchDeployApi = fs.readFileSync(new URL('../api/batch-deploy.ts', import.meta.url), 'utf8')
 
 assert.match(layout, /<span>制品管理<\/span>/, 'sidebar should expose 制品管理 as a menu group')
 assert.doesNotMatch(layout, /<template #title>制品记录<\/template>/, 'sidebar should not expose 制品记录 as a separate entry')
@@ -70,7 +71,11 @@ assert.match(artifactCollect, /v-if="importMode === 'download'"/, 'artifact impo
 assert.match(artifactCollect, /远程目录/, 'server download mode should show the remote source directory')
 assert.match(artifactCollect, /本地目录/, 'server download mode should show the local target directory')
 assert.match(artifactCollect, /downloadStatusText|downloadPercent/, 'server download mode should expose visible download progress')
+assert.match(artifactCollect, /cancelDownloadJob/, 'server download mode should allow canceling the active download task')
+assert.match(artifactCollect, /downloadFileRows/, 'server download mode should render current task file status rows')
+assert.match(artifactCollect, /下载状态/, 'download file table should expose each file status')
 assert.doesNotMatch(artifactCollect, /collect-grid/, 'artifact import should not show upload and download panels side by side')
+assert.match(batchDeployApi, /download-remote-dir\/cancel/, 'batch deploy API should expose download cancellation')
 
 assert.match(kubernetesApi, /syncK8sDeploymentRuntimeVersions/, 'kubernetes API should expose runtime version sync')
 assert.match(kubernetesView, /deploymentRuntimeVersions/, 'deployment page should keep cached runtime versions from the API')

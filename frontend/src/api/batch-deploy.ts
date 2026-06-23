@@ -33,14 +33,25 @@ export const importRemoteDir = (serverId: number, path: string) =>
 export const listLocalBrowser = (path?: string) =>
   request.get<any, { root: string; path: string; files: FileItem[] }>('/batch-deploy/local-browser', { params: path ? { path } : {} })
 
+export interface DownloadJobItem {
+  name: string
+  remotePath: string
+  localPath: string
+  size: number
+  status: 'pending' | 'running' | 'success' | 'failed' | 'canceled' | string
+  error?: string
+  artifact: boolean
+}
+
 export interface DownloadJob {
   id: string
-  status: 'pending' | 'running' | 'success' | 'failed'
+  status: 'pending' | 'running' | 'success' | 'failed' | 'canceled'
   remotePath: string
   localDir: string
   targetPath: string
   batchId: string
   files: string[]
+  items: DownloadJobItem[]
   count: number
   totalFiles: number
   completedFiles: number
@@ -160,6 +171,9 @@ export const startDownloadRemoteDir = (remotePath: string, localPath?: string) =
 
 export const getDownloadProgress = (jobId: string) =>
   request.get<any, DownloadJob>(`/batch-deploy/download-remote-dir/progress/${jobId}`)
+
+export const cancelDownloadJob = (jobId: string) =>
+  request.post<any, DownloadJob>(`/batch-deploy/download-remote-dir/cancel/${jobId}`)
 
 export const getActiveDownloadJob = () =>
   request.get<any, DownloadJob | null>('/batch-deploy/download-remote-dir/active')

@@ -3,11 +3,13 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
+  cancelDownloadJob,
   getActiveDownloadJob,
   getDownloadProgress,
   listPackageDownloadDir,
   startDownloadRemoteDir,
   type DownloadJob,
+  type DownloadJobItem,
 } from '../api/batch-deploy'
 import { getSettings } from '../api/settings'
 import type { FileItem } from '../api/server-mgmt'
@@ -48,7 +50,19 @@ const downloadPercent = computed(() => {
   return Math.min(100, Math.round((job.completedFiles / job.totalFiles) * 100))
 })
 
-const downloadedFiles = computed(() => activeDownloadJob.value?.files || [])
+const downloadFileRows = computed<DownloadJobItem[]>(() => {
+  const job = activeDownloadJob.value
+  if (!job) return []
+  if (job.items?.length) return job.items
+  return (job.files || []).map(name => ({
+    name,
+    remotePath: '',
+    localPath: '',
+    size: 0,
+    status: 'success',
+    artifact: true,
+  }))
+})
 
 const localTargetPath = computed(() => {
   const job = activeDownloadJob.value
@@ -153,7 +167,24 @@ async function pollDownload(jobId: string) {
     ElMessage.error(job.error || '下载失败')
     return
   }
+  if (job.status === 'canceled') {
+    ElMessage.warning(job.error || '下载任务已取消')
+    return
+  }
   pollTimer = window.setTimeout(() => pollDownload(jobId), 1000)
+}
+
+async function handleCancelDownload() {
+  const job = activeDownloadJob.value
+  if (!job || (job.status !== 'pending' && job.status !== 'running')) return
+  try {
+    const canceled = await cancelDownloadJob(job.id)
+    activeDownloadJob.value = canceled
+    if (pollTimer) window.clearTimeout(pollTimer)
+    ElMessage.warning('已取消下载任务')
+  } catch {
+    // handled globally
+  }
 }
 
 function downloadStatusText(status: DownloadJob['status']) {
@@ -161,7 +192,38 @@ function downloadStatusText(status: DownloadJob['status']) {
   if (status === 'running') return '正在下载'
   if (status === 'success') return '下载完成'
   if (status === 'failed') return '下载失败'
+  if (status === 'canceled') return '已取消'
   return status
+}
+
+function downloadItemStatusText(status: string) {
+  if (status === 'pending') return '等待下载'
+  if (status === 'running') return '正在下载'
+  if (status === 'success') return '已完成'
+  if (status === 'failed') return '失败'
+  if (status === 'canceled') return '已取消'
+  return status || '-'
+}
+
+function downloadItemTagType(status: string) {
+  if (status === 'success') return 'success'
+  if (status === 'failed') return 'danger'
+  if (status === 'running') return 'warning'
+  return 'info'
+}
+
+function downloadProgressStatus(status: DownloadJob['status']) {
+  if (status === 'success') return 'success'
+  if (status === 'failed' || status === 'canceled') return 'exception'
+  return undefined
+}
+
+function formatDownloadSize(size?: number) {
+  if (!size || size < 0) return '-'
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`
+  return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`
 }
 
 function chooseFiles() {
@@ -309,12 +371,23 @@ async function uploadEntries(entries: UploadEntry[]) {
             <div v-if="activeDownloadJob" class="download-status">
               <div class="download-head">
                 <span>{{ downloadStatusText(activeDownloadJob.status) }}</span>
-                <span>{{ activeDownloadJob.completedFiles }} / {{ activeDownloadJob.totalFiles || '-' }}</span>
+                <div class="download-head-actions">
+                  <span>{{ activeDownloadJob.completedFiles }} / {{ activeDownloadJob.totalFiles || '-' }}</span>
+                  <el-button
+                    v-if="activeDownloadJob.status === 'pending' || activeDownloadJob.status === 'running'"
+                    link
+                    type="danger"
+                    size="small"
+                    @click="handleCancelDownload"
+                  >
+                    取消下载
+                  </el-button>
+                </div>
               </div>
               <el-progress
                 :percentage="downloadPercent"
                 :indeterminate="activeDownloadJob.status === 'running' && !activeDownloadJob.totalFiles"
-                :status="activeDownloadJob.status === 'success' ? 'success' : activeDownloadJob.status === 'failed' ? 'exception' : undefined"
+                :status="downloadProgressStatus(activeDownloadJob.status)"
               />
               <div class="download-sub">本地目录：{{ localTargetPath }}</div>
               <div class="download-sub">当前文件：{{ activeDownloadJob.currentPath || activeDownloadJob.remotePath }}</div>
@@ -323,13 +396,31 @@ async function uploadEntries(entries: UploadEntry[]) {
             <div v-else class="local-empty">
               从左侧选择远程目录并点击下载后，这里会显示本地目标目录、下载进度和已下载文件。
             </div>
-            <el-table :data="downloadedFiles" border stripe size="small" height="330" empty-text="暂无已下载文件">
-              <el-table-column label="已下载文件" min-width="220" show-overflow-tooltip>
+            <el-table :data="downloadFileRows" border stripe size="small" height="330" empty-text="当前任务暂无文件">
+              <el-table-column label="文件名" min-width="160" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span class="file-name">
                     <el-icon color="#909399"><Document /></el-icon>
-                    {{ row }}
+                    {{ row.name }}
                   </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="下载状态" width="96">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="downloadItemTagType(row.status)">
+                    {{ downloadItemStatusText(row.status) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="大小" width="90">
+                <template #default="{ row }">{{ formatDownloadSize(row.size) }}</template>
+              </el-table-column>
+              <el-table-column label="远程路径" min-width="220" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.remotePath || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="错误" min-width="180" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span :class="{ 'download-error-inline': row.error }">{{ row.error || '-' }}</span>
                 </template>
               </el-table-column>
             </el-table>
@@ -360,9 +451,11 @@ async function uploadEntries(entries: UploadEntry[]) {
 .column-title { height: 36px; display: flex; align-items: center; font-size: 14px; font-weight: 600; color: #303133; }
 .local-title { justify-content: space-between; }
 .download-status { border: 1px solid #d9ecff; background: #f8fbff; border-radius: 6px; padding: 10px; margin-bottom: 10px; }
-.download-head { display: flex; justify-content: space-between; font-size: 12px; color: #606266; margin-bottom: 6px; }
+.download-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 12px; color: #606266; margin-bottom: 6px; }
+.download-head-actions { display: inline-flex; align-items: center; gap: 10px; }
 .download-sub { margin-top: 6px; font-size: 12px; color: #909399; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .download-error { margin-top: 6px; font-size: 12px; color: #f56c6c; }
+.download-error-inline { color: #f56c6c; }
 .local-empty { min-height: 86px; display: flex; align-items: center; justify-content: center; text-align: center; color: #909399; font-size: 12px; border: 1px dashed #dcdfe6; border-radius: 6px; background: #fbfcff; padding: 12px; margin-bottom: 10px; }
 .path-bar { min-height: 38px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 12px; border: 1px solid #ebeef5; border-bottom: 0; padding: 7px 10px; }
 .crumb { cursor: pointer; color: #409eff; }
