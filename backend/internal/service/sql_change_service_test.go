@@ -218,6 +218,34 @@ func TestInferSQLSchemaFromQualifiedStatements(t *testing.T) {
 	}
 }
 
+func TestSQLFileExecuteRouteStartsBackgroundJob(t *testing.T) {
+	source, err := os.ReadFile("../handler/postgresql.go")
+	if err != nil {
+		t.Fatalf("read postgresql handler source: %v", err)
+	}
+	content := string(source)
+	if !strings.Contains(content, "StartSQLFileExecution") {
+		t.Fatalf("SQL file execute route should start a background execution job")
+	}
+	if strings.Contains(content, "ExecuteSQLFileWithOptions(c.Request.Context()") {
+		t.Fatalf("SQL file execute route must not run the whole file synchronously on the HTTP request context")
+	}
+}
+
+func TestSQLBatchExecuteRouteStartsBackgroundJob(t *testing.T) {
+	source, err := os.ReadFile("../handler/postgresql.go")
+	if err != nil {
+		t.Fatalf("read postgresql handler source: %v", err)
+	}
+	content := string(source)
+	if !strings.Contains(content, "StartSQLBatchExecution") {
+		t.Fatalf("SQL batch execute route should start a background execution job")
+	}
+	if strings.Contains(content, "ExecuteSQLBatch(c.Request.Context()") {
+		t.Fatalf("SQL batch execute route must not run all files synchronously on the HTTP request context")
+	}
+}
+
 func TestParseCreateOrReplaceViewRef(t *testing.T) {
 	ref := parseCreateOrReplaceViewRef(`CREATE OR REPLACE VIEW "his"."v_patient" AS SELECT 1`, "public")
 
@@ -920,7 +948,7 @@ func TestParseSQLBatchRollsBackWhenOneFileFails(t *testing.T) {
 
 func TestExecuteSQLBatchPersistsFileLevelErrors(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
-	batch := model.SQLChangeBatch{BatchName: "file-error", ExecuteStatus: "PENDING", TotalFiles: 1}
+	batch := model.SQLChangeBatch{BatchName: "file-error", ExecuteStatus: "PENDING", TotalFiles: 2}
 	if err := repository.DB.Create(&batch).Error; err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
@@ -928,9 +956,17 @@ func TestExecuteSQLBatchPersistsFileLevelErrors(t *testing.T) {
 	if err := repository.DB.Create(&file).Error; err != nil {
 		t.Fatalf("create file: %v", err)
 	}
+	nextFile := model.SQLChangeFile{BatchID: batch.ID, BatchSortNo: 2, FileName: "missing-config-next.sql", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&nextFile).Error; err != nil {
+		t.Fatalf("create next file: %v", err)
+	}
 	stmt := model.SQLChangeStatement{FileID: file.ID, LineNumber: 1, SQLContent: "SELECT 1", SQLType: "UNKNOWN", RiskLevel: "LOW", ExecuteStatus: "PENDING"}
 	if err := repository.DB.Create(&stmt).Error; err != nil {
 		t.Fatalf("create statement: %v", err)
+	}
+	nextStmt := model.SQLChangeStatement{FileID: nextFile.ID, LineNumber: 1, SQLContent: "SELECT 2", SQLType: "UNKNOWN", RiskLevel: "LOW", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&nextStmt).Error; err != nil {
+		t.Fatalf("create next statement: %v", err)
 	}
 
 	_, _, _ = NewPostgreSQLService().ExecuteSQLBatch(context.Background(), batch.ID, "tester", SQLExecuteOptions{})
@@ -941,6 +977,13 @@ func TestExecuteSQLBatchPersistsFileLevelErrors(t *testing.T) {
 	}
 	if got.ExecuteStatus != "FAILED" || !strings.Contains(got.ExecuteMessage, "PostgreSQL 主机地址未配置") {
 		t.Fatalf("expected file-level error to be persisted, got %+v", got)
+	}
+	var gotNext model.SQLChangeFile
+	if err := repository.DB.First(&gotNext, nextFile.ID).Error; err != nil {
+		t.Fatalf("reload next file: %v", err)
+	}
+	if gotNext.ExecuteStatus != "FAILED" || !strings.Contains(gotNext.ExecuteMessage, "PostgreSQL 主机地址未配置") {
+		t.Fatalf("expected batch execution to continue and persist next file-level error, got %+v", gotNext)
 	}
 }
 

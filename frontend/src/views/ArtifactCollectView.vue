@@ -6,7 +6,6 @@ import {
   cancelDownloadJob,
   getActiveDownloadJob,
   getDownloadProgress,
-  getLatestDownloadJob,
   listDownloadBatches,
   listPackageDownloadDir,
   startDownloadRemoteDir,
@@ -28,6 +27,7 @@ const remoteLoading = ref(false)
 const remoteBasePath = ref('/')
 const remotePath = ref('/')
 const remoteFiles = ref<FileItem[]>([])
+const selectedRemoteRows = ref<FileItem[]>([])
 const packageConfigured = ref(false)
 const activeDownloadJob = ref<DownloadJob | null>(null)
 const downloadHistoryVisible = ref(false)
@@ -56,6 +56,15 @@ const downloadPercent = computed(() => {
   return Math.min(100, Math.round((job.completedFiles / job.totalFiles) * 100))
 })
 
+const isDownloadRunning = computed(() => {
+  const status = activeDownloadJob.value?.status
+  return status === 'pending' || status === 'running'
+})
+
+const selectedRemotePaths = computed(() => selectedRemoteRows.value.map(row => row.path))
+
+const canDownloadSelected = computed(() => selectedRemotePaths.value.length > 0 && !isDownloadRunning.value)
+
 const downloadFileRows = computed<DownloadJobItem[]>(() => {
   const job = activeDownloadJob.value
   if (!job) return []
@@ -69,6 +78,8 @@ const downloadFileRows = computed<DownloadJobItem[]>(() => {
     artifact: true,
   }))
 })
+
+const recentDownloadRows = computed(() => downloadHistoryRows.value.slice(0, 8))
 
 const localTargetPath = computed(() => {
   const job = activeDownloadJob.value
@@ -128,11 +139,8 @@ async function restoreActiveDownloadJob() {
       pollDownload(job.id)
       return
     }
-    const latestJob = await getLatestDownloadJob()
-    if (latestJob) {
-      activeDownloadJob.value = latestJob
-      importMode.value = 'download'
-    }
+    activeDownloadJob.value = null
+    await loadDownloadHistory()
   } catch {
     // Ignore restore failures; manual refresh still works.
   }
@@ -149,6 +157,7 @@ async function loadRemoteDir(path?: string) {
     remotePath.value = result.path
     remoteBasePath.value = result.basePath || remoteBasePath.value
     remoteFiles.value = result.files
+    selectedRemoteRows.value = []
   } finally {
     remoteLoading.value = false
   }
@@ -170,12 +179,29 @@ function handleRemoteNavigate(row: FileItem) {
   if (row.isDir) loadRemoteDir(row.path)
 }
 
+function handleRemoteSelectionChange(rows: FileItem[]) {
+  selectedRemoteRows.value = rows
+}
+
 async function handleRemoteDownload(row: FileItem) {
-  if (!row.isDir) return
+  const selectedPaths = row.isDir ? undefined : [row.path]
   try {
-    const job = await startDownloadRemoteDir(row.path)
+    const job = await startDownloadRemoteDir(row.isDir ? row.path : remotePath.value, undefined, selectedPaths)
     activeDownloadJob.value = job
-    ElMessage.info('下载任务已创建，可在本地目录查看进度')
+    ElMessage.info(row.isDir ? '目录下载任务已创建' : '文件下载任务已创建')
+    pollDownload(job.id)
+  } catch {
+    // handled globally
+  }
+}
+
+async function handleDownloadSelectedRemoteItems() {
+  if (!canDownloadSelected.value) return
+  const selectedCount = selectedRemotePaths.value.length
+  try {
+    const job = await startDownloadRemoteDir(remotePath.value, undefined, selectedRemotePaths.value)
+    activeDownloadJob.value = job
+    ElMessage.info(`已创建 ${selectedCount} 项下载任务`)
     pollDownload(job.id)
   } catch {
     // handled globally
@@ -188,14 +214,20 @@ async function pollDownload(jobId: string) {
   activeDownloadJob.value = job
   if (job.status === 'success') {
     ElMessage.success('下载完成，已生成更新版本')
+    await loadDownloadHistory()
+    activeDownloadJob.value = null
     return
   }
   if (job.status === 'failed') {
     ElMessage.error(job.error || '下载失败')
+    await loadDownloadHistory()
+    activeDownloadJob.value = null
     return
   }
   if (job.status === 'canceled') {
     ElMessage.warning(job.error || '下载任务已取消')
+    await loadDownloadHistory()
+    activeDownloadJob.value = null
     return
   }
   pollTimer = window.setTimeout(() => pollDownload(jobId), 1000)
@@ -209,6 +241,8 @@ async function handleCancelDownload() {
     activeDownloadJob.value = canceled
     if (pollTimer) window.clearTimeout(pollTimer)
     ElMessage.warning('已取消下载任务')
+    await loadDownloadHistory()
+    activeDownloadJob.value = null
   } catch {
     // handled globally
   }
@@ -227,13 +261,14 @@ function downloadItemStatusText(status: string) {
   if (status === 'pending') return '等待下载'
   if (status === 'running') return '正在下载'
   if (status === 'success') return '已完成'
+  if (status === 'skipped') return '未变化'
   if (status === 'failed') return '失败'
   if (status === 'canceled') return '已取消'
   return status || '-'
 }
 
 function downloadItemTagType(status: string) {
-  if (status === 'success') return 'success'
+  if (status === 'success' || status === 'skipped') return 'success'
   if (status === 'failed') return 'danger'
   if (status === 'running') return 'warning'
   return 'info'
@@ -317,11 +352,21 @@ async function openDownloadHistory() {
   await loadDownloadHistory()
 }
 
+async function openDownloadHistoryWithJob(row: DownloadJob) {
+  selectedDownloadHistory.value = row
+  downloadHistoryVisible.value = true
+  await loadDownloadHistory()
+}
+
 async function loadDownloadHistory() {
   downloadHistoryLoading.value = true
   try {
     const result = await listDownloadBatches()
-    downloadHistoryRows.value = result.batches || []
+    downloadHistoryRows.value = (result.batches || []).sort((a, b) => {
+      const left = new Date(a.updatedAt || a.startedAt || 0).getTime()
+      const right = new Date(b.updatedAt || b.startedAt || 0).getTime()
+      return right - left
+    })
     if (downloadHistoryRows.value.length === 0) {
       selectedDownloadHistory.value = null
       return
@@ -421,8 +466,28 @@ function downloadHistoryRowClassName({ row }: { row: DownloadJob }) {
               </template>
               <el-button link size="small" :disabled="remotePath === remoteBasePath" @click="remoteGoUp">上级</el-button>
               <el-button link size="small" :loading="remoteLoading" @click="loadRemoteDir(remotePath)">刷新</el-button>
+              <span class="path-spacer"></span>
+              <el-button
+                link
+                size="small"
+                type="primary"
+                :disabled="!canDownloadSelected"
+                @click="handleDownloadSelectedRemoteItems"
+              >
+                下载选中<span v-if="selectedRemotePaths.length">({{ selectedRemotePaths.length }})</span>
+              </el-button>
             </div>
-            <el-table :data="sortedRemoteFiles" v-loading="remoteLoading" border stripe size="small" height="430" @row-dblclick="handleRemoteNavigate">
+            <el-table
+              :data="sortedRemoteFiles"
+              v-loading="remoteLoading"
+              border
+              stripe
+              size="small"
+              height="430"
+              @row-dblclick="handleRemoteNavigate"
+              @selection-change="handleRemoteSelectionChange"
+            >
+              <el-table-column type="selection" width="44" />
               <el-table-column label="名称" min-width="220" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span class="file-name" @click="handleRemoteNavigate(row)">
@@ -437,7 +502,7 @@ function downloadHistoryRowClassName({ row }: { row: DownloadJob }) {
               <el-table-column prop="modTime" label="修改时间" width="170" />
               <el-table-column label="操作" width="90" fixed="right">
                 <template #default="{ row }">
-                  <el-button v-if="row.isDir" link type="primary" @click.stop="handleRemoteDownload(row)">下载</el-button>
+                  <el-button link type="primary" :disabled="isDownloadRunning" @click.stop="handleRemoteDownload(row)">下载</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -446,12 +511,7 @@ function downloadHistoryRowClassName({ row }: { row: DownloadJob }) {
           <div class="download-column local-column">
             <div class="column-title local-title">
               <span>本地目录</span>
-              <el-button
-                v-if="activeDownloadJob?.status === 'success'"
-                link
-                type="primary"
-                @click="openDownloadHistory"
-              >
+              <el-button link type="primary" @click="openDownloadHistory">
                 查看下载记录
               </el-button>
             </div>
@@ -481,9 +541,17 @@ function downloadHistoryRowClassName({ row }: { row: DownloadJob }) {
               <div v-if="activeDownloadJob.error" class="download-error">{{ activeDownloadJob.error }}</div>
             </div>
             <div v-else class="local-empty">
-              从左侧选择远程目录并点击下载后，这里会显示本地目标目录、下载进度和已下载文件。
+              当前没有正在下载的任务。可从左侧下载目录或文件；最近下载记录如下。
             </div>
-            <el-table :data="downloadFileRows" border stripe size="small" height="330" empty-text="当前任务暂无文件">
+            <el-table
+              v-if="activeDownloadJob"
+              :data="downloadFileRows"
+              border
+              stripe
+              size="small"
+              height="330"
+              empty-text="当前任务暂无文件"
+            >
               <el-table-column label="文件名" min-width="160" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span class="file-name">
@@ -508,6 +576,43 @@ function downloadHistoryRowClassName({ row }: { row: DownloadJob }) {
               <el-table-column label="错误" min-width="180" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span :class="{ 'download-error-inline': row.error }">{{ row.error || '-' }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+            <el-table
+              v-else
+              :data="recentDownloadRows"
+              border
+              stripe
+              size="small"
+              height="330"
+              empty-text="暂无下载记录"
+              @row-click="selectDownloadHistory"
+            >
+              <el-table-column label="下载批次" min-width="170" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.batchId || row.id }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="96">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="downloadStatusTagType(row.status)">
+                    {{ downloadStatusText(row.status) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="文件数" width="100">
+                <template #default="{ row }">
+                  {{ row.completedFiles || 0 }} / {{ row.totalFiles || row.count || 0 }}
+                </template>
+              </el-table-column>
+              <el-table-column label="远程目录" min-width="220" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.remotePath || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="更新时间" width="170">
+                <template #default="{ row }">{{ formatBeijingTime(row.updatedAt || row.startedAt) }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="70" fixed="right">
+                <template #default="{ row }">
+                  <el-button link type="primary" @click.stop="openDownloadHistoryWithJob(row)">查看</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -654,6 +759,7 @@ function downloadHistoryRowClassName({ row }: { row: DownloadJob }) {
 .download-error-inline { color: #f56c6c; }
 .local-empty { min-height: 86px; display: flex; align-items: center; justify-content: center; text-align: center; color: #909399; font-size: 12px; border: 1px dashed #dcdfe6; border-radius: 6px; background: #fbfcff; padding: 12px; margin-bottom: 10px; }
 .path-bar { min-height: 38px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 12px; border: 1px solid #ebeef5; border-bottom: 0; padding: 7px 10px; }
+.path-spacer { flex: 1; min-width: 12px; }
 .crumb { cursor: pointer; color: #409eff; }
 .crumb-sep { color: #c0c4cc; }
 .file-name { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }

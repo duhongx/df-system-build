@@ -47,6 +47,7 @@ export interface DownloadJob {
   id: string
   status: 'pending' | 'running' | 'success' | 'failed' | 'canceled'
   remotePath: string
+  selectedPaths?: string[]
   localDir: string
   targetPath: string
   batchId: string
@@ -168,8 +169,8 @@ export interface ArtifactDeployRecord {
   updatedAt: string
 }
 
-export const startDownloadRemoteDir = (remotePath: string, localPath?: string) =>
-  request.post<any, DownloadJob>('/batch-deploy/download-remote-dir/start', { remotePath, localPath })
+export const startDownloadRemoteDir = (remotePath: string, localPath?: string, selectedPaths?: string[]) =>
+  request.post<any, DownloadJob>('/batch-deploy/download-remote-dir/start', { remotePath, localPath, selectedPaths })
 
 export const getDownloadProgress = (jobId: string) =>
   request.get<any, DownloadJob>(`/batch-deploy/download-remote-dir/progress/${jobId}`)

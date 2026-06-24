@@ -356,7 +356,7 @@ func (h *PostgreSQLHandler) ExecuteSQLFile(c *gin.Context) {
 		Options service.SQLExecuteOptions `json:"options"`
 	}
 	_ = c.ShouldBindJSON(&req)
-	file, statements, err := h.svc.ExecuteSQLFileWithOptions(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
+	file, statements, err := h.svc.StartSQLFileExecution(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
 	if err != nil {
 		response.Fail(c, 14003, err.Error())
 		return
@@ -420,7 +420,7 @@ func (h *PostgreSQLHandler) ExecuteSQLBatch(c *gin.Context) {
 		Options service.SQLExecuteOptions `json:"options"`
 	}
 	_ = c.ShouldBindJSON(&req)
-	batch, files, err := h.svc.ExecuteSQLBatch(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
+	batch, files, err := h.svc.StartSQLBatchExecution(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
 	if err != nil {
 		response.Fail(c, 14014, err.Error())
 		return

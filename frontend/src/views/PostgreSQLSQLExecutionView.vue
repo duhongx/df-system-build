@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import JSZip from 'jszip'
 import {
   autocompleteSQLStatementSchema,
   deleteSQLFile,
+  executeSQLBatch,
   executeSQLFileWithOptions,
   executeSQLStatementWithOptions,
   getSQLBatch,
@@ -31,6 +32,7 @@ type SQLViewMode = 'list' | 'full' | 'anomaly'
 
 const parsing = ref(false)
 const executing = ref(false)
+const executingScope = ref<'file' | 'batch' | null>(null)
 const loadingTodo = ref(false)
 const loadingDone = ref(false)
 const statementEditVisible = ref(false)
@@ -73,6 +75,11 @@ const pageSize = 15
 const ZIP_MAX_SQL_FILES = 500
 const ZIP_MAX_SQL_FILE_SIZE = 50 * 1024 * 1024
 const ZIP_MAX_TOTAL_SIZE = 50 * 1024 * 1024
+const SQL_FILE_EXECUTION_POLL_INTERVAL_MS = 1000
+const SQL_BATCH_EXECUTION_POLL_INTERVAL_MS = 1000
+
+let sqlFileExecutionPollTimer: ReturnType<typeof window.setTimeout> | null = null
+let sqlBatchExecutionPollTimer: ReturnType<typeof window.setTimeout> | null = null
 
 const totalCount = computed(() => statements.value.length)
 const successCount = computed(() => statements.value.filter(s => s.executeStatus === 'SUCCESS').length)
@@ -91,7 +98,9 @@ const summaryFileCount = computed(() => {
   return todoTotal.value || doneTotal.value || 0
 })
 const currentFileExecutableStatements = computed(() => statements.value.filter(s => !['SUCCESS', 'SKIPPED', 'RUNNING'].includes(s.executeStatus || 'PENDING')))
-const canExecuteCurrentFile = computed(() => !!currentFile.value && currentFileExecutableStatements.value.length > 0)
+const currentBatchExecutableFiles = computed(() => batchFileList.value.filter(f => !['SUCCESS', 'SKIPPED', 'RUNNING'].includes(f.executeStatus || 'PENDING')))
+const canExecuteCurrentFile = computed(() => !executing.value && !!currentFile.value && !isSQLFileExecutionRunning(currentFile.value) && currentFileExecutableStatements.value.length > 0)
+const canExecuteCurrentBatch = computed(() => !executing.value && !!currentBatch.value && !isSQLBatchExecutionRunning(currentBatch.value) && currentBatchExecutableFiles.value.length > 0)
 const fileModeOptions = computed(() => {
   const modes = []
   if (batchFiles.value.length > 0) modes.push({ label: `本次导入(${batchFiles.value.length})`, value: 'local' })
@@ -105,6 +114,10 @@ const fileModeOptions = computed(() => {
 })
 
 onMounted(() => { loadBatches(); loadTodo(); loadDone(); loadSQLExecutionSettings() })
+onBeforeUnmount(() => {
+  clearSQLFileExecutionPolling()
+  clearSQLBatchExecutionPolling()
+})
 
 async function loadBatches() {
   const data = await listSQLBatches(batchPage.value, pageSize)
@@ -154,6 +167,112 @@ async function loadSQLExecutionSettings() {
     }
   } catch (err: any) {
     ElMessage.error(err?.message || '加载 SQL 执行配置失败')
+  }
+}
+
+function isSQLFileExecutionRunning(file?: SQLChangeFile | null) {
+  return file?.executeStatus === 'RUNNING'
+}
+
+function isSQLBatchExecutionRunning(batch?: SQLChangeBatch | null) {
+  return batch?.executeStatus === 'RUNNING'
+}
+
+function clearSQLFileExecutionPolling() {
+  if (!sqlFileExecutionPollTimer) return
+  window.clearTimeout(sqlFileExecutionPollTimer)
+  sqlFileExecutionPollTimer = null
+}
+
+function clearSQLBatchExecutionPolling() {
+  if (!sqlBatchExecutionPollTimer) return
+  window.clearTimeout(sqlBatchExecutionPollTimer)
+  sqlBatchExecutionPollTimer = null
+}
+
+function startSQLFileExecutionPolling(fileId: number) {
+  clearSQLFileExecutionPolling()
+  executing.value = true
+  executingScope.value = 'file'
+  sqlFileExecutionPollTimer = window.setTimeout(() => pollCurrentSQLFileExecution(fileId), SQL_FILE_EXECUTION_POLL_INTERVAL_MS)
+}
+
+function startSQLBatchExecutionPolling(batchId: number) {
+  clearSQLBatchExecutionPolling()
+  executing.value = true
+  executingScope.value = 'batch'
+  sqlBatchExecutionPollTimer = window.setTimeout(() => pollCurrentSQLBatchExecution(batchId), SQL_BATCH_EXECUTION_POLL_INTERVAL_MS)
+}
+
+async function pollCurrentSQLFileExecution(fileId: number) {
+  clearSQLFileExecutionPolling()
+  try {
+    const data = await getSQLFile(fileId)
+    if (!currentFile.value || currentFile.value.id !== fileId) {
+      executing.value = false
+      executingScope.value = null
+      return
+    }
+    applyLoadedFile(data.file, data.statements || [])
+    if (isSQLFileExecutionRunning(data.file)) {
+      executing.value = true
+      executingScope.value = 'file'
+      sqlFileExecutionPollTimer = window.setTimeout(() => pollCurrentSQLFileExecution(fileId), SQL_FILE_EXECUTION_POLL_INTERVAL_MS)
+      return
+    }
+    executing.value = false
+    executingScope.value = null
+    showFileExecuteMessage(data.file)
+    await Promise.all([loadBatches(), loadTodo(), loadDone()])
+  } catch {
+    if (!currentFile.value || currentFile.value.id !== fileId) {
+      executing.value = false
+      executingScope.value = null
+      return
+    }
+    sqlFileExecutionPollTimer = window.setTimeout(() => pollCurrentSQLFileExecution(fileId), SQL_FILE_EXECUTION_POLL_INTERVAL_MS * 2)
+  }
+}
+
+async function pollCurrentSQLBatchExecution(batchId: number) {
+  clearSQLBatchExecutionPolling()
+  try {
+    const data = await getSQLBatch(batchId)
+    if (!currentBatch.value || currentBatch.value.id !== batchId) {
+      executing.value = false
+      executingScope.value = null
+      return
+    }
+    currentBatch.value = data.batch
+    batchFileList.value = data.files || []
+    if (currentFile.value?.id) {
+      const activeFile = batchFileList.value.find(file => file.id === currentFile.value?.id)
+      if (activeFile) {
+        try {
+          const detail = await getSQLFile(activeFile.id)
+          applyLoadedFile(detail.file, detail.statements || [])
+        } catch {
+          currentFile.value = activeFile
+        }
+      }
+    }
+    if (isSQLBatchExecutionRunning(data.batch)) {
+      executing.value = true
+      executingScope.value = 'batch'
+      sqlBatchExecutionPollTimer = window.setTimeout(() => pollCurrentSQLBatchExecution(batchId), SQL_BATCH_EXECUTION_POLL_INTERVAL_MS)
+      return
+    }
+    executing.value = false
+    executingScope.value = null
+    showBatchExecuteMessage(data.batch)
+    await Promise.all([loadBatches(), loadTodo(), loadDone()])
+  } catch {
+    if (!currentBatch.value || currentBatch.value.id !== batchId) {
+      executing.value = false
+      executingScope.value = null
+      return
+    }
+    sqlBatchExecutionPollTimer = window.setTimeout(() => pollCurrentSQLBatchExecution(batchId), SQL_BATCH_EXECUTION_POLL_INTERVAL_MS * 2)
   }
 }
 
@@ -296,14 +415,67 @@ async function handleExecuteCurrentFile() {
     return
   }
   executing.value = true
+  executingScope.value = 'file'
+  let keepPolling = false
   try {
     const confirmedOptions = await buildConfirmedOptions(currentFileExecutableStatements.value)
     const data = await executeSQLFileWithOptions(currentFile.value.id, confirmedOptions)
     applyLoadedFile(data.file, data.statements || [])
+    if (isSQLFileExecutionRunning(data.file)) {
+      ElMessage.info('SQL 文件已提交后台执行')
+      keepPolling = true
+      startSQLFileExecutionPolling(data.file.id)
+      return
+    }
     showFileExecuteMessage(data.file)
     await Promise.all([loadBatches(), loadTodo(), loadDone()])
   } finally {
-    executing.value = false
+    if (!keepPolling) {
+      executing.value = false
+      executingScope.value = null
+    }
+  }
+}
+
+async function handleExecuteCurrentBatch() {
+  if (!currentBatch.value) {
+    ElMessage.warning('请选择要执行的 SQL 批次')
+    return
+  }
+  if (currentBatchExecutableFiles.value.length === 0) {
+    ElMessage.warning('当前批次没有可执行的 SQL 文件')
+    return
+  }
+  clearSQLFileExecutionPolling()
+  try {
+    await ElMessageBox.confirm(
+      `将按顺序执行本批次 ${currentBatchExecutableFiles.value.length} 个 SQL 文件。单个文件失败会继续执行后续文件，只有取消才会停止整个批次。`,
+      '执行全部文件',
+      { type: 'warning', confirmButtonText: '执行', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  executing.value = true
+  executingScope.value = 'batch'
+  let keepPolling = false
+  try {
+    const data = await executeSQLBatch(currentBatch.value.id, { ...options.value, confirmWarnRisk: true })
+    currentBatch.value = data.batch
+    batchFileList.value = data.files || []
+    if (isSQLBatchExecutionRunning(data.batch)) {
+      ElMessage.info('SQL 批次已提交后台按文件顺序执行')
+      keepPolling = true
+      startSQLBatchExecutionPolling(data.batch.id)
+      return
+    }
+    showBatchExecuteMessage(data.batch)
+    await Promise.all([loadBatches(), loadTodo(), loadDone()])
+  } finally {
+    if (!keepPolling) {
+      executing.value = false
+      executingScope.value = null
+    }
   }
 }
 
@@ -320,6 +492,15 @@ async function handleCopySelectedSQL() {
 async function handleOpen(row: SQLChangeFile) {
   const data = await getSQLFile(row.id)
   applyLoadedFile(data.file, data.statements || [])
+  if (isSQLFileExecutionRunning(data.file)) {
+    startSQLFileExecutionPolling(data.file.id)
+  } else {
+    clearSQLFileExecutionPolling()
+    if (!isSQLBatchExecutionRunning(currentBatch.value)) {
+      executing.value = false
+      executingScope.value = null
+    }
+  }
 }
 
 async function handleOpenBatch(row: SQLChangeBatch) {
@@ -327,10 +508,19 @@ async function handleOpenBatch(row: SQLChangeBatch) {
   currentBatch.value = data.batch
   batchFileList.value = data.files || []
   selectedTab.value = 'batchFiles'
+  if (isSQLBatchExecutionRunning(data.batch)) {
+    startSQLBatchExecutionPolling(data.batch.id)
+  } else {
+    clearSQLBatchExecutionPolling()
+  }
   if (batchFileList.value.length > 0) await handleOpen(batchFileList.value[0])
 }
 
 function handleOpenLocalFile(file: ParseSQLBatchFile, index: number) {
+  clearSQLFileExecutionPolling()
+  clearSQLBatchExecutionPolling()
+  executing.value = false
+  executingScope.value = null
   localFileIndex.value = index
   form.value = { fileName: file.fileName || '', content: file.content || '', overwrite: true }
   currentFile.value = null
@@ -565,6 +755,27 @@ function showFileExecuteMessage(file?: SQLChangeFile) {
   ElMessage.info(message || '执行完成')
 }
 
+function showBatchExecuteMessage(batch?: SQLChangeBatch) {
+  if (!batch) {
+    ElMessage.warning('执行完成，但未获取到批次执行结果')
+    return
+  }
+  const message = batch.executeMessage || statementStatusText(batch.executeStatus)
+  if (batch.executeStatus === 'SUCCESS') {
+    ElMessage.success(message || '执行成功')
+    return
+  }
+  if (['FAILED', 'PARTIAL_FAILED', 'NOT_EXECUTABLE', 'TIMEOUT', 'CANCELED'].includes(batch.executeStatus)) {
+    ElMessage.error(message || '执行失败')
+    return
+  }
+  if (batch.executeStatus === 'SKIPPED') {
+    ElMessage.warning(message || '已跳过')
+    return
+  }
+  ElMessage.info(message || '执行完成')
+}
+
 async function buildConfirmedOptions(targetStatements: SQLChangeStatement[]) {
   const blockedStatements = targetStatements.filter(s => (s.riskLevel === 'BLOCKED' || s.executeStatus === 'NOT_EXECUTABLE') && s.executeStatus !== 'SUCCESS' && s.executeStatus !== 'SKIPPED')
   if (options.value.forceBlockedSql && blockedStatements.length > 0) {
@@ -633,7 +844,26 @@ function isAnomalyStatement(row: SQLChangeStatement) {
           <el-button size="small" style="pointer-events: none;">上传SQL/ZIP</el-button>
         </label>
         <el-button size="small" :loading="parsing" @click="handleParse">解析</el-button>
-        <el-button size="small" type="primary" :disabled="!canExecuteCurrentFile" :loading="executing" @click="handleExecuteCurrentFile">执行当前文件</el-button>
+        <el-button
+          v-if="currentBatch"
+          size="small"
+          type="primary"
+          plain
+          :disabled="!canExecuteCurrentBatch"
+          :loading="executing && executingScope === 'batch'"
+          @click="handleExecuteCurrentBatch"
+        >
+          执行全部文件
+        </el-button>
+        <el-button
+          size="small"
+          type="primary"
+          :disabled="!canExecuteCurrentFile"
+          :loading="executing && executingScope === 'file'"
+          @click="handleExecuteCurrentFile"
+        >
+          执行当前文件
+        </el-button>
         <el-dropdown trigger="click">
           <el-button size="small">更多</el-button>
           <template #dropdown>

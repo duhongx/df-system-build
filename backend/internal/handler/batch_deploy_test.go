@@ -186,8 +186,8 @@ func TestDownloadRemoteDirToLocalPreservesTreeAndReportsArtifacts(t *testing.T) 
 	}
 	sort.Strings(files)
 
-	if filepath.Base(targetDir) != "release" {
-		t.Fatalf("expected downloaded folder name release, got %s", targetDir)
+	if targetDir != localParent {
+		t.Fatalf("expected remote files to be downloaded directly into local parent, got %s", targetDir)
 	}
 	for _, path := range []string{
 		filepath.Join(targetDir, "his-gateway.jar"),
@@ -280,6 +280,212 @@ func TestDownloadRemoteDirToLocalReportsFileItemStatuses(t *testing.T) {
 			t.Fatalf("expected item paths to be populated, got %#v", item)
 		}
 	}
+}
+
+func TestDownloadRemoteSelectionToLocalDownloadsSelectedFileOnly(t *testing.T) {
+	fs := fakeRemoteFS{
+		dirs: map[string][]fakeRemoteEntry{
+			"/release": {
+				{name: "his-gateway.jar"},
+				{name: "web-main.zip"},
+				{name: "notes.txt"},
+			},
+		},
+		files: map[string]string{
+			"/release/his-gateway.jar": mustZipString(t),
+			"/release/web-main.zip":    mustZipString(t),
+			"/release/notes.txt":       "keep notes",
+		},
+	}
+
+	targetDir, files, err := downloadRemoteSelectionToLocalWithProgressContext(
+		context.Background(),
+		fs,
+		"/release",
+		[]string{"/release/his-gateway.jar"},
+		t.TempDir(),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("download selected file: %v", err)
+	}
+	if targetDir == "" {
+		t.Fatalf("expected target dir")
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "his-gateway.jar")); err != nil {
+		t.Fatalf("expected selected file to be downloaded: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "web-main.zip")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected unselected file to be absent, stat err=%v", err)
+	}
+	expected := []string{"his-gateway.jar"}
+	if !stringSlicesEqual(files, expected) {
+		t.Fatalf("expected artifact list %#v, got %#v", expected, files)
+	}
+}
+
+func TestDownloadRemoteDirSkipsUnchangedFileByChecksum(t *testing.T) {
+	zipContent := mustZipString(t)
+	fs := fakeRemoteFS{
+		dirs: map[string][]fakeRemoteEntry{
+			"/release": {{name: "his-gateway.jar"}},
+		},
+		files: map[string]string{
+			"/release/his-gateway.jar": zipContent,
+		},
+	}
+	localParent := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localParent, "his-gateway.jar"), []byte(zipContent), 0644); err != nil {
+		t.Fatalf("seed local file: %v", err)
+	}
+
+	var events []downloadProgress
+	_, files, err := downloadRemoteDirToLocalWithProgress(fs, "/release", localParent, func(progress downloadProgress) {
+		events = append(events, progress)
+	})
+	if err != nil {
+		t.Fatalf("download remote dir: %v", err)
+	}
+	if !stringSlicesEqual(files, []string{"his-gateway.jar"}) {
+		t.Fatalf("expected artifact list to include skipped artifact, got %#v", files)
+	}
+	last := events[len(events)-1]
+	if last.CompletedFiles != 1 || last.TotalFiles != 1 {
+		t.Fatalf("expected final progress 1/1, got %d/%d", last.CompletedFiles, last.TotalFiles)
+	}
+	if len(last.Items) != 1 || last.Items[0].Status != "skipped" {
+		t.Fatalf("expected unchanged item to be skipped, got %#v", last.Items)
+	}
+}
+
+func TestDownloadRemoteDirRedownloadsSameSizeChangedFile(t *testing.T) {
+	fs := fakeRemoteFS{
+		dirs: map[string][]fakeRemoteEntry{
+			"/release": {{name: "version.json"}},
+		},
+		files: map[string]string{
+			"/release/version.json": "new-content",
+		},
+	}
+	localParent := t.TempDir()
+	localPath := filepath.Join(localParent, "version.json")
+	if err := os.WriteFile(localPath, []byte("old-content"), 0644); err != nil {
+		t.Fatalf("seed local file: %v", err)
+	}
+
+	_, _, err := downloadRemoteDirToLocal(fs, "/release", localParent)
+	if err != nil {
+		t.Fatalf("download remote dir: %v", err)
+	}
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read local file: %v", err)
+	}
+	if string(data) != "new-content" {
+		t.Fatalf("expected same-size changed file to be overwritten, got %q", string(data))
+	}
+}
+
+func TestDownloadRemoteDirContinuesAfterNonArtifactFailure(t *testing.T) {
+	fs := failingOpenRemoteFS{
+		fakeRemoteFS: fakeRemoteFS{
+			dirs: map[string][]fakeRemoteEntry{
+				"/release": {
+					{name: "version.json"},
+					{name: "his-gateway.jar"},
+				},
+			},
+			files: map[string]string{
+				"/release/version.json":    "{}",
+				"/release/his-gateway.jar": mustZipString(t),
+			},
+		},
+		failOpen: map[string]error{
+			"/release/version.json": fmt.Errorf("remote read failed"),
+		},
+	}
+
+	var events []downloadProgress
+	_, files, err := downloadRemoteDirToLocalWithProgress(fs, "/release", t.TempDir(), func(progress downloadProgress) {
+		events = append(events, progress)
+	})
+	if err != nil {
+		t.Fatalf("download remote dir should continue after non-artifact failure: %v", err)
+	}
+	if !stringSlicesEqual(files, []string{"his-gateway.jar"}) {
+		t.Fatalf("expected successful artifact list, got %#v", files)
+	}
+	last := events[len(events)-1]
+	if last.CompletedFiles != 2 || last.TotalFiles != 2 {
+		t.Fatalf("expected final progress 2/2, got %d/%d", last.CompletedFiles, last.TotalFiles)
+	}
+	statuses := map[string]string{}
+	for _, item := range last.Items {
+		statuses[item.Name] = item.Status
+	}
+	if statuses["version.json"] != "failed" || statuses["his-gateway.jar"] != "success" {
+		t.Fatalf("expected failed non-artifact and successful artifact, got %#v", last.Items)
+	}
+}
+
+func TestDownloadRemoteSelectionToLocalPreservesSelectedDirectoryRelativePath(t *testing.T) {
+	fs := fakeRemoteFS{
+		dirs: map[string][]fakeRemoteEntry{
+			"/release": {
+				{name: "patch", dir: true},
+				{name: "other", dir: true},
+			},
+			"/release/patch": {
+				{name: "agg-service.jar"},
+				{name: "readme.txt"},
+			},
+			"/release/other": {
+				{name: "web-main.zip"},
+			},
+		},
+		files: map[string]string{
+			"/release/patch/agg-service.jar": mustZipString(t),
+			"/release/patch/readme.txt":      "notes",
+			"/release/other/web-main.zip":    mustZipString(t),
+		},
+	}
+
+	targetDir, files, err := downloadRemoteSelectionToLocalWithProgressContext(
+		context.Background(),
+		fs,
+		"/release",
+		[]string{"/release/patch"},
+		t.TempDir(),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("download selected dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "patch", "agg-service.jar")); err != nil {
+		t.Fatalf("expected selected directory artifact to be downloaded: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "patch", "readme.txt")); err != nil {
+		t.Fatalf("expected selected directory non-artifact file to be downloaded: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "other", "web-main.zip")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected unselected sibling directory to be absent, stat err=%v", err)
+	}
+	expected := []string{"agg-service.jar"}
+	if !stringSlicesEqual(files, expected) {
+		t.Fatalf("expected artifact list %#v, got %#v", expected, files)
+	}
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestDownloadRemoteDirToLocalCancellationMarksCurrentItemCanceled(t *testing.T) {
@@ -1509,6 +1715,23 @@ func (fs memoryRemoteFS) Open(filePath string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
+func (fs memoryRemoteFS) Stat(filePath string) (os.FileInfo, error) {
+	cleanPath := pathpkg.Clean(filePath)
+	if data, ok := fs.files[cleanPath]; ok {
+		return memoryFileInfo{name: pathpkg.Base(cleanPath), size: int64(len(data))}, nil
+	}
+	prefix := cleanPath
+	if prefix != "/" {
+		prefix += "/"
+	}
+	for existingPath := range fs.files {
+		if strings.HasPrefix(pathpkg.Clean(existingPath), prefix) {
+			return memoryFileInfo{name: pathpkg.Base(cleanPath), dir: true}, nil
+		}
+	}
+	return nil, os.ErrNotExist
+}
+
 type memoryFileInfo struct {
 	name string
 	size int64
@@ -1640,6 +1863,51 @@ func (f fakeRemoteFS) Open(path string) (io.ReadCloser, error) {
 		return nil, os.ErrNotExist
 	}
 	return io.NopCloser(strings.NewReader(content)), nil
+}
+
+type failingOpenRemoteFS struct {
+	fakeRemoteFS
+	failOpen map[string]error
+}
+
+func (f failingOpenRemoteFS) Open(filePath string) (io.ReadCloser, error) {
+	cleanPath := pathpkg.Clean(filePath)
+	if err, ok := f.failOpen[cleanPath]; ok {
+		return nil, err
+	}
+	return f.fakeRemoteFS.Open(cleanPath)
+}
+
+func (f *failingOpenRemoteFS) OpenAt(filePath string, offset int64) (io.ReadCloser, error) {
+	cleanPath := pathpkg.Clean(filePath)
+	if err, ok := f.failOpen[cleanPath]; ok {
+		return nil, err
+	}
+	return f.fakeRemoteFS.OpenAt(cleanPath, offset)
+}
+
+func (f fakeRemoteFS) Stat(filePath string) (os.FileInfo, error) {
+	cleanPath := pathpkg.Clean(filePath)
+	if entries, ok := f.dirs[cleanPath]; ok {
+		return fakeRemoteEntry{name: pathpkg.Base(cleanPath), dir: true, size: int64(len(entries))}, nil
+	}
+	if content, ok := f.files[cleanPath]; ok {
+		return fakeRemoteEntry{name: pathpkg.Base(cleanPath), size: int64(len(content))}, nil
+	}
+	parent := pathpkg.Dir(cleanPath)
+	base := pathpkg.Base(cleanPath)
+	for _, entry := range f.dirs[parent] {
+		if entry.name != base {
+			continue
+		}
+		if !entry.dir {
+			if content, ok := f.files[cleanPath]; ok {
+				entry.size = int64(len(content))
+			}
+		}
+		return entry, nil
+	}
+	return nil, os.ErrNotExist
 }
 
 func (f *fakeRemoteFS) OpenAt(path string, offset int64) (io.ReadCloser, error) {

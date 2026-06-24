@@ -75,6 +75,7 @@ type downloadJob struct {
 	ID             string            `json:"id"`
 	Status         string            `json:"status"`
 	RemotePath     string            `json:"remotePath"`
+	SelectedPaths  []string          `json:"selectedPaths,omitempty"`
 	LocalDir       string            `json:"localDir"`
 	TargetPath     string            `json:"targetPath"`
 	BatchID        string            `json:"batchId"`
@@ -336,6 +337,9 @@ func artifactVersionWorkspaceDir(version model.ArtifactVersion) (string, error) 
 	}
 	if !isPathInside(root, absDir) {
 		return "", fmt.Errorf("版本目录超出批量上传工作区")
+	}
+	if isDownloadWorkspaceRoot(absDir) {
+		return "", nil
 	}
 	rel, err := filepath.Rel(root, absDir)
 	if err != nil {
@@ -796,11 +800,12 @@ func (h *BatchDeployHandler) DownloadRemoteDir(c *gin.Context) {
 		return
 	}
 
-	localDir, err := newBatchWorkspaceDir("download")
+	localDir, err := downloadWorkspaceRootDir()
 	if err != nil {
 		response.Fail(c, 13006, err.Error())
 		return
 	}
+	batchID := newBatchID()
 
 	var sftpClient *sftp.Client
 	var sshClient io.Closer
@@ -823,7 +828,7 @@ func (h *BatchDeployHandler) DownloadRemoteDir(c *gin.Context) {
 	}
 
 	if _, _, err := persistArtifactVersionFromDir(artifactVersionInput{
-		VersionNo:   filepath.Base(localDir),
+		VersionNo:   batchID,
 		SourceType:  "download",
 		SourceLabel: "服务器下载",
 		Status:      "available",
@@ -837,7 +842,7 @@ func (h *BatchDeployHandler) DownloadRemoteDir(c *gin.Context) {
 
 	response.OK(c, gin.H{
 		"targetPath": targetDir,
-		"batchId":    filepath.Base(localDir),
+		"batchId":    batchID,
 		"files":      files,
 		"count":      len(files),
 	})
@@ -845,36 +850,40 @@ func (h *BatchDeployHandler) DownloadRemoteDir(c *gin.Context) {
 
 func (h *BatchDeployHandler) StartDownloadRemoteDir(c *gin.Context) {
 	var req struct {
-		ServerID   uint   `json:"serverId"`
-		RemotePath string `json:"remotePath" binding:"required"`
-		LocalPath  string `json:"localPath"`
+		ServerID      uint     `json:"serverId"`
+		RemotePath    string   `json:"remotePath" binding:"required"`
+		LocalPath     string   `json:"localPath"`
+		SelectedPaths []string `json:"selectedPaths"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Fail(c, 13010, "参数错误")
 		return
 	}
 
-	localDir, err := downloadWorkspaceDirForStart(req.RemotePath)
+	localDir, err := downloadWorkspaceRootDir()
 	if err != nil {
 		response.Fail(c, 13010, err.Error())
 		return
 	}
+	selectedPaths := normalizeRemoteSelectionPaths(req.SelectedPaths)
+	batchID := newBatchID()
 
 	job := &downloadJob{
-		ID:         newBatchID(),
-		Status:     "pending",
-		RemotePath: req.RemotePath,
-		LocalDir:   localDir,
-		BatchID:    filepath.Base(localDir),
-		StartedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+		ID:            batchID,
+		Status:        "pending",
+		RemotePath:    req.RemotePath,
+		SelectedPaths: selectedPaths,
+		LocalDir:      localDir,
+		BatchID:       batchID,
+		StartedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 	downloadJobStore.Lock()
 	downloadJobStore.items[job.ID] = job
 	downloadJobStore.Unlock()
 	persistDownloadJob(*job)
 
-	go runDownloadJob(job.ID, req.ServerID, req.RemotePath, localDir)
+	go runDownloadJob(job.ID, req.ServerID, req.RemotePath, selectedPaths, localDir)
 
 	response.OK(c, job)
 }
@@ -961,33 +970,35 @@ func (h *BatchDeployHandler) RetryDownloadBatch(c *gin.Context) {
 	}
 	localDir := jobModel.LocalDir
 	if localDir == "" {
-		root, err := batchUploadSourceRoot("download")
+		root, err := downloadWorkspaceRootDir()
 		if err != nil {
 			response.Fail(c, 13014, err.Error())
 			return
 		}
-		localDir = filepath.Join(root, batchID)
+		localDir = root
 	}
 	if err := validateDownloadBatchDir(localDir); err != nil {
 		response.Fail(c, 13014, err.Error())
 		return
 	}
 
+	previousJob := downloadJobFromModel(jobModel)
 	job := &downloadJob{
-		ID:         newBatchID(),
-		Status:     "pending",
-		RemotePath: jobModel.RemotePath,
-		LocalDir:   localDir,
-		BatchID:    batchID,
-		StartedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+		ID:            newBatchID(),
+		Status:        "pending",
+		RemotePath:    jobModel.RemotePath,
+		SelectedPaths: append([]string(nil), previousJob.SelectedPaths...),
+		LocalDir:      localDir,
+		BatchID:       batchID,
+		StartedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 	downloadJobStore.Lock()
 	downloadJobStore.items[job.ID] = job
 	downloadJobStore.Unlock()
 	persistDownloadJob(*job)
 
-	go runDownloadJob(job.ID, 0, job.RemotePath, localDir)
+	go runDownloadJob(job.ID, 0, job.RemotePath, job.SelectedPaths, localDir)
 	response.OK(c, job)
 }
 
@@ -1006,32 +1017,38 @@ func (h *BatchDeployHandler) ClearDownloadBatch(c *gin.Context) {
 		response.Fail(c, 13015, err.Error())
 		return
 	}
-	if err := os.RemoveAll(localDir); err != nil {
-		response.Fail(c, 13015, "清理下载目录失败: "+err.Error())
-		return
+	if !isDownloadWorkspaceRoot(localDir) {
+		if err := os.RemoveAll(localDir); err != nil {
+			response.Fail(c, 13015, "清理下载目录失败: "+err.Error())
+			return
+		}
 	}
 	removeDownloadJobsByBatchID(batchID)
 	response.OK(c, gin.H{"batchId": batchID})
 }
 
 func downloadWorkspaceDirForStart(remotePath string) (string, error) {
-	if repository.DB != nil {
-		var failedJob model.DownloadJob
-		err := repository.DB.
-			Where("remote_path = ? AND status = ? AND local_dir <> ''", remotePath, "failed").
-			Order("updated_at DESC").
-			First(&failedJob).Error
-		if err == nil {
-			root, rootErr := batchUploadRootDir()
-			localDir, absErr := filepath.Abs(failedJob.LocalDir)
-			if rootErr == nil && absErr == nil && isPathInside(root, localDir) {
-				if _, statErr := os.Stat(localDir); statErr == nil {
-					return localDir, nil
-				}
-			}
-		}
+	return downloadWorkspaceRootDir()
+}
+
+func downloadWorkspaceRootDir() (string, error) {
+	return batchUploadSourceRoot("download")
+}
+
+func isDownloadWorkspaceRoot(dir string) bool {
+	root, err := downloadWorkspaceRootDir()
+	if err != nil {
+		return false
 	}
-	return newBatchWorkspaceDir("download")
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	return filepath.Clean(rootAbs) == filepath.Clean(dirAbs)
 }
 
 func findLatestDownloadJobByBatchID(batchID string) (model.DownloadJob, error) {
@@ -1062,11 +1079,11 @@ func validateDownloadBatchDir(localDir string) error {
 }
 
 func downloadBatchDirByID(batchID string) (string, error) {
-	root, err := batchUploadSourceRoot("download")
+	root, err := downloadWorkspaceRootDir()
 	if err != nil {
 		return "", err
 	}
-	localDir := filepath.Join(root, batchID)
+	localDir := root
 	if repository.DB != nil {
 		var job model.DownloadJob
 		if err := repository.DB.Where("batch_id = ? AND local_dir <> ''", batchID).Order("updated_at DESC").First(&job).Error; err == nil {
@@ -1168,6 +1185,9 @@ func copyDownloadJob(job downloadJob) downloadJob {
 	if job.Files != nil {
 		job.Files = append([]string(nil), job.Files...)
 	}
+	if job.SelectedPaths != nil {
+		job.SelectedPaths = append([]string(nil), job.SelectedPaths...)
+	}
 	if job.Items != nil {
 		job.Items = append([]downloadJobItem(nil), job.Items...)
 	}
@@ -1183,7 +1203,7 @@ func (h *BatchDeployHandler) GetDownloadProgress(c *gin.Context) {
 	response.Fail(c, 13011, "下载任务不存在")
 }
 
-func runDownloadJob(jobID string, serverID uint, remotePath, localDir string) {
+func runDownloadJob(jobID string, serverID uint, remotePath string, selectedPaths []string, localDir string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	downloadJobCancelStore.Lock()
 	downloadJobCancelStore.items[jobID] = cancel
@@ -1216,7 +1236,7 @@ func runDownloadJob(jobID string, serverID uint, remotePath, localDir string) {
 	defer sftpClient.Close()
 	defer sshClient.Close()
 
-	targetDir, files, err := downloadRemoteDirToLocalWithProgressContext(ctx, sftpRemoteFS{client: sftpClient}, remotePath, localDir, func(progress downloadProgress) {
+	targetDir, files, err := downloadRemoteSelectionToLocalWithProgressContext(ctx, sftpRemoteFS{client: sftpClient}, remotePath, selectedPaths, localDir, func(progress downloadProgress) {
 		updateDownloadJob(jobID, func(job *downloadJob) {
 			job.TotalFiles = progress.TotalFiles
 			job.CompletedFiles = progress.CompletedFiles
@@ -1232,8 +1252,12 @@ func runDownloadJob(jobID string, serverID uint, remotePath, localDir string) {
 		failDownloadJob(jobID, "下载远程目录失败: "+err.Error())
 		return
 	}
+	versionNo := jobID
+	if snapshot, ok := getDownloadJobSnapshot(jobID); ok && strings.TrimSpace(snapshot.BatchID) != "" {
+		versionNo = snapshot.BatchID
+	}
 	if _, _, err := persistArtifactVersionFromDir(artifactVersionInput{
-		VersionNo:   filepath.Base(localDir),
+		VersionNo:   versionNo,
 		SourceType:  "download",
 		SourceLabel: "服务器下载",
 		Status:      "available",
@@ -1289,7 +1313,7 @@ func cancelDownloadJob(jobID, message string) {
 		job.Error = message
 		job.CurrentPath = ""
 		for i := range job.Items {
-			if job.Items[i].Status == "running" {
+			if job.Items[i].Status == "running" || job.Items[i].Status == "pending" {
 				job.Items[i].Status = "canceled"
 				job.Items[i].Error = message
 			}
@@ -1308,22 +1332,24 @@ func persistDownloadJob(job downloadJob) {
 func downloadJobToModel(job downloadJob) model.DownloadJob {
 	filesJSON, _ := json.Marshal(job.Files)
 	itemsJSON, _ := json.Marshal(job.Items)
+	selectedPathsJSON, _ := json.Marshal(job.SelectedPaths)
 	return model.DownloadJob{
-		ID:             job.ID,
-		Status:         job.Status,
-		RemotePath:     job.RemotePath,
-		LocalDir:       job.LocalDir,
-		TargetPath:     job.TargetPath,
-		BatchID:        job.BatchID,
-		FilesJSON:      string(filesJSON),
-		ItemsJSON:      string(itemsJSON),
-		Count:          job.Count,
-		TotalFiles:     job.TotalFiles,
-		CompletedFiles: job.CompletedFiles,
-		CurrentPath:    job.CurrentPath,
-		Error:          job.Error,
-		StartedAt:      job.StartedAt,
-		UpdatedAt:      job.UpdatedAt,
+		ID:                job.ID,
+		Status:            job.Status,
+		RemotePath:        job.RemotePath,
+		SelectedPathsJSON: string(selectedPathsJSON),
+		LocalDir:          job.LocalDir,
+		TargetPath:        job.TargetPath,
+		BatchID:           job.BatchID,
+		FilesJSON:         string(filesJSON),
+		ItemsJSON:         string(itemsJSON),
+		Count:             job.Count,
+		TotalFiles:        job.TotalFiles,
+		CompletedFiles:    job.CompletedFiles,
+		CurrentPath:       job.CurrentPath,
+		Error:             job.Error,
+		StartedAt:         job.StartedAt,
+		UpdatedAt:         job.UpdatedAt,
 	}
 }
 
@@ -1336,10 +1362,15 @@ func downloadJobFromModel(dbJob model.DownloadJob) downloadJob {
 	if strings.TrimSpace(dbJob.ItemsJSON) != "" {
 		_ = json.Unmarshal([]byte(dbJob.ItemsJSON), &items)
 	}
+	selectedPaths := []string{}
+	if strings.TrimSpace(dbJob.SelectedPathsJSON) != "" {
+		_ = json.Unmarshal([]byte(dbJob.SelectedPathsJSON), &selectedPaths)
+	}
 	return downloadJob{
 		ID:             dbJob.ID,
 		Status:         dbJob.Status,
 		RemotePath:     dbJob.RemotePath,
+		SelectedPaths:  selectedPaths,
 		LocalDir:       dbJob.LocalDir,
 		TargetPath:     dbJob.TargetPath,
 		BatchID:        dbJob.BatchID,
@@ -2585,6 +2616,7 @@ func copyFileSimple(src, dst string) error {
 
 type remoteArtifactFS interface {
 	ReadDir(path string) ([]os.FileInfo, error)
+	Stat(path string) (os.FileInfo, error)
 	Open(path string) (io.ReadCloser, error)
 }
 
@@ -2595,6 +2627,7 @@ type remoteSeekableFS interface {
 type sftpRemoteFS struct {
 	client interface {
 		ReadDir(string) ([]os.FileInfo, error)
+		Stat(string) (os.FileInfo, error)
 		Open(string) (*sftp.File, error)
 	}
 }
@@ -2721,6 +2754,10 @@ func mustEncryptPlainCredential(value string) string {
 
 func (fs sftpRemoteFS) ReadDir(remotePath string) ([]os.FileInfo, error) {
 	return fs.client.ReadDir(remotePath)
+}
+
+func (fs sftpRemoteFS) Stat(remotePath string) (os.FileInfo, error) {
+	return fs.client.Stat(remotePath)
 }
 
 func (fs sftpRemoteFS) Open(remotePath string) (io.ReadCloser, error) {
@@ -2903,19 +2940,28 @@ func downloadRemoteDirToLocalWithProgress(fs remoteArtifactFS, remoteDir, localP
 }
 
 func downloadRemoteDirToLocalWithProgressContext(ctx context.Context, fs remoteArtifactFS, remoteDir, localParent string, onProgress func(downloadProgress)) (string, []string, error) {
-	folderName := safeLocalFolderName(path.Base(path.Clean(remoteDir)))
-	if folderName == "" {
-		folderName = "remote-download-" + newBatchID()
-	}
-	targetDir := filepath.Join(localParent, folderName)
+	return downloadRemoteSelectionToLocalWithProgressContext(ctx, fs, remoteDir, nil, localParent, onProgress)
+}
+
+func downloadRemoteSelectionToLocalWithProgressContext(ctx context.Context, fs remoteArtifactFS, remoteDir string, selectedPaths []string, localParent string, onProgress func(downloadProgress)) (string, []string, error) {
+	cleanRemoteDir := cleanRemoteDownloadPath(remoteDir)
+	targetDir := localParent
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return "", nil, err
 	}
 
-	items, err := collectRemoteDownloadItems(fs, remoteDir, targetDir)
+	items, err := collectRemoteDownloadSelectionItems(fs, cleanRemoteDir, selectedPaths, targetDir)
 	if err != nil {
 		return "", nil, err
 	}
+	files, err := downloadRemoteItemsToLocal(ctx, fs, items, onProgress)
+	if err != nil {
+		return "", nil, err
+	}
+	return targetDir, files, nil
+}
+
+func downloadRemoteItemsToLocal(ctx context.Context, fs remoteArtifactFS, items []downloadJobItem, onProgress func(downloadProgress)) ([]string, error) {
 	totalFiles := len(items)
 	completedFiles := 0
 	reportProgress := func(currentPath string) {
@@ -2932,66 +2978,103 @@ func downloadRemoteDirToLocalWithProgressContext(ctx context.Context, fs remoteA
 
 	seenArtifacts := map[string]bool{}
 	var artifacts []string
+	var artifactFailures []string
+	markDone := func(index int, status string, err error) {
+		items[index].Status = status
+		if err != nil {
+			items[index].Error = err.Error()
+		} else {
+			items[index].Error = ""
+		}
+		completedFiles++
+		reportProgress(items[index].RemotePath)
+	}
+	recordArtifactFailure := func(index int, err error) {
+		artifactFailures = append(artifactFailures, fmt.Sprintf("%s: %v", items[index].Name, err))
+		markDone(index, "failed", err)
+	}
 
 	for i := range items {
 		if err := ctx.Err(); err != nil {
 			items[i].Status = "canceled"
 			items[i].Error = errDownloadCanceled.Error()
 			reportProgress(items[i].RemotePath)
-			return "", nil, errDownloadCanceled
+			return nil, errDownloadCanceled
 		}
 		items[i].Status = "running"
 		reportProgress(items[i].RemotePath)
 
-		if err := copyRemoteFileContext(ctx, fs, items[i].RemotePath, items[i].LocalPath, items[i].Size); err != nil {
+		matched, err := remoteFileMatchesLocal(ctx, fs, items[i].RemotePath, items[i].LocalPath, items[i].Size)
+		if err != nil {
 			if errors.Is(err, errDownloadCanceled) {
 				items[i].Status = "canceled"
 				items[i].Error = errDownloadCanceled.Error()
 				reportProgress(items[i].RemotePath)
-				return "", nil, err
+				return nil, err
 			}
-			items[i].Status = "failed"
-			items[i].Error = err.Error()
-			reportProgress(items[i].RemotePath)
-			return "", nil, err
+			if items[i].Artifact {
+				recordArtifactFailure(i, err)
+			} else {
+				markDone(i, "failed", err)
+			}
+			continue
 		}
-		completedFiles++
+
+		if !matched {
+			if err := copyRemoteFileContext(ctx, fs, items[i].RemotePath, items[i].LocalPath, items[i].Size); err != nil {
+				if errors.Is(err, errDownloadCanceled) {
+					items[i].Status = "canceled"
+					items[i].Error = errDownloadCanceled.Error()
+					reportProgress(items[i].RemotePath)
+					return nil, err
+				}
+				if items[i].Artifact {
+					recordArtifactFailure(i, err)
+				} else {
+					markDone(i, "failed", err)
+				}
+				continue
+			}
+		}
 
 		if !items[i].Artifact {
-			items[i].Status = "success"
-			reportProgress(items[i].RemotePath)
+			status := "success"
+			if matched {
+				status = "skipped"
+			}
+			markDone(i, status, nil)
 			continue
 		}
 		fileName, err := safeArtifactFileName(items[i].Name)
 		if err != nil {
-			items[i].Status = "failed"
-			items[i].Error = err.Error()
-			reportProgress(items[i].RemotePath)
-			return "", nil, err
+			recordArtifactFailure(i, err)
+			continue
 		}
 		if seenArtifacts[fileName] {
 			err := fmt.Errorf("远程目录内存在同名制品文件: %s", fileName)
-			items[i].Status = "failed"
-			items[i].Error = err.Error()
-			reportProgress(items[i].RemotePath)
-			return "", nil, err
+			recordArtifactFailure(i, err)
+			continue
 		}
 		if err := validateArtifact(items[i].LocalPath); err != nil {
 			os.Remove(items[i].LocalPath)
 			wrappedErr := fmt.Errorf("%s 文件异常: %v", fileName, err)
-			items[i].Status = "failed"
-			items[i].Error = wrappedErr.Error()
-			reportProgress(items[i].RemotePath)
-			return "", nil, wrappedErr
+			recordArtifactFailure(i, wrappedErr)
+			continue
 		}
 		seenArtifacts[fileName] = true
 		artifacts = append(artifacts, fileName)
-		items[i].Status = "success"
-		reportProgress(items[i].RemotePath)
+		status := "success"
+		if matched {
+			status = "skipped"
+		}
+		markDone(i, status, nil)
 	}
 	reportProgress("")
 
-	return targetDir, artifacts, nil
+	if len(artifactFailures) > 0 {
+		return artifacts, errors.New(strings.Join(artifactFailures, "；"))
+	}
+	return artifacts, nil
 }
 
 func collectRemoteDownloadItems(fs remoteArtifactFS, remoteDir, targetDir string) ([]downloadJobItem, error) {
@@ -3029,6 +3112,113 @@ func collectRemoteDownloadItems(fs remoteArtifactFS, remoteDir, targetDir string
 	return items, nil
 }
 
+func collectRemoteDownloadSelectionItems(fs remoteArtifactFS, remoteDir string, selectedPaths []string, targetDir string) ([]downloadJobItem, error) {
+	selectedPaths = normalizeRemoteSelectionPaths(selectedPaths)
+	if len(selectedPaths) == 0 {
+		return collectRemoteDownloadItems(fs, remoteDir, targetDir)
+	}
+
+	itemsByRemotePath := map[string]downloadJobItem{}
+	for _, selectedPath := range selectedPaths {
+		cleanSelected := cleanRemoteDownloadPath(selectedPath)
+		rel, err := relativeRemoteDownloadPath(remoteDir, cleanSelected)
+		if err != nil {
+			return nil, err
+		}
+		info, err := fs.Stat(cleanSelected)
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() {
+			localDir := targetDir
+			if rel != "" {
+				localDir = filepath.Join(targetDir, filepath.FromSlash(rel))
+			}
+			childItems, err := collectRemoteDownloadItems(fs, cleanSelected, localDir)
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range childItems {
+				itemsByRemotePath[item.RemotePath] = item
+			}
+			continue
+		}
+		if rel == "" {
+			rel = path.Base(cleanSelected)
+		}
+		item := remoteDownloadFileItem(cleanSelected, filepath.Join(targetDir, filepath.FromSlash(rel)), info)
+		itemsByRemotePath[item.RemotePath] = item
+	}
+
+	items := make([]downloadJobItem, 0, len(itemsByRemotePath))
+	for _, item := range itemsByRemotePath {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].RemotePath < items[j].RemotePath })
+	return items, nil
+}
+
+func remoteDownloadFileItem(remotePath, localPath string, info os.FileInfo) downloadJobItem {
+	name := info.Name()
+	if name == "" {
+		name = path.Base(remotePath)
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	return downloadJobItem{
+		Name:       name,
+		RemotePath: remotePath,
+		LocalPath:  localPath,
+		Size:       info.Size(),
+		Status:     "pending",
+		Artifact:   ext == ".jar" || ext == ".zip",
+	}
+}
+
+func normalizeRemoteSelectionPaths(paths []string) []string {
+	seen := map[string]bool{}
+	normalized := make([]string, 0, len(paths))
+	for _, value := range paths {
+		clean := cleanRemoteDownloadPath(value)
+		if clean == "" || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		normalized = append(normalized, clean)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func cleanRemoteDownloadPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	return path.Clean(value)
+}
+
+func relativeRemoteDownloadPath(remoteDir, selectedPath string) (string, error) {
+	remoteDir = cleanRemoteDownloadPath(remoteDir)
+	selectedPath = cleanRemoteDownloadPath(selectedPath)
+	if remoteDir == "" || selectedPath == "" {
+		return "", fmt.Errorf("远程路径不能为空")
+	}
+	if selectedPath == remoteDir {
+		return "", nil
+	}
+	prefix := remoteDir
+	if prefix != "/" {
+		prefix += "/"
+	}
+	if !strings.HasPrefix(selectedPath, prefix) {
+		return "", fmt.Errorf("选择路径不在远程目录内: %s", selectedPath)
+	}
+	return strings.TrimPrefix(selectedPath, prefix), nil
+}
+
 func copyDownloadJobItems(items []downloadJobItem) []downloadJobItem {
 	if items == nil {
 		return nil
@@ -3061,14 +3251,62 @@ func copyRemoteFile(fs remoteArtifactFS, remotePath, localPath string, remoteSiz
 	return copyRemoteFileContext(context.Background(), fs, remotePath, localPath, remoteSize)
 }
 
+func remoteFileMatchesLocal(ctx context.Context, fs remoteArtifactFS, remotePath, localPath string, remoteSize int64) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, errDownloadCanceled
+	}
+	localSize, localSHA, err := fileSHA256(localPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if remoteSize >= 0 && localSize != remoteSize {
+		return false, nil
+	}
+	remoteSHA, err := remoteFileSHA256(ctx, fs, remotePath)
+	if err != nil {
+		return false, err
+	}
+	return localSHA == remoteSHA, nil
+}
+
+func remoteFileSHA256(ctx context.Context, fs remoteArtifactFS, remotePath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", errDownloadCanceled
+	}
+	src, err := fs.Open(remotePath)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+
+	h := sha256.New()
+	buf := make([]byte, 128*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", errDownloadCanceled
+		}
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			if _, err := h.Write(buf[:n]); err != nil {
+				return "", err
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return "", readErr
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func copyRemoteFileContext(ctx context.Context, fs remoteArtifactFS, remotePath, localPath string, remoteSize int64) error {
 	if err := ctx.Err(); err != nil {
 		return errDownloadCanceled
-	}
-	if remoteSize >= 0 {
-		if info, err := os.Stat(localPath); err == nil && info.Size() == remoteSize {
-			return nil
-		}
 	}
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return err

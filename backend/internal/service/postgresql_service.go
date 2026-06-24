@@ -2812,28 +2812,88 @@ func (s *PostgreSQLService) ExecuteSQLFile(ctx context.Context, fileID uint, use
 }
 
 func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileID uint, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	file, statements, options, err := s.prepareSQLFileExecution(fileID, username, options)
+	if err != nil {
+		return nil, nil, err
+	}
+	executionCtx, cancelExecution := context.WithCancel(ctx)
+	if s.cancelReg != nil {
+		if !s.cancelReg.register(fileID, cancelExecution) {
+			cancelExecution()
+			return nil, nil, fmt.Errorf("SQL 文件正在执行中")
+		}
+		defer s.cancelReg.unregister(fileID)
+	}
+	defer cancelExecution()
+	return s.runPreparedSQLFileExecution(executionCtx, file, statements, username, options)
+}
+
+func (s *PostgreSQLService) StartSQLFileExecution(ctx context.Context, fileID uint, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	_ = ctx
+	file, statements, options, err := s.prepareSQLFileExecution(fileID, username, options)
+	if err != nil {
+		return nil, nil, err
+	}
+	executionCtx, cancelExecution := context.WithCancel(context.Background())
+	if s.cancelReg != nil {
+		if !s.cancelReg.register(fileID, cancelExecution) {
+			cancelExecution()
+			return nil, nil, fmt.Errorf("SQL 文件正在执行中")
+		}
+	}
+	file.ExecuteStatus = "RUNNING"
+	file.ExecuteUser = username
+	file.ExecuteMessage = "后台执行中"
+	if err := repository.DB.Save(file).Error; err != nil {
+		if s.cancelReg != nil {
+			s.cancelReg.unregister(fileID)
+		}
+		cancelExecution()
+		return nil, nil, err
+	}
+	go func() {
+		defer cancelExecution()
+		if s.cancelReg != nil {
+			defer s.cancelReg.unregister(fileID)
+		}
+		if _, _, err := s.runPreparedSQLFileExecution(executionCtx, file, statements, username, options); err != nil {
+			s.markSQLFileExecutionFailed(fileID, username, err)
+		}
+	}()
+	return file, statements, nil
+}
+
+func (s *PostgreSQLService) prepareSQLFileExecution(fileID uint, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, SQLExecuteOptions, error) {
+	_ = username
 	options = s.applySQLExecuteSettings(options)
 	var file model.SQLChangeFile
 	if err := repository.DB.Where("is_deleted = ?", false).First(&file, fileID).Error; err != nil {
-		return nil, nil, err
+		return nil, nil, options, err
+	}
+	if file.ExecuteStatus == "RUNNING" {
+		return nil, nil, options, fmt.Errorf("SQL 文件正在执行中")
 	}
 	if file.ExecuteStatus == "SUCCESS" || file.ExecuteStatus == "SKIPPED" {
-		return nil, nil, fmt.Errorf("SQL 文件已执行过，不能重复执行")
+		return nil, nil, options, fmt.Errorf("SQL 文件已执行过，不能重复执行")
 	}
 	var statements []model.SQLChangeStatement
 	if err := repository.DB.Where("file_id = ?", fileID).Order("line_number ASC, id ASC").Find(&statements).Error; err != nil {
-		return nil, nil, err
+		return nil, nil, options, err
 	}
 	if refreshStatementsStaticRiskBeforeExecution(statements) {
 		for i := range statements {
 			if err := repository.DB.Save(&statements[i]).Error; err != nil {
-				return nil, nil, err
+				return nil, nil, options, err
 			}
 		}
 	}
 	if err := requireWarnConfirmation(statements, options); err != nil {
-		return nil, nil, err
+		return nil, nil, options, err
 	}
+	return &file, statements, options, nil
+}
+
+func (s *PostgreSQLService) runPreparedSQLFileExecution(ctx context.Context, file *model.SQLChangeFile, statements []model.SQLChangeStatement, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
 	forceWhitelist, err := s.loadSQLForceWhitelist()
 	if err != nil {
 		return nil, nil, err
@@ -2849,19 +2909,10 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 	}
 	defer db.Close()
 
-	executionCtx, cancelExecution := context.WithCancel(ctx)
-	if s.cancelReg != nil {
-		if !s.cancelReg.register(fileID, cancelExecution) {
-			cancelExecution()
-			return nil, nil, fmt.Errorf("SQL 文件正在执行中")
-		}
-		defer s.cancelReg.unregister(fileID)
-	}
-	defer cancelExecution()
-
 	file.ExecuteStatus = "RUNNING"
 	file.ExecuteUser = username
-	repository.DB.Save(&file)
+	file.ExecuteMessage = "执行中"
+	repository.DB.Save(file)
 
 	successCount := 0
 	failedCount := 0
@@ -2870,7 +2921,7 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 	canceledCount := 0
 	for i := range statements {
 		stmt := &statements[i]
-		if executionCtx.Err() != nil {
+		if ctx.Err() != nil {
 			canceledCount++
 			break
 		}
@@ -2890,13 +2941,13 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 			continue
 		}
 
-		execCtx, cancel := context.WithTimeout(executionCtx, sqlExecutionContextTimeout(stmt.SQLType, options))
+		execCtx, cancel := context.WithTimeout(ctx, sqlExecutionContextTimeout(stmt.SQLType, options))
 		start := time.Now()
 		stmt.ExecuteStatus = "RUNNING"
 		repository.DB.Save(stmt)
 
 		affected, sqlState, execErr := executeOneSQL(execCtx, db, file.SchemaName, stmt.SQLContent, stmt.SQLType, ownerUser, options)
-		executionCanceled := isSQLExecutionCanceled(executionCtx.Err(), execErr)
+		executionCanceled := isSQLExecutionCanceled(ctx.Err(), execErr)
 		cancel()
 
 		now := time.Now()
@@ -2947,8 +2998,21 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 		file.ExecuteStatus = "SUCCESS"
 	}
 	file.ExecuteMessage = fmt.Sprintf("成功 %d，失败 %d，不可执行 %d，跳过 %d，取消 %d", successCount, failedCount, blockedCount, skippedCount, canceledCount)
-	repository.DB.Save(&file)
-	return &file, statements, nil
+	repository.DB.Save(file)
+	return file, statements, nil
+}
+
+func (s *PostgreSQLService) markSQLFileExecutionFailed(fileID uint, username string, err error) {
+	var file model.SQLChangeFile
+	if dbErr := repository.DB.Where("is_deleted = ?", false).First(&file, fileID).Error; dbErr != nil {
+		return
+	}
+	now := time.Now()
+	file.ExecuteStatus = "FAILED"
+	file.ExecuteMessage = err.Error()
+	file.ExecuteUser = username
+	file.ExecuteTime = &now
+	_ = repository.DB.Save(&file).Error
 }
 
 func (s *PostgreSQLService) ExecuteSQLStatementWithOptions(ctx context.Context, statementID uint, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
@@ -3256,7 +3320,39 @@ func recomputeSQLFileStatus(fileID uint, username string) (*model.SQLChangeFile,
 	return &file, nil
 }
 
-func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, username string, options SQLExecuteOptions) (*model.SQLChangeBatch, []model.SQLChangeFile, error) {
+func (s *PostgreSQLService) StartSQLBatchExecution(ctx context.Context, batchID uint, username string, options SQLExecuteOptions) (*model.SQLChangeBatch, []model.SQLChangeFile, error) {
+	_ = ctx
+	batch, files, err := s.loadSQLBatchExecution(batchID)
+	if err != nil {
+		return nil, nil, err
+	}
+	executionCtx, cancelBatch := context.WithCancel(context.Background())
+	if s.batchCancelReg != nil {
+		if !s.batchCancelReg.register(batchID, cancelBatch) {
+			cancelBatch()
+			return nil, nil, fmt.Errorf("SQL 批次正在执行中")
+		}
+	}
+	if err := s.markSQLBatchRunning(batch, username, fmt.Sprintf("后台批次执行中，将按顺序执行 %d 个 SQL 文件", len(files))); err != nil {
+		if s.batchCancelReg != nil {
+			s.batchCancelReg.unregister(batchID)
+		}
+		cancelBatch()
+		return nil, nil, err
+	}
+	go func() {
+		defer cancelBatch()
+		if s.batchCancelReg != nil {
+			defer s.batchCancelReg.unregister(batchID)
+		}
+		if _, _, err := s.runPreparedSQLBatchExecution(executionCtx, batch, files, username, options); err != nil {
+			s.markSQLBatchFailed(batchID, username, err)
+		}
+	}()
+	return batch, files, nil
+}
+
+func (s *PostgreSQLService) loadSQLBatchExecution(batchID uint) (*model.SQLChangeBatch, []model.SQLChangeFile, error) {
 	var batch model.SQLChangeBatch
 	if err := repository.DB.Where("is_deleted = ?", false).First(&batch, batchID).Error; err != nil {
 		return nil, nil, err
@@ -3268,6 +3364,14 @@ func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, u
 	if len(files) == 0 {
 		return nil, nil, fmt.Errorf("批次下没有 SQL 文件")
 	}
+	return &batch, files, nil
+}
+
+func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, username string, options SQLExecuteOptions) (*model.SQLChangeBatch, []model.SQLChangeFile, error) {
+	batch, files, err := s.loadSQLBatchExecution(batchID)
+	if err != nil {
+		return nil, nil, err
+	}
 	batchCtx, cancelBatch := context.WithCancel(ctx)
 	if s.batchCancelReg != nil {
 		if !s.batchCancelReg.register(batchID, cancelBatch) {
@@ -3277,17 +3381,26 @@ func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, u
 		defer s.batchCancelReg.unregister(batchID)
 	}
 	defer cancelBatch()
+	return s.runPreparedSQLBatchExecution(batchCtx, batch, files, username, options)
+}
 
+func (s *PostgreSQLService) markSQLBatchRunning(batch *model.SQLChangeBatch, username string, message string) error {
 	batch.ExecuteStatus = "RUNNING"
 	batch.ExecuteUser = username
-	_ = repository.DB.Save(&batch).Error
+	batch.ExecuteMessage = message
+	return repository.DB.Save(batch).Error
+}
 
+func (s *PostgreSQLService) runPreparedSQLBatchExecution(ctx context.Context, batch *model.SQLChangeBatch, files []model.SQLChangeFile, username string, options SQLExecuteOptions) (*model.SQLChangeBatch, []model.SQLChangeFile, error) {
+	if err := s.markSQLBatchRunning(batch, username, fmt.Sprintf("正在按顺序执行 %d 个 SQL 文件", len(files))); err != nil {
+		return nil, nil, err
+	}
 	successFiles := 0
 	failedFiles := 0
 	skippedFiles := 0
 	canceledFiles := 0
 	for i := range files {
-		if batchCtx.Err() != nil {
+		if ctx.Err() != nil {
 			canceledFiles += markRemainingBatchFilesCanceled(files[i:], username)
 			break
 		}
@@ -3299,16 +3412,21 @@ func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, u
 			skippedFiles++
 			continue
 		}
-		file, _, err := s.ExecuteSQLFileWithOptions(batchCtx, files[i].ID, username, options)
+		s.updateSQLBatchProgress(batch.ID, username, fmt.Sprintf("正在执行第 %d/%d 个文件: %s", i+1, len(files), files[i].FileName))
+		file, _, err := s.ExecuteSQLFileWithOptions(ctx, files[i].ID, username, options)
 		if err != nil {
-			if batchCtx.Err() != nil || errors.Is(err, context.Canceled) {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 				files[i] = persistSQLFileTerminalStatus(files[i].ID, "CANCELED", "批次取消", username)
 				canceledFiles++
+				if i+1 < len(files) {
+					canceledFiles += markRemainingBatchFilesCanceled(files[i+1:], username)
+				}
+				break
 			} else {
 				files[i] = persistSQLFileTerminalStatus(files[i].ID, "FAILED", err.Error(), username)
 				failedFiles++
 			}
-			break
+			continue
 		}
 		files[i] = *file
 		switch file.ExecuteStatus {
@@ -3322,6 +3440,9 @@ func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, u
 			failedFiles++
 		}
 		if file.ExecuteStatus == "CANCELED" {
+			if i+1 < len(files) {
+				canceledFiles += markRemainingBatchFilesCanceled(files[i+1:], username)
+			}
 			break
 		}
 	}
@@ -3334,7 +3455,32 @@ func (s *PostgreSQLService) ExecuteSQLBatch(ctx context.Context, batchID uint, u
 	if err := repository.DB.Save(&batch).Error; err != nil {
 		return nil, nil, err
 	}
-	return &batch, files, nil
+	if err := repository.DB.Where("batch_id = ? AND is_deleted = ?", batch.ID, false).Order("batch_sort_no ASC, file_name ASC, id ASC").Find(&files).Error; err != nil {
+		return nil, nil, err
+	}
+	return batch, files, nil
+}
+
+func (s *PostgreSQLService) updateSQLBatchProgress(batchID uint, username string, message string) {
+	_ = repository.DB.Model(&model.SQLChangeBatch{}).
+		Where("id = ? AND is_deleted = ?", batchID, false).
+		Updates(map[string]any{
+			"execute_status":  "RUNNING",
+			"execute_user":    username,
+			"execute_message": message,
+		}).Error
+}
+
+func (s *PostgreSQLService) markSQLBatchFailed(batchID uint, username string, err error) {
+	now := time.Now()
+	_ = repository.DB.Model(&model.SQLChangeBatch{}).
+		Where("id = ? AND is_deleted = ?", batchID, false).
+		Updates(map[string]any{
+			"execute_status":  "FAILED",
+			"execute_user":    username,
+			"execute_time":    &now,
+			"execute_message": err.Error(),
+		}).Error
 }
 
 func (s *PostgreSQLService) CancelSQLBatch(batchID uint, username string) (*model.SQLChangeBatch, error) {
