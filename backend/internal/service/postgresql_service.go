@@ -1683,11 +1683,16 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 
 func (s *PostgreSQLService) createSQLStatementsForFile(db *gorm.DB, fileID uint, content, schemaName string, statements []string) ([]model.SQLChangeStatement, error) {
 	items := make([]model.SQLChangeStatement, 0, len(statements))
-	for _, sqlText := range statements {
+	completedStatements := completeMissingSchemasFromFileContext(statements)
+	for idx, sqlText := range completedStatements {
+		originalSQL := sqlText
+		if idx < len(statements) {
+			originalSQL = statements[idx]
+		}
 		analysis, viewDeps, strategy := s.analyzeSQLForChangeStatement(schemaName, sqlText)
 		item := model.SQLChangeStatement{
 			FileID:              fileID,
-			LineNumber:          lineNumberForSQL(content, sqlText),
+			LineNumber:          lineNumberForSQL(content, originalSQL),
 			SQLContent:          sqlText,
 			SQLType:             analysis.SQLType,
 			RiskLevel:           analysis.RiskLevel,
@@ -1964,6 +1969,8 @@ type schemaCompletionRef struct {
 	location     int
 }
 
+const schemaCompletionAmbiguousSchema = "\x00AMBIGUOUS_SCHEMA"
+
 var (
 	schemaCompletionSchemaNameRegexp = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 )
@@ -2026,11 +2033,132 @@ func collectSchemaCompletionRefsFromAST(sqlText string) ([]schemaCompletionRef, 
 		}
 		cteNames := collectCTENames(rawStmt.GetStmt().ProtoReflect(), nil)
 		collectSchemaCompletionRefs(rawStmt.GetStmt().ProtoReflect(), cteNames, seenLocations, &refs)
+		if rawStmt.GetStmt().GetCommentStmt() != nil {
+			collectSchemaCompletionRefsFromCommentSQL(sqlText, seenLocations, &refs)
+		}
 	}
 	sort.SliceStable(refs, func(i, j int) bool {
 		return refs[i].location > refs[j].location
 	})
 	return refs, nil
+}
+
+func completeMissingSchemasFromFileContext(statements []string) []string {
+	relationSchemas := collectExplicitRelationSchemasFromStatements(statements)
+	if len(relationSchemas) == 0 {
+		return statements
+	}
+	completed := make([]string, len(statements))
+	for idx, sqlText := range statements {
+		completed[idx] = sqlText
+		refs, err := collectSchemaCompletionRefsFromAST(sqlText)
+		if err != nil || len(refs) == 0 {
+			continue
+		}
+		completed[idx] = rewriteSchemaCompletionRefs(sqlText, refs, relationSchemas)
+	}
+	return completed
+}
+
+func collectExplicitRelationSchemasFromStatements(statements []string) map[string]string {
+	schemas := make(map[string]string)
+	for _, sqlText := range statements {
+		tree, err := pg_query.Parse(sqlText)
+		if err != nil {
+			continue
+		}
+		for _, rawStmt := range tree.GetStmts() {
+			if rawStmt == nil || rawStmt.GetStmt() == nil {
+				continue
+			}
+			for _, target := range schemaRequiredTargets(rawStmt.GetStmt()) {
+				storeExplicitRelationSchema(schemas, target.rel)
+			}
+			collectExplicitRangeVarSchemas(rawStmt.GetStmt().ProtoReflect(), schemas)
+		}
+	}
+	return schemas
+}
+
+func collectExplicitRangeVarSchemas(message protoreflect.Message, schemas map[string]string) {
+	if !message.IsValid() {
+		return
+	}
+	if rel, ok := message.Interface().(*pg_query.RangeVar); ok {
+		storeExplicitRelationSchema(schemas, rel)
+	}
+	fields := message.Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
+			continue
+		}
+		value := message.Get(field)
+		if field.IsList() {
+			list := value.List()
+			for j := 0; j < list.Len(); j++ {
+				collectExplicitRangeVarSchemas(list.Get(j).Message(), schemas)
+			}
+			continue
+		}
+		if value.Message().IsValid() {
+			collectExplicitRangeVarSchemas(value.Message(), schemas)
+		}
+	}
+}
+
+func storeExplicitRelationSchema(schemas map[string]string, rel *pg_query.RangeVar) {
+	if rel == nil {
+		return
+	}
+	schemaName := strings.TrimSpace(rel.GetSchemaname())
+	relName := strings.TrimSpace(rel.GetRelname())
+	if schemaName == "" || relName == "" {
+		return
+	}
+	store := func(key string) {
+		existing, exists := schemas[key]
+		if exists && existing == schemaCompletionAmbiguousSchema {
+			return
+		}
+		if exists && existing != "" && !strings.EqualFold(existing, schemaName) {
+			schemas[key] = schemaCompletionAmbiguousSchema
+			return
+		}
+		schemas[key] = schemaName
+	}
+	store(relName)
+	store(strings.ToLower(relName))
+}
+
+func collectSchemaCompletionRefsFromCommentSQL(sqlText string, seenLocations map[int]struct{}, refs *[]schemaCompletionRef) {
+	if match := reCommentOnColumn.FindStringSubmatchIndex(sqlText); len(match) >= 4 {
+		objectText := sqlText[match[2]:match[3]]
+		parts := strings.Split(objectText, ".")
+		if len(parts) == 2 {
+			addSchemaCompletionRef(parts[0], match[2], seenLocations, refs)
+		}
+		return
+	}
+	if match := reCommentOnRelation.FindStringSubmatchIndex(sqlText); len(match) >= 4 {
+		objectText := sqlText[match[2]:match[3]]
+		parts := strings.Split(objectText, ".")
+		if len(parts) == 1 {
+			addSchemaCompletionRef(parts[0], match[2], seenLocations, refs)
+		}
+	}
+}
+
+func addSchemaCompletionRef(relationName string, location int, seenLocations map[int]struct{}, refs *[]schemaCompletionRef) {
+	relationName = strings.TrimSpace(relationName)
+	if relationName == "" || location < 0 {
+		return
+	}
+	if _, exists := seenLocations[location]; exists {
+		return
+	}
+	seenLocations[location] = struct{}{}
+	*refs = append(*refs, schemaCompletionRef{relationName: relationName, location: location})
 }
 
 func collectSchemaCompletionRefs(message protoreflect.Message, cteNames map[string]struct{}, seenLocations map[int]struct{}, refs *[]schemaCompletionRef) {
@@ -2079,6 +2207,9 @@ func rewriteSchemaCompletionRefs(sqlText string, refs []schemaCompletionRef, sch
 		}
 		schema := strings.TrimSpace(schemas[ref.relationName])
 		if schema == "" {
+			schema = strings.TrimSpace(schemas[strings.ToLower(ref.relationName)])
+		}
+		if schema == "" || schema == schemaCompletionAmbiguousSchema {
 			continue
 		}
 		completed = completed[:ref.location] + quotePGIdentifierIfNeeded(schema) + "." + completed[ref.location:]

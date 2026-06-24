@@ -1174,6 +1174,91 @@ func TestAutocompleteSQLStatementSchemaFillsUniqueRelation(t *testing.T) {
 	}
 }
 
+func TestCreateSQLStatementsForFileCompletesCommentSchemaFromFileContext(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	content := `
+CREATE TABLE df_yaokufang.gy_mashangfxdjmx (id bigint);
+-- DFHIS-1
+COMMENT ON TABLE gy_mashangfxdjmx IS '药品出库单据明细';
+-- DFHIS-2
+COMMENT ON COLUMN gy_mashangfxdjmx.id IS '主键';
+SELECT 1;`
+	file := model.SQLChangeFile{FileName: "comment-schema-context.sql", SchemaName: "df_yaokufang", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+
+	items, err := NewPostgreSQLService().createSQLStatementsForFile(repository.DB, file.ID, content, "df_yaokufang", SplitSQLStatements(content))
+	if err != nil {
+		t.Fatalf("create statements: %v", err)
+	}
+	if len(items) != 4 {
+		t.Fatalf("expected 4 statements, got %d", len(items))
+	}
+	if !strings.Contains(items[1].SQLContent, "COMMENT ON TABLE df_yaokufang.gy_mashangfxdjmx") {
+		t.Fatalf("expected table comment schema completion, got %q", items[1].SQLContent)
+	}
+	if !strings.Contains(items[2].SQLContent, "COMMENT ON COLUMN df_yaokufang.gy_mashangfxdjmx.id") {
+		t.Fatalf("expected column comment schema completion, got %q", items[2].SQLContent)
+	}
+	for _, item := range items[1:3] {
+		if item.SQLType == "MISSING_SCHEMA" || item.ExecuteStatus == "NOT_EXECUTABLE" {
+			t.Fatalf("expected completed comment to be executable, got %+v", item)
+		}
+	}
+}
+
+func TestCreateSQLStatementsForFileLeavesAmbiguousCommentSchemaForManualHandling(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	content := `
+CREATE TABLE df_a.gy_same_name (id bigint);
+CREATE TABLE df_b.gy_same_name (id bigint);
+COMMENT ON TABLE gy_same_name IS 'same table';`
+	file := model.SQLChangeFile{FileName: "comment-ambiguous-schema.sql", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+
+	items, err := NewPostgreSQLService().createSQLStatementsForFile(repository.DB, file.ID, content, "df_a", SplitSQLStatements(content))
+	if err != nil {
+		t.Fatalf("create statements: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected 3 statements, got %d", len(items))
+	}
+	if strings.Contains(items[2].SQLContent, "df_a.gy_same_name") || strings.Contains(items[2].SQLContent, "df_b.gy_same_name") {
+		t.Fatalf("ambiguous relation must not be auto-completed, got %q", items[2].SQLContent)
+	}
+	if items[2].SQLType != "MISSING_SCHEMA" || items[2].ExecuteStatus != "NOT_EXECUTABLE" {
+		t.Fatalf("expected ambiguous comment to require manual schema handling, got %+v", items[2])
+	}
+}
+
+func TestCreateSQLStatementsForFileMarksUnresolvedCommentSchemaWithoutBlockingOtherStatements(t *testing.T) {
+	setupSQLChangeServiceTestDB(t)
+	content := `
+COMMENT ON TABLE gy_unknown IS 'unknown table';
+SELECT 1;`
+	file := model.SQLChangeFile{FileName: "comment-unresolved-schema.sql", SchemaName: "df_yaokufang", ExecuteStatus: "PENDING"}
+	if err := repository.DB.Create(&file).Error; err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+
+	items, err := NewPostgreSQLService().createSQLStatementsForFile(repository.DB, file.ID, content, "df_yaokufang", SplitSQLStatements(content))
+	if err != nil {
+		t.Fatalf("create statements: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 statements, got %d", len(items))
+	}
+	if items[0].SQLType != "MISSING_SCHEMA" || items[0].ExecuteStatus != "NOT_EXECUTABLE" {
+		t.Fatalf("expected unresolved comment to require manual schema handling, got %+v", items[0])
+	}
+	if items[1].ExecuteStatus != "PENDING" {
+		t.Fatalf("expected following SQL to remain executable, got %+v", items[1])
+	}
+}
+
 func TestAutocompleteSQLStatementSchemaFillsCreateViewReferencesFromAST(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	setSQLExecutionSettingsToTestDatabase(t)

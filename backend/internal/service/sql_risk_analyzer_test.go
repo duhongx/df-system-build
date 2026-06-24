@@ -36,6 +36,9 @@ func TestAnalyzeSQLRiskBlocksBusinessSQLWithoutExplicitSchema(t *testing.T) {
 		{name: "create index", sql: "CREATE INDEX idx_patient_id ON patient(id)"},
 		{name: "create view", sql: "CREATE VIEW v_patient AS SELECT id FROM his.patient"},
 		{name: "view source table", sql: "CREATE VIEW his.v_patient AS SELECT id FROM patient"},
+		{name: "comment table target", sql: "COMMENT ON TABLE patient IS 'patient table'"},
+		{name: "comment column target", sql: "COMMENT ON COLUMN patient.name IS 'patient name'"},
+		{name: "comment table target with leading comment", sql: "-- DFHIS-1\nCOMMENT ON TABLE patient IS 'patient table'"},
 		{name: "truncate", sql: "TRUNCATE TABLE patient"},
 		{name: "refresh materialized view", sql: "REFRESH MATERIALIZED VIEW patient_summary"},
 		{name: "create function", sql: "CREATE OR REPLACE FUNCTION f_patient() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$"},
@@ -67,6 +70,8 @@ func TestAnalyzeSQLRiskAllowsExplicitSchemaBusinessSQL(t *testing.T) {
 		"CREATE INDEX idx_patient_id ON his.patient(id)",
 		"CREATE VIEW his.v_patient AS SELECT id FROM his.patient",
 		"CREATE VIEW his.v_patient AS WITH recent_patient AS (SELECT id FROM his.patient) SELECT id FROM recent_patient",
+		"COMMENT ON TABLE his.patient IS 'patient table'",
+		"COMMENT ON COLUMN his.patient.name IS 'patient name'",
 		"TRUNCATE TABLE his.patient",
 	}
 

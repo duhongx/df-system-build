@@ -45,6 +45,8 @@ var (
 	reTimeCondition           = regexp.MustCompile(`(?i)(<|<=|>|>=)\s*(now\s*\(\s*\)|current_timestamp\b)`)
 	reSetExpression           = regexp.MustCompile(`(?is)\bSET\s+(.+?)(?:\bWHERE\b|\bRETURNING\b|$)`)
 	reNotValid                = regexp.MustCompile(`(?i)\bNOT\s+VALID\b`)
+	reCommentOnRelation       = regexp.MustCompile(`(?is)\bCOMMENT\s+ON\s+(?:TABLE|VIEW|MATERIALIZED\s+VIEW|INDEX|SEQUENCE)\s+([a-zA-Z_][\w$]*(?:\.[a-zA-Z_][\w$]*)?)\s+IS\b`)
+	reCommentOnColumn         = regexp.MustCompile(`(?is)\bCOMMENT\s+ON\s+COLUMN\s+([a-zA-Z_][\w$]*(?:\.[a-zA-Z_][\w$]*){1,2})\s+IS\b`)
 )
 
 type blockedRule struct {
@@ -58,7 +60,7 @@ func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
 	if err != nil {
 		return RiskAnalysis{SQLType: "SQL_PARSE_ERROR", RiskLevel: "BLOCKED", RiskReason: "SQL 语法解析失败: " + err.Error()}
 	}
-	if reason, ok := missingExplicitSchemaReason(tree); ok {
+	if reason, ok := missingExplicitSchemaReason(sqlText, tree); ok {
 		return RiskAnalysis{SQLType: "MISSING_SCHEMA", RiskLevel: "BLOCKED", RiskReason: reason}
 	}
 	if risk, ok := analyzeSQLRiskFromAST(tree); ok {
@@ -655,7 +657,7 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 	}
 }
 
-func missingExplicitSchemaReason(tree *pg_query.ParseResult) (string, bool) {
+func missingExplicitSchemaReason(sqlText string, tree *pg_query.ParseResult) (string, bool) {
 	if tree == nil {
 		return "", false
 	}
@@ -677,6 +679,30 @@ func missingExplicitSchemaReason(tree *pg_query.ParseResult) (string, bool) {
 		cteNames := collectCTENames(rawStmt.GetStmt().ProtoReflect(), nil)
 		if relName, ok := findMissingSchemaRangeVar(rawStmt.GetStmt().ProtoReflect(), cteNames); ok {
 			return fmt.Sprintf("SQL 引用对象 %s 未显式指定 schema，请使用 schema.object 形式", relName), true
+		}
+		if relName, ok := missingSchemaCommentObjectFromStmt(rawStmt.GetStmt().GetCommentStmt()); ok {
+			return fmt.Sprintf("COMMENT 引用对象 %s 未显式指定 schema，请使用 schema.object 形式", relName), true
+		}
+	}
+	return "", false
+}
+
+func missingSchemaCommentObjectFromStmt(stmt *pg_query.CommentStmt) (string, bool) {
+	if stmt == nil {
+		return "", false
+	}
+	parts := stringListFromNode(stmt.GetObject())
+	if len(parts) == 0 {
+		return "", false
+	}
+	switch stmt.GetObjtype() {
+	case pg_query.ObjectType_OBJECT_COLUMN:
+		if len(parts) < 3 {
+			return parts[0], true
+		}
+	case pg_query.ObjectType_OBJECT_TABLE, pg_query.ObjectType_OBJECT_VIEW, pg_query.ObjectType_OBJECT_MATVIEW, pg_query.ObjectType_OBJECT_INDEX, pg_query.ObjectType_OBJECT_SEQUENCE:
+		if len(parts) < 2 {
+			return parts[0], true
 		}
 	}
 	return "", false
