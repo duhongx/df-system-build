@@ -145,8 +145,8 @@ func (h *BatchDeployHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/deploy-batches/:batchNo", h.GetArtifactDeployBatch)
 		g.POST("/deploy-batches/:batchNo/rollback", h.RollbackArtifactDeployBatch)
 		g.GET("/source-batches", h.ListSourceBatches)
-		g.POST("/download-remote-dir/cancel/:id", h.CancelDownloadJob)
-		g.GET("/download-remote-dir/progress/:id", h.GetDownloadProgress)
+		g.POST("/download-remote-dir/cancel/*id", h.CancelDownloadJob)
+		g.GET("/download-remote-dir/progress/*id", h.GetDownloadProgress)
 		g.POST("/download-remote-dir", h.DownloadRemoteDir)
 		g.POST("/match", h.Match)
 		g.POST("/execute", h.Execute)
@@ -971,7 +971,7 @@ func removeDownloadJobsFromMemoryByBatchID(batchID string) {
 }
 
 func (h *BatchDeployHandler) CancelDownloadJob(c *gin.Context) {
-	jobID := c.Param("id")
+	jobID := downloadJobIDFromRouteParam(c.Param("id"))
 	if jobID == "" {
 		response.Fail(c, 13016, "下载任务不存在")
 		return
@@ -1026,12 +1026,16 @@ func copyDownloadJob(job downloadJob) downloadJob {
 }
 
 func (h *BatchDeployHandler) GetDownloadProgress(c *gin.Context) {
-	jobID := c.Param("id")
+	jobID := downloadJobIDFromRouteParam(c.Param("id"))
 	if snapshot, ok := getDownloadJobSnapshot(jobID); ok {
 		response.OK(c, snapshot)
 		return
 	}
 	response.Fail(c, 13011, "下载任务不存在")
+}
+
+func downloadJobIDFromRouteParam(value string) string {
+	return strings.TrimPrefix(value, "/")
 }
 
 func runDownloadJob(jobID string, serverID uint, remotePath string, selectedPaths []string, localDir string) {

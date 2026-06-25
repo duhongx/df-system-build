@@ -485,6 +485,60 @@ func TestDownloadRemoteDirPreservesRemoteModTime(t *testing.T) {
 	}
 }
 
+func TestDownloadProgressRouteAcceptsLegacySlashJobID(t *testing.T) {
+	jobID := "HIS更新/测试中版本"
+	seedDownloadJobForRouteTest(t, downloadJob{ID: jobID, Status: "running"})
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/batch-deploy/download-remote-dir/progress/*id", NewBatchDeployHandler().GetDownloadProgress)
+
+	req := httptest.NewRequest(http.MethodGet, "/batch-deploy/download-remote-dir/progress/HIS%E6%9B%B4%E6%96%B0%2F%E6%B5%8B%E8%AF%95%E4%B8%AD%E7%89%88%E6%9C%AC", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected progress route status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Code int         `json:"code"`
+		Data downloadJob `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Code != 0 || payload.Data.ID != jobID {
+		t.Fatalf("expected legacy slash job to be returned, got %#v", payload)
+	}
+}
+
+func TestCancelDownloadRouteAcceptsLegacySlashJobID(t *testing.T) {
+	jobID := "HIS更新/测试中版本"
+	seedDownloadJobForRouteTest(t, downloadJob{ID: jobID, Status: "running"})
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/batch-deploy/download-remote-dir/cancel/*id", NewBatchDeployHandler().CancelDownloadJob)
+
+	req := httptest.NewRequest(http.MethodPost, "/batch-deploy/download-remote-dir/cancel/HIS%E6%9B%B4%E6%96%B0%2F%E6%B5%8B%E8%AF%95%E4%B8%AD%E7%89%88%E6%9C%AC", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected cancel route status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Code int         `json:"code"`
+		Data downloadJob `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Code != 0 || payload.Data.ID != jobID || payload.Data.Status != "canceled" {
+		t.Fatalf("expected legacy slash job to be canceled, got %#v", payload)
+	}
+}
+
 func TestDownloadRemoteDirRedownloadsSameSizeChangedFile(t *testing.T) {
 	fs := fakeRemoteFS{
 		dirs: map[string][]fakeRemoteEntry{
@@ -1972,4 +2026,29 @@ func (f *fakeRemoteFS) OpenAt(path string, offset int64) (io.ReadCloser, error) 
 		return io.NopCloser(strings.NewReader("")), nil
 	}
 	return io.NopCloser(strings.NewReader(content[offset:])), nil
+}
+
+func seedDownloadJobForRouteTest(t *testing.T, job downloadJob) {
+	t.Helper()
+	downloadJobStore.Lock()
+	oldJobs := downloadJobStore.items
+	downloadJobStore.items = map[string]*downloadJob{
+		job.ID: &job,
+	}
+	downloadJobStore.Unlock()
+
+	downloadJobCancelStore.Lock()
+	oldCancels := downloadJobCancelStore.items
+	downloadJobCancelStore.items = map[string]context.CancelFunc{}
+	downloadJobCancelStore.Unlock()
+
+	t.Cleanup(func() {
+		downloadJobStore.Lock()
+		downloadJobStore.items = oldJobs
+		downloadJobStore.Unlock()
+
+		downloadJobCancelStore.Lock()
+		downloadJobCancelStore.items = oldCancels
+		downloadJobCancelStore.Unlock()
+	})
 }
