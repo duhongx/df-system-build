@@ -844,6 +844,11 @@ func (h *BatchDeployHandler) StartDownloadRemoteDir(c *gin.Context) {
 		response.Fail(c, 13010, err.Error())
 		return
 	}
+	versionNo, err := downloadVersionNoForRemoteSelection(req.RemotePath, selectedPaths)
+	if err != nil {
+		response.Fail(c, 13010, err.Error())
+		return
+	}
 	if existing, ok := getDownloadJobSnapshot(jobID); ok && (existing.Status == "pending" || existing.Status == "running") {
 		response.OK(c, existing)
 		return
@@ -855,7 +860,7 @@ func (h *BatchDeployHandler) StartDownloadRemoteDir(c *gin.Context) {
 		RemotePath:    req.RemotePath,
 		SelectedPaths: selectedPaths,
 		LocalDir:      localDir,
-		BatchID:       jobID,
+		BatchID:       versionNo,
 		StartedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
@@ -889,10 +894,34 @@ func (h *BatchDeployHandler) GetActiveDownloadJob(c *gin.Context) {
 }
 
 func downloadJobIDForRemotePath(remotePath string, selectedPaths []string) (string, error) {
-	if len(selectedPaths) == 1 {
-		return packageRelativeLocalPath(selectedPaths[0])
+	parts := []string{strings.TrimSpace(remotePath)}
+	normalizedSelections := append([]string(nil), selectedPaths...)
+	sort.Strings(normalizedSelections)
+	parts = append(parts, normalizedSelections...)
+	seed := strings.Join(parts, "\n")
+	if strings.TrimSpace(seed) == "" {
+		return "", fmt.Errorf("远程路径为空")
 	}
-	return packageRelativeLocalPath(remotePath)
+	sum := sha256.Sum256([]byte(seed))
+	return "dl-" + hex.EncodeToString(sum[:])[:24], nil
+}
+
+func downloadVersionNoForRemoteSelection(remotePath string, selectedPaths []string) (string, error) {
+	var sourcePath string
+	if len(selectedPaths) == 1 {
+		sourcePath = selectedPaths[0]
+	} else {
+		sourcePath = remotePath
+	}
+	relativePath, err := packageRelativeLocalPath(sourcePath)
+	if err != nil {
+		return "", err
+	}
+	versionNo := safePathSegment(relativePath)
+	if versionNo == "" {
+		return "", fmt.Errorf("下载版本名称无效")
+	}
+	return versionNo, nil
 }
 
 func downloadWorkspaceDirForStart(remotePath string) (string, error) {

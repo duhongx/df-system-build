@@ -534,6 +534,40 @@ func TestPackageRelativeLocalPathFallsBackToPackageRootName(t *testing.T) {
 	}
 }
 
+func TestDownloadJobIDForRemotePathUsesRouteSafeHash(t *testing.T) {
+	jobID, err := downloadJobIDForRemotePath("/root/DFHIS/HIS更新/测试中版本", nil)
+	if err != nil {
+		t.Fatalf("resolve download job id: %v", err)
+	}
+	if strings.Contains(jobID, "/") {
+		t.Fatalf("download job id must not contain path separators, got %s", jobID)
+	}
+	if len(jobID) < 16 {
+		t.Fatalf("download job id should be a stable hash-like id, got %s", jobID)
+	}
+
+	selectedJobID, err := downloadJobIDForRemotePath("/root/DFHIS/HIS更新", []string{"/root/DFHIS/HIS更新/测试中版本"})
+	if err != nil {
+		t.Fatalf("resolve selected download job id: %v", err)
+	}
+	if strings.Contains(selectedJobID, "/") {
+		t.Fatalf("selected download job id must not contain path separators, got %s", selectedJobID)
+	}
+	if selectedJobID == jobID {
+		t.Fatalf("different download selections should not share the same job id")
+	}
+}
+
+func TestDownloadVersionNoForRemoteSelectionKeepsReadableLeafName(t *testing.T) {
+	versionNo, err := downloadVersionNoForRemoteSelection("/root/DFHIS/HIS更新/测试中版本", nil)
+	if err != nil {
+		t.Fatalf("resolve download version no: %v", err)
+	}
+	if versionNo != "测试中版本" {
+		t.Fatalf("expected readable version leaf name, got %s", versionNo)
+	}
+}
+
 func TestNormalizeLegacyPackageDownloadDirsRemovesServerAbsoluteAncestors(t *testing.T) {
 	root := t.TempDir()
 	legacyDir := filepath.Join(root, "root", "DFHIS", "HIS更新", "测试中版本")

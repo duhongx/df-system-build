@@ -97,6 +97,8 @@ assert.match(batchDeployApi, /selectedPaths\?: string\[\]/, 'download job API ty
 assert.match(batchDeployApi, /selectedPaths\?: string\[\][\s\S]*download-remote-dir\/start/, 'start download API should send selected remote paths')
 assert.match(batchDeployApi, /package-download\/local-list/, 'batch deploy API should expose local package download workspace listing')
 assert.match(batchDeployApi, /download-remote-dir\/cancel/, 'batch deploy API should expose download cancellation')
+assert.match(batchDeployApi, /download-remote-dir\/progress\/\$\{encodeURIComponent\(jobId\)\}/, 'download progress API should encode job ids before placing them in URL paths')
+assert.match(batchDeployApi, /download-remote-dir\/cancel\/\$\{encodeURIComponent\(jobId\)\}/, 'download cancel API should encode job ids before placing them in URL paths')
 assert.match(batchDeployApi, /deleteArtifactVersion/, 'batch deploy API should expose update version deletion')
 assert.match(artifactBatches, /deleteArtifactVersion/, 'update versions should allow deleting unused downloaded versions')
 assert.match(artifactBatches, /删除更新版本/, 'update version deletion should be confirmed before removing records and files')

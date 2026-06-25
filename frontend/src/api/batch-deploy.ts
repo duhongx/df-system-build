@@ -173,10 +173,10 @@ export const startDownloadRemoteDir = (remotePath: string, localPath?: string, s
   request.post<any, DownloadJob>('/batch-deploy/download-remote-dir/start', { remotePath, localPath, selectedPaths })
 
 export const getDownloadProgress = (jobId: string) =>
-  request.get<any, DownloadJob>(`/batch-deploy/download-remote-dir/progress/${jobId}`)
+  request.get<any, DownloadJob>(`/batch-deploy/download-remote-dir/progress/${encodeURIComponent(jobId)}`)
 
 export const cancelDownloadJob = (jobId: string) =>
-  request.post<any, DownloadJob>(`/batch-deploy/download-remote-dir/cancel/${jobId}`)
+  request.post<any, DownloadJob>(`/batch-deploy/download-remote-dir/cancel/${encodeURIComponent(jobId)}`)
 
 export const getActiveDownloadJob = () =>
   request.get<any, DownloadJob | null>('/batch-deploy/download-remote-dir/active')
