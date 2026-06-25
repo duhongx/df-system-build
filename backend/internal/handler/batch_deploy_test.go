@@ -373,6 +373,118 @@ func TestDownloadRemoteDirSkipsUnchangedFileByChecksum(t *testing.T) {
 	}
 }
 
+func TestDownloadRemoteDirSkipsUnchangedFileBySizeAndModTimeWithoutRemoteHash(t *testing.T) {
+	content := "same-content"
+	remoteModTime := time.Date(2026, 6, 25, 10, 30, 0, 0, time.UTC)
+	fs := failingOpenRemoteFS{
+		fakeRemoteFS: fakeRemoteFS{
+			dirs: map[string][]fakeRemoteEntry{
+				"/release": {{name: "version.json", modTime: remoteModTime}},
+			},
+			files: map[string]string{
+				"/release/version.json": content,
+			},
+		},
+		failOpen: map[string]error{
+			"/release/version.json": fmt.Errorf("remote hash should not be read"),
+		},
+	}
+	localParent := t.TempDir()
+	localPath := filepath.Join(localParent, "release", "version.json")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		t.Fatalf("seed local dir: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte(content), 0644); err != nil {
+		t.Fatalf("seed local file: %v", err)
+	}
+	if err := os.Chtimes(localPath, remoteModTime, remoteModTime); err != nil {
+		t.Fatalf("set local mtime: %v", err)
+	}
+
+	var events []downloadProgress
+	_, _, err := downloadRemoteDirToLocalWithProgress(fs, "/release", localParent, func(progress downloadProgress) {
+		events = append(events, progress)
+	})
+	if err != nil {
+		t.Fatalf("download remote dir: %v", err)
+	}
+	last := events[len(events)-1]
+	if len(last.Items) != 1 || last.Items[0].Status != "skipped" {
+		t.Fatalf("expected unchanged item to be skipped, got %#v", last.Items)
+	}
+}
+
+func TestDownloadRemoteDirMarksUnchangedFilesBeforeDownloadingChangedFiles(t *testing.T) {
+	remoteModTime := time.Date(2026, 6, 25, 10, 40, 0, 0, time.UTC)
+	fs := fakeRemoteFS{
+		dirs: map[string][]fakeRemoteEntry{
+			"/release": {
+				{name: "a-changed.txt", modTime: remoteModTime},
+				{name: "z-unchanged.txt", modTime: remoteModTime},
+			},
+		},
+		files: map[string]string{
+			"/release/a-changed.txt":   "new",
+			"/release/z-unchanged.txt": "same",
+		},
+	}
+	localParent := t.TempDir()
+	unchangedPath := filepath.Join(localParent, "release", "z-unchanged.txt")
+	if err := os.MkdirAll(filepath.Dir(unchangedPath), 0755); err != nil {
+		t.Fatalf("seed local dir: %v", err)
+	}
+	if err := os.WriteFile(unchangedPath, []byte("same"), 0644); err != nil {
+		t.Fatalf("seed unchanged local file: %v", err)
+	}
+	if err := os.Chtimes(unchangedPath, remoteModTime, remoteModTime); err != nil {
+		t.Fatalf("set unchanged local mtime: %v", err)
+	}
+
+	var events []downloadProgress
+	_, _, err := downloadRemoteDirToLocalWithProgress(fs, "/release", localParent, func(progress downloadProgress) {
+		events = append(events, progress)
+	})
+	if err != nil {
+		t.Fatalf("download remote dir: %v", err)
+	}
+	for _, event := range events {
+		if event.CurrentPath != "/release/a-changed.txt" {
+			continue
+		}
+		statuses := map[string]string{}
+		for _, item := range event.Items {
+			statuses[item.Name] = item.Status
+		}
+		if statuses["a-changed.txt"] == "running" && statuses["z-unchanged.txt"] != "skipped" {
+			t.Fatalf("expected unchanged file to be prechecked before changed download starts, got %#v", event.Items)
+		}
+	}
+}
+
+func TestDownloadRemoteDirPreservesRemoteModTime(t *testing.T) {
+	remoteModTime := time.Date(2026, 6, 25, 10, 50, 0, 0, time.UTC)
+	fs := fakeRemoteFS{
+		dirs: map[string][]fakeRemoteEntry{
+			"/release": {{name: "version.json", modTime: remoteModTime}},
+		},
+		files: map[string]string{
+			"/release/version.json": "{}",
+		},
+	}
+	localParent := t.TempDir()
+	_, _, err := downloadRemoteDirToLocal(fs, "/release", localParent)
+	if err != nil {
+		t.Fatalf("download remote dir: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(localParent, "release", "version.json"))
+	if err != nil {
+		t.Fatalf("stat local file: %v", err)
+	}
+	if info.ModTime().Unix() != remoteModTime.Unix() {
+		t.Fatalf("expected local mtime %s, got %s", remoteModTime, info.ModTime())
+	}
+}
+
 func TestDownloadRemoteDirRedownloadsSameSizeChangedFile(t *testing.T) {
 	fs := fakeRemoteFS{
 		dirs: map[string][]fakeRemoteEntry{
@@ -1755,9 +1867,10 @@ func mustZipString(t *testing.T) string {
 }
 
 type fakeRemoteEntry struct {
-	name string
-	dir  bool
-	size int64
+	name    string
+	dir     bool
+	size    int64
+	modTime time.Time
 }
 
 func (e fakeRemoteEntry) Name() string { return e.name }
@@ -1768,7 +1881,7 @@ func (e fakeRemoteEntry) Mode() os.FileMode {
 	}
 	return 0644
 }
-func (e fakeRemoteEntry) ModTime() time.Time { return time.Time{} }
+func (e fakeRemoteEntry) ModTime() time.Time { return e.modTime }
 func (e fakeRemoteEntry) IsDir() bool        { return e.dir }
 func (e fakeRemoteEntry) Sys() any           { return nil }
 

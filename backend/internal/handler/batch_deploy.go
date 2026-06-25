@@ -58,6 +58,7 @@ type downloadJobItem struct {
 	RemotePath string `json:"remotePath"`
 	LocalPath  string `json:"localPath"`
 	Size       int64  `json:"size"`
+	ModTime    string `json:"modTime,omitempty"`
 	Status     string `json:"status"`
 	Error      string `json:"error,omitempty"`
 	Artifact   bool   `json:"artifact"`
@@ -2706,7 +2707,7 @@ func trimServerAbsoluteAncestors(relativePath string) string {
 
 func downloadRemoteItemsToLocal(ctx context.Context, fs remoteArtifactFS, items []downloadJobItem, onProgress func(downloadProgress)) ([]string, error) {
 	totalFiles := len(items)
-	completedFiles := 0
+	completedFiles := precheckUnchangedDownloadItems(items)
 	reportProgress := func(currentPath string) {
 		if onProgress != nil {
 			onProgress(downloadProgress{
@@ -2723,13 +2724,16 @@ func downloadRemoteItemsToLocal(ctx context.Context, fs remoteArtifactFS, items 
 	var artifacts []string
 	var artifactFailures []string
 	markDone := func(index int, status string, err error) {
+		wasCompleted := isCompletedDownloadStatus(items[index].Status)
 		items[index].Status = status
 		if err != nil {
 			items[index].Error = err.Error()
 		} else {
 			items[index].Error = ""
 		}
-		completedFiles++
+		if !wasCompleted {
+			completedFiles++
+		}
 		reportProgress(items[index].RemotePath)
 	}
 	recordArtifactFailure := func(index int, err error) {
@@ -2744,27 +2748,14 @@ func downloadRemoteItemsToLocal(ctx context.Context, fs remoteArtifactFS, items 
 			reportProgress(items[i].RemotePath)
 			return nil, errDownloadCanceled
 		}
-		items[i].Status = "running"
-		reportProgress(items[i].RemotePath)
-
-		matched, err := remoteFileMatchesLocal(ctx, fs, items[i].RemotePath, items[i].LocalPath, items[i].Size)
-		if err != nil {
-			if errors.Is(err, errDownloadCanceled) {
-				items[i].Status = "canceled"
-				items[i].Error = errDownloadCanceled.Error()
-				reportProgress(items[i].RemotePath)
-				return nil, err
-			}
-			if items[i].Artifact {
-				recordArtifactFailure(i, err)
-			} else {
-				markDone(i, "failed", err)
-			}
-			continue
-		}
-
+		matched := items[i].Status == "skipped"
 		if !matched {
-			if err := copyRemoteFileContext(ctx, fs, items[i].RemotePath, items[i].LocalPath, items[i].Size); err != nil {
+			items[i].Status = "running"
+			reportProgress(items[i].RemotePath)
+
+			var err error
+			matched, err = remoteFileMatchesLocal(ctx, fs, items[i].RemotePath, items[i].LocalPath, items[i].Size, parseDownloadJobModTime(items[i].ModTime))
+			if err != nil {
 				if errors.Is(err, errDownloadCanceled) {
 					items[i].Status = "canceled"
 					items[i].Error = errDownloadCanceled.Error()
@@ -2777,6 +2768,23 @@ func downloadRemoteItemsToLocal(ctx context.Context, fs remoteArtifactFS, items 
 					markDone(i, "failed", err)
 				}
 				continue
+			}
+
+			if !matched {
+				if err := copyRemoteFileContext(ctx, fs, items[i].RemotePath, items[i].LocalPath, items[i].Size, parseDownloadJobModTime(items[i].ModTime)); err != nil {
+					if errors.Is(err, errDownloadCanceled) {
+						items[i].Status = "canceled"
+						items[i].Error = errDownloadCanceled.Error()
+						reportProgress(items[i].RemotePath)
+						return nil, err
+					}
+					if items[i].Artifact {
+						recordArtifactFailure(i, err)
+					} else {
+						markDone(i, "failed", err)
+					}
+					continue
+				}
 			}
 		}
 
@@ -2843,6 +2851,7 @@ func collectRemoteDownloadItems(fs remoteArtifactFS, remoteDir, targetDir string
 				RemotePath: remotePath,
 				LocalPath:  localPath,
 				Size:       entry.Size(),
+				ModTime:    formatDownloadJobModTime(entry.ModTime()),
 				Status:     "pending",
 				Artifact:   ext == ".jar" || ext == ".zip",
 			})
@@ -2912,6 +2921,7 @@ func remoteDownloadFileItem(remotePath, localPath string, info os.FileInfo) down
 		RemotePath: remotePath,
 		LocalPath:  localPath,
 		Size:       info.Size(),
+		ModTime:    formatDownloadJobModTime(info.ModTime()),
 		Status:     "pending",
 		Artifact:   ext == ".jar" || ext == ".zip",
 	}
@@ -2991,28 +3001,91 @@ func countRemoteFiles(fs remoteArtifactFS, remoteDir string) (int, error) {
 }
 
 func copyRemoteFile(fs remoteArtifactFS, remotePath, localPath string, remoteSize int64) error {
-	return copyRemoteFileContext(context.Background(), fs, remotePath, localPath, remoteSize)
+	return copyRemoteFileContext(context.Background(), fs, remotePath, localPath, remoteSize, time.Time{})
 }
 
-func remoteFileMatchesLocal(ctx context.Context, fs remoteArtifactFS, remotePath, localPath string, remoteSize int64) (bool, error) {
+func precheckUnchangedDownloadItems(items []downloadJobItem) int {
+	completed := 0
+	for i := range items {
+		remoteModTime := parseDownloadJobModTime(items[i].ModTime)
+		if localFileMatchesRemoteSizeAndModTime(items[i].LocalPath, items[i].Size, remoteModTime) {
+			items[i].Status = "skipped"
+			items[i].Error = ""
+			completed++
+		}
+	}
+	return completed
+}
+
+func isCompletedDownloadStatus(status string) bool {
+	return status == "success" || status == "skipped" || status == "failed" || status == "canceled"
+}
+
+func remoteFileMatchesLocal(ctx context.Context, fs remoteArtifactFS, remotePath, localPath string, remoteSize int64, remoteModTime time.Time) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, errDownloadCanceled
 	}
-	localSize, localSHA, err := fileSHA256(localPath)
+	info, err := os.Stat(localPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
 		return false, err
 	}
-	if remoteSize >= 0 && localSize != remoteSize {
+	if remoteSize >= 0 && info.Size() != remoteSize {
 		return false, nil
+	}
+	if sameDownloadFileModTime(info.ModTime(), remoteModTime) {
+		return true, nil
+	}
+	_, localSHA, err := fileSHA256(localPath)
+	if err != nil {
+		return false, err
 	}
 	remoteSHA, err := remoteFileSHA256(ctx, fs, remotePath)
 	if err != nil {
 		return false, err
 	}
 	return localSHA == remoteSHA, nil
+}
+
+func localFileMatchesRemoteSizeAndModTime(localPath string, remoteSize int64, remoteModTime time.Time) bool {
+	if remoteModTime.IsZero() {
+		return false
+	}
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return false
+	}
+	if remoteSize >= 0 && info.Size() != remoteSize {
+		return false
+	}
+	return sameDownloadFileModTime(info.ModTime(), remoteModTime)
+}
+
+func sameDownloadFileModTime(localModTime, remoteModTime time.Time) bool {
+	if remoteModTime.IsZero() {
+		return false
+	}
+	return localModTime.Unix() == remoteModTime.Unix()
+}
+
+func formatDownloadJobModTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func parseDownloadJobModTime(value string) time.Time {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 func remoteFileSHA256(ctx context.Context, fs remoteArtifactFS, remotePath string) (string, error) {
@@ -3047,7 +3120,7 @@ func remoteFileSHA256(ctx context.Context, fs remoteArtifactFS, remotePath strin
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func copyRemoteFileContext(ctx context.Context, fs remoteArtifactFS, remotePath, localPath string, remoteSize int64) error {
+func copyRemoteFileContext(ctx context.Context, fs remoteArtifactFS, remotePath, localPath string, remoteSize int64, remoteModTime time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return errDownloadCanceled
 	}
@@ -3068,7 +3141,7 @@ func copyRemoteFileContext(ctx context.Context, fs remoteArtifactFS, remotePath,
 	}
 
 	if remoteSize >= 0 && offset == remoteSize {
-		return os.Rename(partPath, localPath)
+		return finishDownloadedRemoteFile(partPath, localPath, remoteModTime)
 	}
 
 	src, err := openRemoteFileAt(fs, remotePath, offset)
@@ -3121,7 +3194,19 @@ func copyRemoteFileContext(ctx context.Context, fs remoteArtifactFS, remotePath,
 			return fmt.Errorf("下载文件大小不一致: %s", remotePath)
 		}
 	}
-	return os.Rename(partPath, localPath)
+	return finishDownloadedRemoteFile(partPath, localPath, remoteModTime)
+}
+
+func finishDownloadedRemoteFile(partPath, localPath string, remoteModTime time.Time) error {
+	if err := os.Rename(partPath, localPath); err != nil {
+		return err
+	}
+	if !remoteModTime.IsZero() {
+		if err := os.Chtimes(localPath, remoteModTime, remoteModTime); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func openRemoteFileAt(fs remoteArtifactFS, remotePath string, offset int64) (io.ReadCloser, error) {
