@@ -241,3 +241,6 @@ export const listPackageServerDir = (serverId: number, path: string) =>
 
 export const listPackageDownloadDir = (path?: string) =>
   request.get<any, { path: string; basePath: string; files: FileItem[] }>('/batch-deploy/package-download/list', { params: path ? { path } : {} })
+
+export const listPackageDownloadLocalDir = (path?: string) =>
+  request.get<any, { root: string; path: string; files: FileItem[] }>(`/batch-deploy/package-download/local-list`, { params: path ? { path } : {} })

@@ -186,8 +186,9 @@ func TestDownloadRemoteDirToLocalPreservesTreeAndReportsArtifacts(t *testing.T) 
 	}
 	sort.Strings(files)
 
-	if targetDir != localParent {
-		t.Fatalf("expected remote files to be downloaded directly into local parent, got %s", targetDir)
+	expectedTargetDir := filepath.Join(localParent, "release")
+	if targetDir != expectedTargetDir {
+		t.Fatalf("expected remote files to be downloaded into local release directory %s, got %s", expectedTargetDir, targetDir)
 	}
 	for _, path := range []string{
 		filepath.Join(targetDir, "his-gateway.jar"),
@@ -204,6 +205,9 @@ func TestDownloadRemoteDirToLocalPreservesTreeAndReportsArtifacts(t *testing.T) 
 		if files[i] != expected[i] {
 			t.Fatalf("expected artifact list %#v, got %#v", expected, files)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(localParent, "his-gateway.jar")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected local parent to keep directory hierarchy, stat err=%v", err)
 	}
 }
 
@@ -298,19 +302,26 @@ func TestDownloadRemoteSelectionToLocalDownloadsSelectedFileOnly(t *testing.T) {
 		},
 	}
 
+	localParent := t.TempDir()
+	targetDir, selectedStrip, err := resolveDownloadTarget(localParent, "/release", []string{"/release/his-gateway.jar"}, fs)
+	if err != nil {
+		t.Fatalf("resolve download target: %v", err)
+	}
 	targetDir, files, err := downloadRemoteSelectionToLocalWithProgressContext(
 		context.Background(),
 		fs,
 		"/release",
 		[]string{"/release/his-gateway.jar"},
-		t.TempDir(),
+		targetDir,
+		selectedStrip,
 		nil,
 	)
 	if err != nil {
 		t.Fatalf("download selected file: %v", err)
 	}
-	if targetDir == "" {
-		t.Fatalf("expected target dir")
+	expectedTargetDir := filepath.Join(localParent, "release")
+	if targetDir != expectedTargetDir {
+		t.Fatalf("expected selected file to be downloaded into current remote directory leaf %s, got %s", expectedTargetDir, targetDir)
 	}
 	if _, err := os.Stat(filepath.Join(targetDir, "his-gateway.jar")); err != nil {
 		t.Fatalf("expected selected file to be downloaded: %v", err)
@@ -335,7 +346,11 @@ func TestDownloadRemoteDirSkipsUnchangedFileByChecksum(t *testing.T) {
 		},
 	}
 	localParent := t.TempDir()
-	if err := os.WriteFile(filepath.Join(localParent, "his-gateway.jar"), []byte(zipContent), 0644); err != nil {
+	localPath := filepath.Join(localParent, "release", "his-gateway.jar")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		t.Fatalf("seed local dir: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte(zipContent), 0644); err != nil {
 		t.Fatalf("seed local file: %v", err)
 	}
 
@@ -368,7 +383,10 @@ func TestDownloadRemoteDirRedownloadsSameSizeChangedFile(t *testing.T) {
 		},
 	}
 	localParent := t.TempDir()
-	localPath := filepath.Join(localParent, "version.json")
+	localPath := filepath.Join(localParent, "release", "version.json")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		t.Fatalf("seed local dir: %v", err)
+	}
 	if err := os.WriteFile(localPath, []byte("old-content"), 0644); err != nil {
 		t.Fatalf("seed local file: %v", err)
 	}
@@ -450,21 +468,31 @@ func TestDownloadRemoteSelectionToLocalPreservesSelectedDirectoryRelativePath(t 
 		},
 	}
 
+	localParent := t.TempDir()
+	targetDir, selectedStrip, err := resolveDownloadTarget(localParent, "/release", []string{"/release/patch"}, fs)
+	if err != nil {
+		t.Fatalf("resolve download target: %v", err)
+	}
 	targetDir, files, err := downloadRemoteSelectionToLocalWithProgressContext(
 		context.Background(),
 		fs,
 		"/release",
 		[]string{"/release/patch"},
-		t.TempDir(),
+		targetDir,
+		selectedStrip,
 		nil,
 	)
 	if err != nil {
 		t.Fatalf("download selected dir: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(targetDir, "patch", "agg-service.jar")); err != nil {
+	expectedTargetDir := filepath.Join(localParent, "patch")
+	if targetDir != expectedTargetDir {
+		t.Fatalf("expected selected directory contents to be downloaded into local leaf %s, got %s", expectedTargetDir, targetDir)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "agg-service.jar")); err != nil {
 		t.Fatalf("expected selected directory artifact to be downloaded: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(targetDir, "patch", "readme.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(targetDir, "readme.txt")); err != nil {
 		t.Fatalf("expected selected directory non-artifact file to be downloaded: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(targetDir, "other", "web-main.zip")); !errors.Is(err, os.ErrNotExist) {

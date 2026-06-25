@@ -2,11 +2,13 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { Document, Folder, Upload } from '@element-plus/icons-vue'
 import {
   cancelDownloadJob,
   getActiveDownloadJob,
   getDownloadProgress,
   listDownloadBatches,
+  listPackageDownloadLocalDir,
   listPackageDownloadDir,
   startDownloadRemoteDir,
   type DownloadJob,
@@ -28,6 +30,10 @@ const remoteBasePath = ref('/')
 const remotePath = ref('/')
 const remoteFiles = ref<FileItem[]>([])
 const selectedRemoteRows = ref<FileItem[]>([])
+const localBasePath = ref('')
+const localPath = ref('')
+const localFiles = ref<FileItem[]>([])
+const localLoading = ref(false)
 const packageConfigured = ref(false)
 const activeDownloadJob = ref<DownloadJob | null>(null)
 const downloadHistoryVisible = ref(false)
@@ -39,6 +45,12 @@ let pollTimer: number | undefined
 const sortedRemoteFiles = computed(() => {
   const dirs = remoteFiles.value.filter(f => f.isDir).sort((a, b) => a.name.localeCompare(b.name))
   const files = remoteFiles.value.filter(f => !f.isDir).sort((a, b) => a.name.localeCompare(b.name))
+  return [...dirs, ...files]
+})
+
+const sortedLocalFiles = computed(() => {
+  const dirs = localFiles.value.filter(f => f.isDir).sort((a, b) => a.name.localeCompare(b.name))
+  const files = localFiles.value.filter(f => !f.isDir).sort((a, b) => a.name.localeCompare(b.name))
   return [...dirs, ...files]
 })
 
@@ -65,6 +77,14 @@ const selectedRemotePaths = computed(() => selectedRemoteRows.value.map(row => r
 
 const canDownloadSelected = computed(() => selectedRemotePaths.value.length > 0 && !isDownloadRunning.value)
 
+const localPathRelativeParts = computed(() => {
+  if (!localPath.value || !localBasePath.value || localPath.value === localBasePath.value) return []
+  const relative = localPath.value.startsWith(localBasePath.value)
+    ? localPath.value.slice(localBasePath.value.length)
+    : localPath.value
+  return relative.split('/').filter(Boolean)
+})
+
 const downloadFileRows = computed<DownloadJobItem[]>(() => {
   const job = activeDownloadJob.value
   if (!job) return []
@@ -79,9 +99,7 @@ const downloadFileRows = computed<DownloadJobItem[]>(() => {
   }))
 })
 
-const recentDownloadRows = computed(() => downloadHistoryRows.value.slice(0, 8))
-
-const localTargetPath = computed(() => {
+const downloadTargetPath = computed(() => {
   const job = activeDownloadJob.value
   if (!job) return '下载后自动生成本地工作区目录'
   return job.targetPath || job.localDir || '下载后自动生成本地工作区目录'
@@ -113,6 +131,7 @@ onUnmounted(() => {
 watch(importMode, async mode => {
   if (mode === 'download' && packageConfigured.value && remoteFiles.value.length === 0) {
     await loadRemoteDir(remotePath.value)
+    await loadLocalDownloadDir()
   }
 })
 
@@ -124,6 +143,7 @@ async function loadSettingsAndRemoteRoot() {
     remotePath.value = remoteBasePath.value
     if (packageConfigured.value && importMode.value === 'download') {
       await loadRemoteDir(remoteBasePath.value)
+      await loadLocalDownloadDir()
     }
   } catch {
     packageConfigured.value = false
@@ -137,12 +157,33 @@ async function restoreActiveDownloadJob() {
       activeDownloadJob.value = job
       importMode.value = 'download'
       pollDownload(job.id)
+      if (job.targetPath) {
+        await loadLocalDownloadDir(job.targetPath)
+      } else if (job.localDir) {
+        await loadLocalDownloadDir(job.localDir)
+      }
       return
     }
     activeDownloadJob.value = null
+    await loadLocalDownloadDir()
     await loadDownloadHistory()
   } catch {
     // Ignore restore failures; manual refresh still works.
+  }
+}
+
+async function loadLocalDownloadDir(path?: string) {
+  if (!packageConfigured.value) {
+    return
+  }
+  localLoading.value = true
+  try {
+    const result = await listPackageDownloadLocalDir(path)
+    localBasePath.value = result.root
+    localPath.value = result.path
+    localFiles.value = result.files
+  } finally {
+    localLoading.value = false
   }
 }
 
@@ -168,6 +209,11 @@ function getRemoteCrumbPath(index: number) {
   return `${remoteBasePath.value.replace(/\/+$/, '')}/${suffix}`
 }
 
+function getLocalCrumbPath(index: number) {
+  const suffix = localPathRelativeParts.value.slice(0, index + 1).join('/')
+  return `${localBasePath.value.replace(/\/+$/, '')}/${suffix}`
+}
+
 function remoteGoUp() {
   if (remotePath.value === remoteBasePath.value) return
   const parts = remotePath.value.split('/').filter(Boolean)
@@ -175,8 +221,23 @@ function remoteGoUp() {
   loadRemoteDir('/' + parts.join('/'))
 }
 
+function localGoUp() {
+  if (localPath.value === localBasePath.value) return
+  const parts = localPath.value.split('/').filter(Boolean)
+  parts.pop()
+  loadLocalDownloadDir('/' + parts.join('/'))
+}
+
 function handleRemoteNavigate(row: FileItem) {
   if (row.isDir) loadRemoteDir(row.path)
+}
+
+function handleLocalNavigate(row: FileItem) {
+  if (row.isDir) loadLocalDownloadDir(row.path)
+}
+
+function handleLocalRowDblClick(row: FileItem) {
+  if (!activeDownloadJob.value) handleLocalNavigate(row)
 }
 
 function handleRemoteSelectionChange(rows: FileItem[]) {
@@ -215,18 +276,25 @@ async function pollDownload(jobId: string) {
   if (job.status === 'success') {
     ElMessage.success('下载完成，已生成更新版本')
     await loadDownloadHistory()
+    await loadLocalDownloadDir(job.targetPath || job.localDir)
     activeDownloadJob.value = null
     return
   }
   if (job.status === 'failed') {
     ElMessage.error(job.error || '下载失败')
     await loadDownloadHistory()
+    if (job.targetPath || job.localDir) {
+      await loadLocalDownloadDir(job.targetPath || job.localDir)
+    }
     activeDownloadJob.value = null
     return
   }
   if (job.status === 'canceled') {
     ElMessage.warning(job.error || '下载任务已取消')
     await loadDownloadHistory()
+    if (job.targetPath || job.localDir) {
+      await loadLocalDownloadDir(job.targetPath || job.localDir)
+    }
     activeDownloadJob.value = null
     return
   }
@@ -242,6 +310,7 @@ async function handleCancelDownload() {
     if (pollTimer) window.clearTimeout(pollTimer)
     ElMessage.warning('已取消下载任务')
     await loadDownloadHistory()
+    await loadLocalDownloadDir(canceled.targetPath || canceled.localDir)
     activeDownloadJob.value = null
   } catch {
     // handled globally
@@ -348,12 +417,6 @@ async function uploadEntries(entries: UploadEntry[]) {
 }
 
 async function openDownloadHistory() {
-  downloadHistoryVisible.value = true
-  await loadDownloadHistory()
-}
-
-async function openDownloadHistoryWithJob(row: DownloadJob) {
-  selectedDownloadHistory.value = row
   downloadHistoryVisible.value = true
   await loadDownloadHistory()
 }
@@ -536,83 +599,56 @@ function downloadHistoryRowClassName({ row }: { row: DownloadJob }) {
                 :indeterminate="activeDownloadJob.status === 'running' && !activeDownloadJob.totalFiles"
                 :status="downloadProgressStatus(activeDownloadJob.status)"
               />
-              <div class="download-sub">本地目录：{{ localTargetPath }}</div>
+              <div class="download-sub">本地目录：{{ downloadTargetPath }}</div>
               <div class="download-sub">当前文件：{{ activeDownloadJob.currentPath || activeDownloadJob.remotePath }}</div>
               <div v-if="activeDownloadJob.error" class="download-error">{{ activeDownloadJob.error }}</div>
             </div>
             <div v-else class="local-empty">
-              当前没有正在下载的任务。可从左侧下载目录或文件；最近下载记录如下。
+              当前没有正在下载的任务。当前目录内容如下：
+            </div>
+            <div class="path-bar">
+              <span class="crumb" @click="loadLocalDownloadDir(localBasePath)">本地下载目录</span>
+              <template v-for="(part, idx) in localPathRelativeParts" :key="idx">
+                <span class="crumb-sep">/</span>
+                <span class="crumb" @click="loadLocalDownloadDir(getLocalCrumbPath(idx))">{{ part }}</span>
+              </template>
+              <el-button link size="small" :disabled="localPath === localBasePath" @click="localGoUp">上级</el-button>
+              <el-button link size="small" :loading="localLoading" @click="loadLocalDownloadDir(localPath)">刷新</el-button>
             </div>
             <el-table
-              v-if="activeDownloadJob"
-              :data="downloadFileRows"
+              :data="activeDownloadJob ? downloadFileRows : sortedLocalFiles"
+              v-loading="localLoading"
               border
               stripe
               size="small"
               height="330"
-              empty-text="当前任务暂无文件"
+              :empty-text="activeDownloadJob ? '当前任务暂无文件' : '当前目录暂无文件'"
+              @row-dblclick="handleLocalRowDblClick"
             >
-              <el-table-column label="文件名" min-width="160" show-overflow-tooltip>
+              <el-table-column label="名称" min-width="220" show-overflow-tooltip>
                 <template #default="{ row }">
-                  <span class="file-name">
-                    <el-icon color="#909399"><Document /></el-icon>
+                  <span class="file-name" @click="activeDownloadJob ? undefined : handleLocalNavigate(row)">
+                    <el-icon :color="row.isDir ? '#e6a23c' : '#909399'"><Folder v-if="row.isDir" /><Document v-else /></el-icon>
                     {{ row.name }}
                   </span>
                 </template>
               </el-table-column>
-              <el-table-column label="下载状态" width="96">
+              <el-table-column v-if="activeDownloadJob" label="下载状态" width="96">
                 <template #default="{ row }">
                   <el-tag size="small" :type="downloadItemTagType(row.status)">
                     {{ downloadItemStatusText(row.status) }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="大小" width="90">
-                <template #default="{ row }">{{ formatDownloadSize(row.size) }}</template>
-              </el-table-column>
-              <el-table-column label="远程路径" min-width="220" show-overflow-tooltip>
+              <el-table-column v-if="activeDownloadJob" label="远程路径" min-width="220" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.remotePath || '-' }}</template>
               </el-table-column>
-              <el-table-column label="错误" min-width="180" show-overflow-tooltip>
+              <el-table-column label="大小" width="90">
+                <template #default="{ row }">{{ row.isDir ? '-' : formatDownloadSize(row.size) }}</template>
+              </el-table-column>
+              <el-table-column v-if="activeDownloadJob" label="错误" min-width="180" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span :class="{ 'download-error-inline': row.error }">{{ row.error || '-' }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
-            <el-table
-              v-else
-              :data="recentDownloadRows"
-              border
-              stripe
-              size="small"
-              height="330"
-              empty-text="暂无下载记录"
-              @row-click="selectDownloadHistory"
-            >
-              <el-table-column label="下载批次" min-width="170" show-overflow-tooltip>
-                <template #default="{ row }">{{ row.batchId || row.id }}</template>
-              </el-table-column>
-              <el-table-column label="状态" width="96">
-                <template #default="{ row }">
-                  <el-tag size="small" :type="downloadStatusTagType(row.status)">
-                    {{ downloadStatusText(row.status) }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="文件数" width="100">
-                <template #default="{ row }">
-                  {{ row.completedFiles || 0 }} / {{ row.totalFiles || row.count || 0 }}
-                </template>
-              </el-table-column>
-              <el-table-column label="远程目录" min-width="220" show-overflow-tooltip>
-                <template #default="{ row }">{{ row.remotePath || '-' }}</template>
-              </el-table-column>
-              <el-table-column label="更新时间" width="170">
-                <template #default="{ row }">{{ formatBeijingTime(row.updatedAt || row.startedAt) }}</template>
-              </el-table-column>
-              <el-table-column label="操作" width="70" fixed="right">
-                <template #default="{ row }">
-                  <el-button link type="primary" @click.stop="openDownloadHistoryWithJob(row)">查看</el-button>
                 </template>
               </el-table-column>
             </el-table>

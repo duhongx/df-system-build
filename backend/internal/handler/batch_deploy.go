@@ -145,6 +145,7 @@ func (h *BatchDeployHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.POST("/remote-dir", h.ImportRemoteDir)
 		g.GET("/package-server/:id/list", h.ListPackageServerDir)
 		g.GET("/package-download/list", h.ListPackageDownloadDir)
+		g.GET("/package-download/local-list", h.ListPackageDownloadLocalDir)
 		g.POST("/download-remote-dir/start", h.StartDownloadRemoteDir)
 		g.GET("/download-remote-dir/active", h.GetActiveDownloadJob)
 		g.GET("/download-remote-dir/latest", h.GetLatestDownloadJob)
@@ -832,7 +833,7 @@ func (h *BatchDeployHandler) DownloadRemoteDir(c *gin.Context) {
 		SourceType:  "download",
 		SourceLabel: "服务器下载",
 		Status:      "available",
-		LocalDir:    localDir,
+		LocalDir:    targetDir,
 		TargetPath:  targetDir,
 		RemotePath:  req.RemotePath,
 	}); err != nil {
@@ -1236,7 +1237,18 @@ func runDownloadJob(jobID string, serverID uint, remotePath string, selectedPath
 	defer sftpClient.Close()
 	defer sshClient.Close()
 
-	targetDir, files, err := downloadRemoteSelectionToLocalWithProgressContext(ctx, sftpRemoteFS{client: sftpClient}, remotePath, selectedPaths, localDir, func(progress downloadProgress) {
+	remoteFS := sftpRemoteFS{client: sftpClient}
+	targetDir, selectedDirStrip, err := resolveDownloadTarget(localDir, remotePath, selectedPaths, remoteFS)
+	if err != nil {
+		failDownloadJob(jobID, "解析下载目标失败: "+err.Error())
+		return
+	}
+	updateDownloadJob(jobID, func(job *downloadJob) {
+		job.LocalDir = targetDir
+		job.TargetPath = targetDir
+	})
+
+	targetDir, files, err := downloadRemoteSelectionToLocalWithProgressContext(ctx, remoteFS, remotePath, selectedPaths, targetDir, selectedDirStrip, func(progress downloadProgress) {
 		updateDownloadJob(jobID, func(job *downloadJob) {
 			job.TotalFiles = progress.TotalFiles
 			job.CompletedFiles = progress.CompletedFiles
@@ -1261,7 +1273,7 @@ func runDownloadJob(jobID string, serverID uint, remotePath string, selectedPath
 		SourceType:  "download",
 		SourceLabel: "服务器下载",
 		Status:      "available",
-		LocalDir:    localDir,
+		LocalDir:    targetDir,
 		TargetPath:  targetDir,
 		RemotePath:  remotePath,
 	}); err != nil {
@@ -2020,6 +2032,63 @@ func (h *BatchDeployHandler) ListPackageDownloadDir(c *gin.Context) {
 	}
 
 	response.OK(c, gin.H{"path": remotePath, "basePath": packageDownloadPath(), "files": files})
+}
+
+func (h *BatchDeployHandler) ListPackageDownloadLocalDir(c *gin.Context) {
+	root, err := downloadWorkspaceRootDir()
+	if err != nil {
+		response.Fail(c, 13023, err.Error())
+		return
+	}
+	if err := os.MkdirAll(root, 0755); err != nil {
+		response.Fail(c, 13023, "创建下载工作区失败: "+err.Error())
+		return
+	}
+
+	queryPath := strings.TrimSpace(c.Query("path"))
+	dir := root
+	if queryPath != "" {
+		dir, err = resolveBatchWorkspaceDir(queryPath)
+		if err != nil {
+			response.Fail(c, 13023, err.Error())
+			return
+		}
+		rel, relErr := filepath.Rel(root, dir)
+		if relErr != nil || strings.HasPrefix(rel, "..") {
+			response.Fail(c, 13023, "目录超出下载工作区")
+			return
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		response.Fail(c, 13023, "读取目录失败: "+err.Error())
+		return
+	}
+
+	files := make([]fileInfo, 0, len(entries))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileInfo{
+			Name:    entry.Name(),
+			Path:    filepath.Join(dir, entry.Name()),
+			Size:    info.Size(),
+			IsDir:   entry.IsDir(),
+			Mode:    info.Mode().String(),
+			ModTime: info.ModTime().Format("2006-01-02 15:04:05"),
+		})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].IsDir != files[j].IsDir {
+			return files[i].IsDir
+		}
+		return files[i].Name < files[j].Name
+	})
+
+	response.OK(c, gin.H{"root": root, "path": dir, "files": files})
 }
 
 func (h *BatchDeployHandler) ListPackageServerDir(c *gin.Context) {
@@ -2940,17 +3009,21 @@ func downloadRemoteDirToLocalWithProgress(fs remoteArtifactFS, remoteDir, localP
 }
 
 func downloadRemoteDirToLocalWithProgressContext(ctx context.Context, fs remoteArtifactFS, remoteDir, localParent string, onProgress func(downloadProgress)) (string, []string, error) {
-	return downloadRemoteSelectionToLocalWithProgressContext(ctx, fs, remoteDir, nil, localParent, onProgress)
+	targetDir, selectedStrip, err := resolveDownloadTarget(localParent, remoteDir, nil, fs)
+	if err != nil {
+		return "", nil, err
+	}
+	return downloadRemoteSelectionToLocalWithProgressContext(ctx, fs, remoteDir, nil, targetDir, selectedStrip, onProgress)
 }
 
-func downloadRemoteSelectionToLocalWithProgressContext(ctx context.Context, fs remoteArtifactFS, remoteDir string, selectedPaths []string, localParent string, onProgress func(downloadProgress)) (string, []string, error) {
+func downloadRemoteSelectionToLocalWithProgressContext(ctx context.Context, fs remoteArtifactFS, remoteDir string, selectedPaths []string, localParent string, selectedStrip string, onProgress func(downloadProgress)) (string, []string, error) {
 	cleanRemoteDir := cleanRemoteDownloadPath(remoteDir)
 	targetDir := localParent
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return "", nil, err
 	}
 
-	items, err := collectRemoteDownloadSelectionItems(fs, cleanRemoteDir, selectedPaths, targetDir)
+	items, err := collectRemoteDownloadSelectionItems(fs, cleanRemoteDir, selectedPaths, targetDir, selectedStrip)
 	if err != nil {
 		return "", nil, err
 	}
@@ -2959,6 +3032,31 @@ func downloadRemoteSelectionToLocalWithProgressContext(ctx context.Context, fs r
 		return "", nil, err
 	}
 	return targetDir, files, nil
+}
+
+func resolveDownloadTarget(localParent, remoteDir string, selectedPaths []string, fs remoteArtifactFS) (string, string, error) {
+	cleanRemote := cleanRemoteDownloadPath(remoteDir)
+	base := strings.TrimPrefix(cleanRemote, "/")
+	if strings.TrimSpace(base) == "" {
+		base = "root"
+	}
+
+	if len(selectedPaths) == 1 {
+		selectedPaths = normalizeRemoteSelectionPaths(selectedPaths)
+		if len(selectedPaths) == 1 {
+			rel, err := relativeRemoteDownloadPath(cleanRemote, selectedPaths[0])
+			if err != nil {
+				return "", "", err
+			}
+			if rel != "" && !strings.Contains(rel, "/") {
+				if info, err := fs.Stat(selectedPaths[0]); err == nil && info.IsDir() {
+					return filepath.Join(localParent, filepath.Base(selectedPaths[0])), filepath.Base(selectedPaths[0]), nil
+				}
+			}
+		}
+	}
+
+	return filepath.Join(localParent, base), "", nil
 }
 
 func downloadRemoteItemsToLocal(ctx context.Context, fs remoteArtifactFS, items []downloadJobItem, onProgress func(downloadProgress)) ([]string, error) {
@@ -3112,7 +3210,7 @@ func collectRemoteDownloadItems(fs remoteArtifactFS, remoteDir, targetDir string
 	return items, nil
 }
 
-func collectRemoteDownloadSelectionItems(fs remoteArtifactFS, remoteDir string, selectedPaths []string, targetDir string) ([]downloadJobItem, error) {
+func collectRemoteDownloadSelectionItems(fs remoteArtifactFS, remoteDir string, selectedPaths []string, targetDir string, selectedStrip string) ([]downloadJobItem, error) {
 	selectedPaths = normalizeRemoteSelectionPaths(selectedPaths)
 	if len(selectedPaths) == 0 {
 		return collectRemoteDownloadItems(fs, remoteDir, targetDir)
@@ -3131,7 +3229,7 @@ func collectRemoteDownloadSelectionItems(fs remoteArtifactFS, remoteDir string, 
 		}
 		if info.IsDir() {
 			localDir := targetDir
-			if rel != "" {
+			if rel != "" && rel != selectedStrip {
 				localDir = filepath.Join(targetDir, filepath.FromSlash(rel))
 			}
 			childItems, err := collectRemoteDownloadItems(fs, cleanSelected, localDir)
