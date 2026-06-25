@@ -181,12 +181,6 @@ export const cancelDownloadJob = (jobId: string) =>
 export const getActiveDownloadJob = () =>
   request.get<any, DownloadJob | null>('/batch-deploy/download-remote-dir/active')
 
-export const getLatestDownloadJob = () =>
-  request.get<any, DownloadJob | null>('/batch-deploy/download-remote-dir/latest')
-
-export const listDownloadBatches = () =>
-  request.get<any, { batches: DownloadJob[] }>('/batch-deploy/download-remote-dir/batches')
-
 export const listArtifactSourceBatches = () =>
   request.get<any, { batches: ArtifactSourceBatch[] }>('/batch-deploy/source-batches')
 
@@ -226,12 +220,6 @@ export const getArtifactDeployBatch = (batchNo: string) =>
 
 export const rollbackArtifactDeployBatch = (batchNo: string) =>
   request.post<any, { batch: ArtifactDeployBatch; records: ArtifactDeployRecord[] }>(`/batch-deploy/deploy-batches/${encodeURIComponent(batchNo)}/rollback`)
-
-export const retryDownloadBatch = (batchId: string) =>
-  request.post<any, DownloadJob>(`/batch-deploy/download-remote-dir/batches/${batchId}/retry`)
-
-export const clearDownloadBatch = (batchId: string) =>
-  request.delete<any, { batchId: string }>(`/batch-deploy/download-remote-dir/batches/${batchId}`)
 
 export const downloadRemoteDir = (remotePath: string, localPath: string) =>
   request.post<any, { targetPath: string; batchId: string; files: string[]; count: number }>('/batch-deploy/download-remote-dir', { remotePath, localPath })

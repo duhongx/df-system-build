@@ -485,7 +485,7 @@ func TestDownloadRemoteSelectionToLocalPreservesSelectedDirectoryRelativePath(t 
 	if err != nil {
 		t.Fatalf("download selected dir: %v", err)
 	}
-	expectedTargetDir := filepath.Join(localParent, "patch")
+	expectedTargetDir := filepath.Join(localParent, "release", "patch")
 	if targetDir != expectedTargetDir {
 		t.Fatalf("expected selected directory contents to be downloaded into local leaf %s, got %s", expectedTargetDir, targetDir)
 	}
@@ -501,6 +501,16 @@ func TestDownloadRemoteSelectionToLocalPreservesSelectedDirectoryRelativePath(t 
 	expected := []string{"agg-service.jar"}
 	if !stringSlicesEqual(files, expected) {
 		t.Fatalf("expected artifact list %#v, got %#v", expected, files)
+	}
+}
+
+func TestPackageRelativeLocalPathUsesPathRelativeToPackageRoot(t *testing.T) {
+	relativePath, err := packageRelativeLocalPathWithRoot("/DFHIS/测试中版本", "/DFHIS")
+	if err != nil {
+		t.Fatalf("resolve relative path: %v", err)
+	}
+	if relativePath != "测试中版本" {
+		t.Fatalf("expected path relative to package root, got %s", relativePath)
 	}
 }
 
@@ -553,7 +563,7 @@ func TestDownloadRemoteDirToLocalCancellationMarksCurrentItemCanceled(t *testing
 	}
 }
 
-func TestListArtifactSourceBatchesScansUploadDownloadAndArtifactWorkspaces(t *testing.T) {
+func TestListArtifactSourceBatchesScansUploadAndArtifactWorkspaces(t *testing.T) {
 	root, err := batchUploadRootDir()
 	if err != nil {
 		t.Fatalf("batch root: %v", err)
@@ -562,10 +572,10 @@ func TestListArtifactSourceBatchesScansUploadDownloadAndArtifactWorkspaces(t *te
 	_ = os.RemoveAll(root)
 
 	mustCreateZip(t, filepath.Join(root, "upload", "batch-upload", "his-gateway.jar"))
-	mustCreateZip(t, filepath.Join(root, "download", "batch-download", "远程目录", "web-main.zip"))
+	mustCreateZip(t, filepath.Join(root, "download", "测试中版本", "web-main.zip"))
 	mustCreateZip(t, filepath.Join(root, "artifact", "batch-artifact", "web-cdr.zip"))
 
-	batches, err := listArtifactSourceBatches(root, nil)
+	batches, err := listArtifactSourceBatches(root)
 	if err != nil {
 		t.Fatalf("list source batches: %v", err)
 	}
@@ -577,7 +587,6 @@ func TestListArtifactSourceBatchesScansUploadDownloadAndArtifactWorkspaces(t *te
 
 	for key, wantPathBase := range map[string]string{
 		"upload:batch-upload":     "batch-upload",
-		"download:batch-download": "远程目录",
 		"artifact:batch-artifact": "batch-artifact",
 	} {
 		batch, ok := byKey[key]
@@ -590,6 +599,9 @@ func TestListArtifactSourceBatchesScansUploadDownloadAndArtifactWorkspaces(t *te
 		if filepath.Base(batch.TargetPath) != wantPathBase {
 			t.Fatalf("%s target path = %s, want base %s", key, batch.TargetPath, wantPathBase)
 		}
+	}
+	if _, ok := byKey["download:测试中版本"]; ok {
+		t.Fatalf("download workspace should not be exposed as source batch fallback: %#v", batches)
 	}
 }
 
@@ -624,174 +636,17 @@ func TestCopyRemoteFileResumesPartialDownload(t *testing.T) {
 	}
 }
 
-func TestDownloadJobPersistsAndRestoresActiveJob(t *testing.T) {
-	if logger.Log == nil {
-		logger.Init("error", "stdout", "")
-	}
-	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
-		t.Fatalf("init db: %v", err)
-	}
-	if err := repository.DB.AutoMigrate(&model.DownloadJob{}); err != nil {
-		t.Fatalf("migrate download job: %v", err)
-	}
-
-	job := downloadJob{
-		ID:             "batch-job-1",
-		Status:         "running",
-		RemotePath:     "/release",
-		LocalDir:       "/tmp/batch-download",
-		BatchID:        "batch-1",
-		TotalFiles:     3,
-		CompletedFiles: 1,
-		CurrentPath:    "/release/his-gateway.jar",
-		Items: []downloadJobItem{
-			{Name: "his-gateway.jar", RemotePath: "/release/his-gateway.jar", LocalPath: "/tmp/batch-download/his-gateway.jar", Status: "running", Artifact: true},
-			{Name: "web-main.zip", RemotePath: "/release/web-main.zip", LocalPath: "/tmp/batch-download/web-main.zip", Status: "pending", Artifact: true},
-		},
-		StartedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-	persistDownloadJob(job)
-
-	var dbJob model.DownloadJob
-	if err := repository.DB.First(&dbJob, "id = ?", job.ID).Error; err != nil {
-		t.Fatalf("find persisted job: %v", err)
-	}
-	restored := downloadJobFromModel(dbJob)
-	if restored.Status != "running" || restored.CurrentPath != job.CurrentPath || restored.CompletedFiles != 1 {
-		t.Fatalf("unexpected restored job: %#v", restored)
-	}
-	if len(restored.Items) != 2 || restored.Items[0].Status != "running" || restored.Items[1].Status != "pending" {
-		t.Fatalf("expected restored job items, got %#v", restored.Items)
-	}
-}
-
-func TestDownloadWorkspaceDirForStartReusesLatestFailedJobDir(t *testing.T) {
-	if logger.Log == nil {
-		logger.Init("error", "stdout", "")
-	}
-	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
-		t.Fatalf("init db: %v", err)
-	}
-	if err := repository.DB.AutoMigrate(&model.DownloadJob{}); err != nil {
-		t.Fatalf("migrate download job: %v", err)
-	}
-
-	localDir, err := newBatchWorkspaceDir("download")
-	if err != nil {
-		t.Fatalf("new batch workspace: %v", err)
-	}
-	failed := model.DownloadJob{
-		ID:         "failed-job",
-		Status:     "failed",
-		RemotePath: "/release",
-		LocalDir:   localDir,
-		BatchID:    filepath.Base(localDir),
-		StartedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
-	}
-	if err := repository.DB.Create(&failed).Error; err != nil {
-		t.Fatalf("create failed job: %v", err)
-	}
-
-	reused, err := downloadWorkspaceDirForStart("/release")
+func TestDownloadWorkspaceDirForStartUsesStableDownloadRoot(t *testing.T) {
+	localDir, err := downloadWorkspaceDirForStart("/release")
 	if err != nil {
 		t.Fatalf("resolve download workspace: %v", err)
 	}
-	if reused != localDir {
-		t.Fatalf("expected failed job dir %s to be reused, got %s", localDir, reused)
-	}
-}
-
-func TestLatestDownloadJobFromWorkspaceRestoresNewestDownloadedDirectory(t *testing.T) {
-	root := t.TempDir()
-	oldTarget := filepath.Join(root, "download", "batch-old", "release-old")
-	newTarget := filepath.Join(root, "download", "batch-new", "release-new")
-	incompleteTarget := filepath.Join(root, "download", "batch-incomplete", "release-incomplete")
-	if err := os.MkdirAll(oldTarget, 0755); err != nil {
-		t.Fatalf("mkdir old target: %v", err)
-	}
-	mustCreateZip(t, filepath.Join(oldTarget, "old-service.jar"))
-	mustCreateZip(t, filepath.Join(newTarget, "his-gateway.jar"))
-	if err := os.MkdirAll(incompleteTarget, 0755); err != nil {
-		t.Fatalf("mkdir incomplete target: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(incompleteTarget, "his-gateway.jar.part"), []byte("partial"), 0644); err != nil {
-		t.Fatalf("write partial file: %v", err)
-	}
-	oldTime := time.Unix(1000, 0)
-	newTime := time.Unix(2000, 0)
-	incompleteTime := time.Unix(3000, 0)
-	if err := os.Chtimes(filepath.Join(root, "download", "batch-old"), oldTime, oldTime); err != nil {
-		t.Fatalf("chtime old batch: %v", err)
-	}
-	if err := os.Chtimes(filepath.Join(root, "download", "batch-new"), newTime, newTime); err != nil {
-		t.Fatalf("chtime new batch: %v", err)
-	}
-	if err := os.Chtimes(filepath.Join(root, "download", "batch-incomplete"), incompleteTime, incompleteTime); err != nil {
-		t.Fatalf("chtime incomplete batch: %v", err)
-	}
-
-	job, ok := latestDownloadJobFromWorkspace(root)
-	if !ok {
-		t.Fatalf("expected latest download job from workspace")
-	}
-	if job.BatchID != "batch-new" || job.LocalDir != filepath.Join(root, "download", "batch-new") || job.TargetPath != newTarget {
-		t.Fatalf("unexpected restored job: %#v", job)
-	}
-	if job.Count != 1 || len(job.Items) != 1 || job.Items[0].Name != "his-gateway.jar" || job.Items[0].Status != "success" {
-		t.Fatalf("expected latest restored job to expose downloaded files, got %#v", job)
-	}
-}
-
-func TestListDownloadBatchesMergesFilesystemAndJobStatus(t *testing.T) {
-	root := t.TempDir()
-	successTarget := filepath.Join(root, "download", "batch-success", "release")
-	failedTarget := filepath.Join(root, "download", "batch-failed", "release")
-	mustCreateZip(t, filepath.Join(successTarget, "his-gateway.jar"))
-	if err := os.MkdirAll(failedTarget, 0755); err != nil {
-		t.Fatalf("mkdir failed target: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(failedTarget, "his-gateway.jar.part"), []byte("partial"), 0644); err != nil {
-		t.Fatalf("write part: %v", err)
-	}
-
-	jobs := []model.DownloadJob{{
-		ID:             "job-failed",
-		Status:         "failed",
-		RemotePath:     "/remote/release",
-		LocalDir:       filepath.Join(root, "download", "batch-failed"),
-		BatchID:        "batch-failed",
-		TotalFiles:     10,
-		CompletedFiles: 4,
-		CurrentPath:    "/remote/release/his-gateway.jar",
-		Error:          "network interrupted",
-		StartedAt:      time.Unix(100, 0),
-		UpdatedAt:      time.Unix(200, 0),
-	}}
-
-	batches, err := listDownloadBatches(root, jobs)
+	want, err := downloadWorkspaceRootDir()
 	if err != nil {
-		t.Fatalf("list download batches: %v", err)
+		t.Fatalf("download root: %v", err)
 	}
-	if len(batches) != 2 {
-		t.Fatalf("expected 2 batches, got %d: %#v", len(batches), batches)
-	}
-
-	byID := map[string]downloadJob{}
-	for _, batch := range batches {
-		byID[batch.BatchID] = batch
-	}
-	success := byID["batch-success"]
-	if success.Status != "success" || success.Count != 1 || success.TargetPath != successTarget || success.HasPartial {
-		t.Fatalf("unexpected success batch: %#v", success)
-	}
-	if len(success.Items) != 1 || success.Items[0].Name != "his-gateway.jar" || success.Items[0].Status != "success" {
-		t.Fatalf("expected success batch to expose downloaded file items: %#v", success)
-	}
-	failed := byID["batch-failed"]
-	if failed.Status != "failed" || !failed.HasPartial || failed.Error != "network interrupted" || failed.CompletedFiles != 4 {
-		t.Fatalf("unexpected failed batch: %#v", failed)
+	if localDir != want {
+		t.Fatalf("expected stable download root %s, got %s", want, localDir)
 	}
 }
 
@@ -1530,20 +1385,6 @@ func TestSyncArtifactVersionsFromWorkspaceRepairsCollectingDownloadVersionFromWo
 	}).Error; err != nil {
 		t.Fatalf("seed collecting artifact version: %v", err)
 	}
-	if err := repository.DB.Create(&model.DownloadJob{
-		ID:             "job-repair",
-		Status:         "success",
-		RemotePath:     "/remote/HIS更新",
-		LocalDir:       localDir,
-		TargetPath:     targetDir,
-		BatchID:        "batch-repair",
-		TotalFiles:     1,
-		CompletedFiles: 1,
-		StartedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}).Error; err != nil {
-		t.Fatalf("seed download job: %v", err)
-	}
 
 	gin.SetMode(gin.TestMode)
 	req := httptest.NewRequest(http.MethodPost, "/batch-deploy/artifact-versions/sync-workspace", nil)
@@ -1579,7 +1420,7 @@ func TestSyncArtifactVersionsFromWorkspaceRepairsCollectingDownloadVersionFromWo
 	}
 }
 
-func TestDeleteArtifactVersionRemovesDownloadWorkspaceAndRecords(t *testing.T) {
+func TestDeleteArtifactVersionRemovesDownloadWorkspaceAndVersionRecords(t *testing.T) {
 	setupArtifactVersionTestDB(t)
 	root, err := batchUploadRootDir()
 	if err != nil {
@@ -1600,20 +1441,6 @@ func TestDeleteArtifactVersionRemovesDownloadWorkspaceAndRecords(t *testing.T) {
 		TargetPath:  targetDir,
 	}); err != nil {
 		t.Fatalf("persist artifact version: %v", err)
-	}
-	if err := repository.DB.Create(&model.DownloadJob{
-		ID:             "job-delete",
-		Status:         "success",
-		RemotePath:     "/remote/HIS更新",
-		LocalDir:       localDir,
-		TargetPath:     targetDir,
-		BatchID:        "batch-delete",
-		TotalFiles:     1,
-		CompletedFiles: 1,
-		StartedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}).Error; err != nil {
-		t.Fatalf("seed download job: %v", err)
 	}
 
 	gin.SetMode(gin.TestMode)
@@ -1637,18 +1464,15 @@ func TestDeleteArtifactVersionRemovesDownloadWorkspaceAndRecords(t *testing.T) {
 	if _, err := os.Stat(localDir); !os.IsNotExist(err) {
 		t.Fatalf("expected local dir removed, stat err=%v", err)
 	}
-	var versionCount, itemCount, jobCount int64
+	var versionCount, itemCount int64
 	if err := repository.DB.Model(&model.ArtifactVersion{}).Where("version_no = ?", "batch-delete").Count(&versionCount).Error; err != nil {
 		t.Fatalf("count versions: %v", err)
 	}
 	if err := repository.DB.Model(&model.ArtifactVersionItem{}).Where("version_no = ?", "batch-delete").Count(&itemCount).Error; err != nil {
 		t.Fatalf("count items: %v", err)
 	}
-	if err := repository.DB.Model(&model.DownloadJob{}).Where("batch_id = ?", "batch-delete").Count(&jobCount).Error; err != nil {
-		t.Fatalf("count jobs: %v", err)
-	}
-	if versionCount != 0 || itemCount != 0 || jobCount != 0 {
-		t.Fatalf("expected all records removed, versions=%d items=%d jobs=%d", versionCount, itemCount, jobCount)
+	if versionCount != 0 || itemCount != 0 {
+		t.Fatalf("expected all records removed, versions=%d items=%d", versionCount, itemCount)
 	}
 }
 
@@ -1660,7 +1484,7 @@ func setupArtifactVersionTestDB(t *testing.T) {
 	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
 		t.Fatalf("init db: %v", err)
 	}
-	if err := repository.DB.AutoMigrate(&model.Application{}, &model.ArtifactVersion{}, &model.ArtifactVersionItem{}, &model.ArtifactDeployBatch{}, &model.ArtifactDeployRecord{}, &model.DeploymentRuntimeVersion{}, &model.DownloadJob{}); err != nil {
+	if err := repository.DB.AutoMigrate(&model.Application{}, &model.ArtifactVersion{}, &model.ArtifactVersionItem{}, &model.ArtifactDeployBatch{}, &model.ArtifactDeployRecord{}, &model.DeploymentRuntimeVersion{}); err != nil {
 		t.Fatalf("migrate artifact version tables: %v", err)
 	}
 	apps := []model.Application{

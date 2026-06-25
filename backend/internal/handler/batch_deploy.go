@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -123,20 +122,6 @@ func NewBatchDeployHandler() *BatchDeployHandler {
 	}
 }
 
-func FinalizeOrphanedDownloadJobs(db *gorm.DB) (int64, error) {
-	if db == nil {
-		return 0, nil
-	}
-	result := db.Model(&model.DownloadJob{}).
-		Where("status IN ?", []string{"pending", "running"}).
-		Updates(map[string]any{
-			"status":     "failed",
-			"error":      "服务重启，下载任务已中断，可重新点击下载并断点续传",
-			"updated_at": time.Now(),
-		})
-	return result.RowsAffected, result.Error
-}
-
 func (h *BatchDeployHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g := r.Group("/batch-deploy")
 	g.Use(middleware.AuthRequired())
@@ -148,8 +133,6 @@ func (h *BatchDeployHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/package-download/local-list", h.ListPackageDownloadLocalDir)
 		g.POST("/download-remote-dir/start", h.StartDownloadRemoteDir)
 		g.GET("/download-remote-dir/active", h.GetActiveDownloadJob)
-		g.GET("/download-remote-dir/latest", h.GetLatestDownloadJob)
-		g.GET("/download-remote-dir/batches", h.ListDownloadBatches)
 		g.GET("/artifact-versions", h.ListArtifactVersions)
 		g.POST("/artifact-versions/sync-workspace", h.SyncArtifactVersionsFromWorkspace)
 		g.GET("/artifact-versions/:versionNo", h.GetArtifactVersion)
@@ -161,8 +144,6 @@ func (h *BatchDeployHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/deploy-batches/:batchNo", h.GetArtifactDeployBatch)
 		g.POST("/deploy-batches/:batchNo/rollback", h.RollbackArtifactDeployBatch)
 		g.GET("/source-batches", h.ListSourceBatches)
-		g.POST("/download-remote-dir/batches/:batchId/retry", h.RetryDownloadBatch)
-		g.DELETE("/download-remote-dir/batches/:batchId", h.ClearDownloadBatch)
 		g.POST("/download-remote-dir/cancel/:id", h.CancelDownloadJob)
 		g.GET("/download-remote-dir/progress/:id", h.GetDownloadProgress)
 		g.POST("/download-remote-dir", h.DownloadRemoteDir)
@@ -189,11 +170,7 @@ func (h *BatchDeployHandler) ListSourceBatches(c *gin.Context) {
 		return
 	}
 
-	jobs := []model.DownloadJob{}
-	if repository.DB != nil {
-		_ = repository.DB.Order("updated_at DESC").Find(&jobs).Error
-	}
-	batches, err := listArtifactSourceBatches(root, jobs)
+	batches, err := listArtifactSourceBatches(root)
 	if err != nil {
 		response.Fail(c, 13018, err.Error())
 		return
@@ -306,9 +283,6 @@ func deleteArtifactVersion(versionNo string) error {
 
 	err = repository.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("version_no = ?", versionNo).Delete(&model.ArtifactVersionItem{}).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("batch_id = ?", versionNo).Delete(&model.DownloadJob{}).Error; err != nil {
 			return err
 		}
 		if err := tx.Where("version_no = ?", versionNo).Delete(&model.ArtifactVersion{}).Error; err != nil {
@@ -574,9 +548,7 @@ func backfillArtifactVersionsFromWorkspace() error {
 	if err != nil {
 		return err
 	}
-	jobs := []model.DownloadJob{}
-	_ = repository.DB.Order("updated_at DESC").Find(&jobs).Error
-	batches, err := listArtifactSourceBatches(root, jobs)
+	batches, err := listArtifactSourceBatches(root)
 	if err != nil {
 		return err
 	}
@@ -867,22 +839,29 @@ func (h *BatchDeployHandler) StartDownloadRemoteDir(c *gin.Context) {
 		return
 	}
 	selectedPaths := normalizeRemoteSelectionPaths(req.SelectedPaths)
-	batchID := newBatchID()
+	jobID, err := downloadJobIDForRemotePath(req.RemotePath, selectedPaths)
+	if err != nil {
+		response.Fail(c, 13010, err.Error())
+		return
+	}
+	if existing, ok := getDownloadJobSnapshot(jobID); ok && (existing.Status == "pending" || existing.Status == "running") {
+		response.OK(c, existing)
+		return
+	}
 
 	job := &downloadJob{
-		ID:            batchID,
+		ID:            jobID,
 		Status:        "pending",
 		RemotePath:    req.RemotePath,
 		SelectedPaths: selectedPaths,
 		LocalDir:      localDir,
-		BatchID:       batchID,
+		BatchID:       jobID,
 		StartedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
 	downloadJobStore.Lock()
 	downloadJobStore.items[job.ID] = job
 	downloadJobStore.Unlock()
-	persistDownloadJob(*job)
 
 	go runDownloadJob(job.ID, req.ServerID, req.RemotePath, selectedPaths, localDir)
 
@@ -890,142 +869,30 @@ func (h *BatchDeployHandler) StartDownloadRemoteDir(c *gin.Context) {
 }
 
 func (h *BatchDeployHandler) GetActiveDownloadJob(c *gin.Context) {
-	var dbJob model.DownloadJob
-	if repository.DB == nil {
-		response.OK(c, nil)
-		return
-	}
-	err := repository.DB.
-		Where("status IN ?", []string{"pending", "running"}).
-		Order("updated_at DESC").
-		First(&dbJob).Error
-	if err != nil {
-		response.OK(c, nil)
-		return
-	}
-	response.OK(c, downloadJobFromModel(dbJob))
-}
-
-func (h *BatchDeployHandler) GetLatestDownloadJob(c *gin.Context) {
-	if repository.DB != nil {
-		var dbJob model.DownloadJob
-		err := repository.DB.
-			Where("status = ?", "success").
-			Order("updated_at DESC").
-			First(&dbJob).Error
-		if err == nil {
-			response.OK(c, hydrateDownloadJobFromWorkspace(downloadJobFromModel(dbJob)))
-			return
-		}
-	}
-
-	root, err := batchUploadRootDir()
-	if err != nil {
-		response.Fail(c, 13012, err.Error())
-		return
-	}
-	if job, ok := latestDownloadJobFromWorkspace(root); ok {
-		response.OK(c, job)
-		return
-	}
-	response.OK(c, nil)
-}
-
-func (h *BatchDeployHandler) ListDownloadBatches(c *gin.Context) {
-	root, err := batchUploadRootDir()
-	if err != nil {
-		response.Fail(c, 13013, err.Error())
-		return
-	}
-
-	jobs := []model.DownloadJob{}
-	if repository.DB != nil {
-		_ = repository.DB.Order("updated_at DESC").Find(&jobs).Error
-	}
-	batches, err := listDownloadBatches(root, jobs)
-	if err != nil {
-		response.Fail(c, 13013, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"batches": batches})
-}
-
-func (h *BatchDeployHandler) RetryDownloadBatch(c *gin.Context) {
-	batchID := safePathSegment(c.Param("batchId"))
-	if batchID == "" {
-		response.Fail(c, 13014, "批次编号无效")
-		return
-	}
-	jobModel, err := findLatestDownloadJobByBatchID(batchID)
-	if err != nil {
-		response.Fail(c, 13014, "下载任务不存在")
-		return
-	}
-	if jobModel.RemotePath == "" {
-		response.Fail(c, 13014, "该批次没有远程目录信息，无法重试")
-		return
-	}
-	if jobModel.Status == "pending" || jobModel.Status == "running" {
-		response.Fail(c, 13014, "下载任务正在执行")
-		return
-	}
-	localDir := jobModel.LocalDir
-	if localDir == "" {
-		root, err := downloadWorkspaceRootDir()
-		if err != nil {
-			response.Fail(c, 13014, err.Error())
-			return
-		}
-		localDir = root
-	}
-	if err := validateDownloadBatchDir(localDir); err != nil {
-		response.Fail(c, 13014, err.Error())
-		return
-	}
-
-	previousJob := downloadJobFromModel(jobModel)
-	job := &downloadJob{
-		ID:            newBatchID(),
-		Status:        "pending",
-		RemotePath:    jobModel.RemotePath,
-		SelectedPaths: append([]string(nil), previousJob.SelectedPaths...),
-		LocalDir:      localDir,
-		BatchID:       batchID,
-		StartedAt:     time.Now(),
-		UpdatedAt:     time.Now(),
-	}
+	var latest *downloadJob
 	downloadJobStore.Lock()
-	downloadJobStore.items[job.ID] = job
-	downloadJobStore.Unlock()
-	persistDownloadJob(*job)
-
-	go runDownloadJob(job.ID, 0, job.RemotePath, job.SelectedPaths, localDir)
-	response.OK(c, job)
-}
-
-func (h *BatchDeployHandler) ClearDownloadBatch(c *gin.Context) {
-	batchID := safePathSegment(c.Param("batchId"))
-	if batchID == "" {
-		response.Fail(c, 13015, "批次编号无效")
-		return
-	}
-	if hasRunningDownloadJob(batchID) {
-		response.Fail(c, 13015, "下载任务正在执行，不能清理")
-		return
-	}
-	localDir, err := downloadBatchDirByID(batchID)
-	if err != nil {
-		response.Fail(c, 13015, err.Error())
-		return
-	}
-	if !isDownloadWorkspaceRoot(localDir) {
-		if err := os.RemoveAll(localDir); err != nil {
-			response.Fail(c, 13015, "清理下载目录失败: "+err.Error())
-			return
+	for _, job := range downloadJobStore.items {
+		if job.Status != "pending" && job.Status != "running" {
+			continue
+		}
+		if latest == nil || job.UpdatedAt.After(latest.UpdatedAt) {
+			copy := copyDownloadJob(*job)
+			latest = &copy
 		}
 	}
-	removeDownloadJobsByBatchID(batchID)
-	response.OK(c, gin.H{"batchId": batchID})
+	downloadJobStore.Unlock()
+	if latest == nil {
+		response.OK(c, nil)
+		return
+	}
+	response.OK(c, latest)
+}
+
+func downloadJobIDForRemotePath(remotePath string, selectedPaths []string) (string, error) {
+	if len(selectedPaths) == 1 {
+		return packageRelativeLocalPath(selectedPaths[0])
+	}
+	return packageRelativeLocalPath(remotePath)
 }
 
 func downloadWorkspaceDirForStart(remotePath string) (string, error) {
@@ -1052,75 +919,15 @@ func isDownloadWorkspaceRoot(dir string) bool {
 	return filepath.Clean(rootAbs) == filepath.Clean(dirAbs)
 }
 
-func findLatestDownloadJobByBatchID(batchID string) (model.DownloadJob, error) {
-	if repository.DB == nil {
-		return model.DownloadJob{}, fmt.Errorf("数据库未初始化")
-	}
-	var job model.DownloadJob
-	err := repository.DB.Where("batch_id = ?", batchID).Order("updated_at DESC").First(&job).Error
-	return job, err
-}
-
-func validateDownloadBatchDir(localDir string) error {
-	root, err := batchUploadRootDir()
-	if err != nil {
-		return err
-	}
-	absDir, err := filepath.Abs(localDir)
-	if err != nil {
-		return err
-	}
-	if !isPathInside(filepath.Join(root, "download"), absDir) {
-		return fmt.Errorf("下载目录超出批量下载工作区")
-	}
-	if err := os.MkdirAll(absDir, 0755); err != nil {
-		return err
-	}
-	return nil
-}
-
-func downloadBatchDirByID(batchID string) (string, error) {
-	root, err := downloadWorkspaceRootDir()
-	if err != nil {
-		return "", err
-	}
-	localDir := root
-	if repository.DB != nil {
-		var job model.DownloadJob
-		if err := repository.DB.Where("batch_id = ? AND local_dir <> ''", batchID).Order("updated_at DESC").First(&job).Error; err == nil {
-			localDir = job.LocalDir
-		}
-	}
-	if err := validateDownloadBatchDir(localDir); err != nil {
-		return "", err
-	}
-	return localDir, nil
-}
-
 func hasRunningDownloadJob(batchID string) bool {
 	downloadJobStore.Lock()
+	defer downloadJobStore.Unlock()
 	for _, job := range downloadJobStore.items {
 		if job.BatchID == batchID && (job.Status == "pending" || job.Status == "running") {
-			downloadJobStore.Unlock()
 			return true
 		}
 	}
-	downloadJobStore.Unlock()
-	if repository.DB == nil {
-		return false
-	}
-	var count int64
-	repository.DB.Model(&model.DownloadJob{}).
-		Where("batch_id = ? AND status IN ?", batchID, []string{"pending", "running"}).
-		Count(&count)
-	return count > 0
-}
-
-func removeDownloadJobsByBatchID(batchID string) {
-	removeDownloadJobsFromMemoryByBatchID(batchID)
-	if repository.DB != nil {
-		repository.DB.Where("batch_id = ?", batchID).Delete(&model.DownloadJob{})
-	}
+	return false
 }
 
 func removeDownloadJobsFromMemoryByBatchID(batchID string) {
@@ -1172,13 +979,6 @@ func getDownloadJobSnapshot(jobID string) (downloadJob, bool) {
 		return snapshot, true
 	}
 	downloadJobStore.Unlock()
-	if repository.DB == nil {
-		return downloadJob{}, false
-	}
-	var dbJob model.DownloadJob
-	if repository.DB.First(&dbJob, "id = ?", jobID).Error == nil {
-		return downloadJobFromModel(dbJob), true
-	}
 	return downloadJob{}, false
 }
 
@@ -1296,19 +1096,6 @@ func updateDownloadJob(jobID string, update func(*downloadJob)) {
 	if job, ok := downloadJobStore.items[jobID]; ok {
 		update(job)
 		job.UpdatedAt = time.Now()
-		persistDownloadJob(*job)
-		return
-	}
-
-	if repository.DB == nil {
-		return
-	}
-	var dbJob model.DownloadJob
-	if repository.DB.First(&dbJob, "id = ?", jobID).Error == nil {
-		job := downloadJobFromModel(dbJob)
-		update(&job)
-		job.UpdatedAt = time.Now()
-		persistDownloadJob(job)
 	}
 }
 
@@ -1333,270 +1120,7 @@ func cancelDownloadJob(jobID, message string) {
 	})
 }
 
-func persistDownloadJob(job downloadJob) {
-	if repository.DB == nil {
-		return
-	}
-	dbJob := downloadJobToModel(job)
-	repository.DB.Save(&dbJob)
-}
-
-func downloadJobToModel(job downloadJob) model.DownloadJob {
-	filesJSON, _ := json.Marshal(job.Files)
-	itemsJSON, _ := json.Marshal(job.Items)
-	selectedPathsJSON, _ := json.Marshal(job.SelectedPaths)
-	return model.DownloadJob{
-		ID:                job.ID,
-		Status:            job.Status,
-		RemotePath:        job.RemotePath,
-		SelectedPathsJSON: string(selectedPathsJSON),
-		LocalDir:          job.LocalDir,
-		TargetPath:        job.TargetPath,
-		BatchID:           job.BatchID,
-		FilesJSON:         string(filesJSON),
-		ItemsJSON:         string(itemsJSON),
-		Count:             job.Count,
-		TotalFiles:        job.TotalFiles,
-		CompletedFiles:    job.CompletedFiles,
-		CurrentPath:       job.CurrentPath,
-		Error:             job.Error,
-		StartedAt:         job.StartedAt,
-		UpdatedAt:         job.UpdatedAt,
-	}
-}
-
-func downloadJobFromModel(dbJob model.DownloadJob) downloadJob {
-	files := []string{}
-	if strings.TrimSpace(dbJob.FilesJSON) != "" {
-		_ = json.Unmarshal([]byte(dbJob.FilesJSON), &files)
-	}
-	items := []downloadJobItem{}
-	if strings.TrimSpace(dbJob.ItemsJSON) != "" {
-		_ = json.Unmarshal([]byte(dbJob.ItemsJSON), &items)
-	}
-	selectedPaths := []string{}
-	if strings.TrimSpace(dbJob.SelectedPathsJSON) != "" {
-		_ = json.Unmarshal([]byte(dbJob.SelectedPathsJSON), &selectedPaths)
-	}
-	return downloadJob{
-		ID:             dbJob.ID,
-		Status:         dbJob.Status,
-		RemotePath:     dbJob.RemotePath,
-		SelectedPaths:  selectedPaths,
-		LocalDir:       dbJob.LocalDir,
-		TargetPath:     dbJob.TargetPath,
-		BatchID:        dbJob.BatchID,
-		Files:          files,
-		Items:          items,
-		Count:          dbJob.Count,
-		TotalFiles:     dbJob.TotalFiles,
-		CompletedFiles: dbJob.CompletedFiles,
-		CurrentPath:    dbJob.CurrentPath,
-		Error:          dbJob.Error,
-		StartedAt:      dbJob.StartedAt,
-		UpdatedAt:      dbJob.UpdatedAt,
-	}
-}
-
-func hydrateDownloadJobFromWorkspace(job downloadJob) downloadJob {
-	if strings.TrimSpace(job.LocalDir) == "" {
-		return job
-	}
-	if strings.TrimSpace(job.TargetPath) == "" {
-		job.TargetPath = latestDownloadTargetDir(job.LocalDir)
-	}
-	if job.TargetPath == "" {
-		return job
-	}
-	if job.Status != "success" && job.Status != "failed" && job.Status != "canceled" {
-		return job
-	}
-	files, err := collectArtifactFilesFromDir(job.TargetPath)
-	if err != nil {
-		if job.Error == "" && job.Status == "success" {
-			job.Error = err.Error()
-		}
-		return job
-	}
-	sort.Strings(files)
-	job.Files = files
-	job.Count = len(files)
-	if job.TotalFiles == 0 {
-		job.TotalFiles = len(files)
-	}
-	if job.CompletedFiles == 0 && job.Status == "success" {
-		job.CompletedFiles = len(files)
-	}
-	if len(job.Items) == 0 {
-		job.Items = downloadJobItemsFromFiles(job, files)
-	}
-	return job
-}
-
-func downloadJobItemsFromFiles(job downloadJob, files []string) []downloadJobItem {
-	items := make([]downloadJobItem, 0, len(files))
-	for _, fileName := range files {
-		localPath := filepath.Join(job.TargetPath, fileName)
-		var size int64
-		if info, err := os.Stat(localPath); err == nil {
-			size = info.Size()
-		}
-		remotePath := fileName
-		if strings.TrimSpace(job.RemotePath) != "" {
-			remotePath = path.Join(job.RemotePath, filepath.ToSlash(fileName))
-		}
-		items = append(items, downloadJobItem{
-			Name:       fileName,
-			RemotePath: remotePath,
-			LocalPath:  localPath,
-			Size:       size,
-			Status:     "success",
-			Artifact:   true,
-		})
-	}
-	return items
-}
-
-func latestDownloadJobFromWorkspace(batchRoot string) (downloadJob, bool) {
-	downloadRoot := filepath.Join(batchRoot, "download")
-	entries, err := os.ReadDir(downloadRoot)
-	if err != nil {
-		return downloadJob{}, false
-	}
-
-	var latestDir string
-	var latestName string
-	var latestTime time.Time
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		batchDir := filepath.Join(downloadRoot, entry.Name())
-		if hasPartialDownloadFile(batchDir) {
-			continue
-		}
-		if latestDir == "" || info.ModTime().After(latestTime) {
-			latestName = entry.Name()
-			latestDir = batchDir
-			latestTime = info.ModTime()
-		}
-	}
-	if latestDir == "" {
-		return downloadJob{}, false
-	}
-
-	targetPath := latestDownloadTargetDir(latestDir)
-	files, err := collectArtifactFilesFromDir(targetPath)
-	errorMessage := ""
-	if err != nil {
-		files = nil
-		errorMessage = err.Error()
-	}
-	job := downloadJob{
-		ID:             latestName,
-		Status:         "success",
-		LocalDir:       latestDir,
-		TargetPath:     targetPath,
-		BatchID:        latestName,
-		Files:          files,
-		Count:          len(files),
-		TotalFiles:     len(files),
-		CompletedFiles: len(files),
-		Error:          errorMessage,
-		HasPartial:     false,
-		StartedAt:      latestTime,
-		UpdatedAt:      latestTime,
-	}
-	job.Items = downloadJobItemsFromFiles(job, files)
-	return job, true
-}
-
-func listDownloadBatches(batchRoot string, jobs []model.DownloadJob) ([]downloadJob, error) {
-	downloadRoot := filepath.Join(batchRoot, "download")
-	entries, err := os.ReadDir(downloadRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []downloadJob{}, nil
-		}
-		return nil, err
-	}
-
-	jobsByBatchID := latestJobsByBatchID(jobs)
-	seen := map[string]bool{}
-	batches := make([]downloadJob, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		batchID := entry.Name()
-		batchDir := filepath.Join(downloadRoot, batchID)
-		jobModel, hasJob := jobsByBatchID[batchID]
-		job := downloadJob{
-			ID:         batchID,
-			Status:     "success",
-			LocalDir:   batchDir,
-			TargetPath: latestDownloadTargetDir(batchDir),
-			BatchID:    batchID,
-			StartedAt:  info.ModTime(),
-			UpdatedAt:  info.ModTime(),
-		}
-		if hasJob {
-			job = downloadJobFromModel(jobModel)
-			if job.LocalDir == "" {
-				job.LocalDir = batchDir
-			}
-			if job.TargetPath == "" {
-				job.TargetPath = latestDownloadTargetDir(job.LocalDir)
-			}
-		}
-		job.HasPartial = hasPartialDownloadFile(job.LocalDir)
-		if !hasJob && job.HasPartial {
-			job.Status = "failed"
-			job.Error = "下载未完成，存在 .part 临时文件"
-		}
-		if job.TargetPath != "" && job.Status == "success" {
-			if files, err := collectArtifactFilesFromDir(job.TargetPath); err == nil {
-				job.Files = files
-				job.Count = len(files)
-			} else if job.Error == "" {
-				job.Error = err.Error()
-			}
-		}
-		job = hydrateDownloadJobFromWorkspace(job)
-		batches = append(batches, job)
-		seen[batchID] = true
-	}
-
-	for _, dbJob := range jobs {
-		if dbJob.BatchID == "" || seen[dbJob.BatchID] {
-			continue
-		}
-		job := downloadJobFromModel(dbJob)
-		if job.LocalDir != "" {
-			job.HasPartial = hasPartialDownloadFile(job.LocalDir)
-			if job.TargetPath == "" {
-				job.TargetPath = latestDownloadTargetDir(job.LocalDir)
-			}
-		}
-		job = hydrateDownloadJobFromWorkspace(job)
-		batches = append(batches, job)
-	}
-
-	sort.Slice(batches, func(i, j int) bool {
-		return batches[i].UpdatedAt.After(batches[j].UpdatedAt)
-	})
-	return batches, nil
-}
-
-func listArtifactSourceBatches(batchRoot string, jobs []model.DownloadJob) ([]artifactSourceBatch, error) {
+func listArtifactSourceBatches(batchRoot string) ([]artifactSourceBatch, error) {
 	var batches []artifactSourceBatch
 
 	for _, source := range []string{"upload", "artifact"} {
@@ -1606,26 +1130,6 @@ func listArtifactSourceBatches(batchRoot string, jobs []model.DownloadJob) ([]ar
 			return nil, err
 		}
 		batches = append(batches, items...)
-	}
-
-	downloadBatches, err := listDownloadBatches(batchRoot, jobs)
-	if err != nil {
-		return nil, err
-	}
-	for _, job := range downloadBatches {
-		batches = append(batches, artifactSourceBatch{
-			BatchID:     job.BatchID,
-			SourceType:  "download",
-			SourceLabel: "服务器下载",
-			Status:      job.Status,
-			LocalDir:    job.LocalDir,
-			TargetPath:  job.TargetPath,
-			Files:       job.Files,
-			Count:       job.Count,
-			Error:       job.Error,
-			HasPartial:  job.HasPartial,
-			UpdatedAt:   job.UpdatedAt,
-		})
 	}
 
 	sort.Slice(batches, func(i, j int) bool {
@@ -1956,61 +1460,6 @@ func batchIDFromTargetPath(targetPath string) string {
 	return filepath.Base(targetPath)
 }
 
-func latestJobsByBatchID(jobs []model.DownloadJob) map[string]model.DownloadJob {
-	out := map[string]model.DownloadJob{}
-	for _, job := range jobs {
-		if job.BatchID == "" {
-			continue
-		}
-		existing, ok := out[job.BatchID]
-		if !ok || job.UpdatedAt.After(existing.UpdatedAt) {
-			out[job.BatchID] = job
-		}
-	}
-	return out
-}
-
-func latestDownloadTargetDir(batchDir string) string {
-	entries, err := os.ReadDir(batchDir)
-	if err != nil {
-		return batchDir
-	}
-	var latestDir string
-	var latestTime time.Time
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if latestDir == "" || info.ModTime().After(latestTime) {
-			latestDir = filepath.Join(batchDir, entry.Name())
-			latestTime = info.ModTime()
-		}
-	}
-	if latestDir == "" {
-		return batchDir
-	}
-	return latestDir
-}
-
-func hasPartialDownloadFile(root string) bool {
-	found := false
-	_ = filepath.WalkDir(root, func(filePath string, entry os.DirEntry, err error) error {
-		if err != nil || found {
-			return nil
-		}
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".part") {
-			found = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return found
-}
-
 func (h *BatchDeployHandler) ListPackageDownloadDir(c *gin.Context) {
 	remotePath := c.Query("path")
 	if strings.TrimSpace(remotePath) == "" {
@@ -2068,6 +1517,9 @@ func (h *BatchDeployHandler) ListPackageDownloadLocalDir(c *gin.Context) {
 
 	files := make([]fileInfo, 0, len(entries))
 	for _, entry := range entries {
+		if dir == root && entry.IsDir() && isGeneratedBatchID(entry.Name()) {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
@@ -2805,6 +2257,9 @@ func parsePackageDownloadHost(value string) (string, int, error) {
 }
 
 func packageDownloadPath() string {
+	if repository.DB == nil {
+		return "/"
+	}
 	value, _ := repository.NewSettingsRepo().GetByKey("package_download_path")
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -3036,9 +2491,9 @@ func downloadRemoteSelectionToLocalWithProgressContext(ctx context.Context, fs r
 
 func resolveDownloadTarget(localParent, remoteDir string, selectedPaths []string, fs remoteArtifactFS) (string, string, error) {
 	cleanRemote := cleanRemoteDownloadPath(remoteDir)
-	base := strings.TrimPrefix(cleanRemote, "/")
-	if strings.TrimSpace(base) == "" {
-		base = "root"
+	base, err := packageRelativeLocalPath(cleanRemote)
+	if err != nil {
+		return "", "", err
 	}
 
 	if len(selectedPaths) == 1 {
@@ -3050,13 +2505,58 @@ func resolveDownloadTarget(localParent, remoteDir string, selectedPaths []string
 			}
 			if rel != "" && !strings.Contains(rel, "/") {
 				if info, err := fs.Stat(selectedPaths[0]); err == nil && info.IsDir() {
-					return filepath.Join(localParent, filepath.Base(selectedPaths[0])), filepath.Base(selectedPaths[0]), nil
+					selectedBase, err := packageRelativeLocalPath(selectedPaths[0])
+					if err != nil {
+						return "", "", err
+					}
+					return filepath.Join(localParent, filepath.FromSlash(selectedBase)), filepath.Base(selectedPaths[0]), nil
 				}
 			}
 		}
 	}
 
-	return filepath.Join(localParent, base), "", nil
+	if base == "" {
+		return localParent, "", nil
+	}
+	return filepath.Join(localParent, filepath.FromSlash(base)), "", nil
+}
+
+func packageRelativeLocalPath(remotePath string) (string, error) {
+	return packageRelativeLocalPathWithRoot(remotePath, packageDownloadPath())
+}
+
+func packageRelativeLocalPathWithRoot(remotePath, packageRoot string) (string, error) {
+	cleanRemote := cleanRemoteDownloadPath(remotePath)
+	if cleanRemote == "" {
+		return "", fmt.Errorf("远程路径不能为空")
+	}
+	cleanRoot := cleanRemoteDownloadPath(packageRoot)
+	if cleanRoot == "" {
+		cleanRoot = "/"
+	}
+
+	var rel string
+	if cleanRoot != "/" {
+		if cleanRemote == cleanRoot {
+			rel = ""
+		} else if candidate, err := relativeRemoteDownloadPath(cleanRoot, cleanRemote); err == nil {
+			rel = candidate
+		} else {
+			rel = strings.TrimPrefix(cleanRemote, "/")
+		}
+	} else {
+		rel = strings.TrimPrefix(cleanRemote, "/")
+	}
+
+	if rel == "" {
+		return "", nil
+	}
+	cleanRel := path.Clean("/" + rel)
+	cleanRel = strings.TrimPrefix(cleanRel, "/")
+	if cleanRel == "." || cleanRel == ".." || strings.HasPrefix(cleanRel, "../") {
+		return "", fmt.Errorf("远程路径非法: %s", remotePath)
+	}
+	return cleanRel, nil
 }
 
 func downloadRemoteItemsToLocal(ctx context.Context, fs remoteArtifactFS, items []downloadJobItem, onProgress func(downloadProgress)) ([]string, error) {
@@ -3551,6 +3051,23 @@ func newBatchID() string {
 		return timestamp
 	}
 	return timestamp + "-" + hex.EncodeToString(b[:])
+}
+
+func isGeneratedBatchID(value string) bool {
+	if len(value) != 23 || value[14] != '-' {
+		return false
+	}
+	for _, ch := range value[:14] {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	for _, ch := range value[15:] {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func batchIDTimestamp(t time.Time) string {

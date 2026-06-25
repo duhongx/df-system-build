@@ -27,7 +27,6 @@ func AutoMigrate() error {
 		&model.Server{},
 		&model.ServerLog{},
 		&model.NotificationMsg{},
-		&model.DownloadJob{},
 		&model.ArtifactVersion{},
 		&model.ArtifactVersionItem{},
 		&model.ArtifactDeployBatch{},
