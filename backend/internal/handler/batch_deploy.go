@@ -2541,11 +2541,14 @@ func packageRelativeLocalPathWithRoot(remotePath, packageRoot string) (string, e
 			rel = ""
 		} else if candidate, err := relativeRemoteDownloadPath(cleanRoot, cleanRemote); err == nil {
 			rel = candidate
+		} else if candidate := relativePathAfterRootName(cleanRoot, cleanRemote); candidate != "" {
+			rel = candidate
 		} else {
-			rel = strings.TrimPrefix(cleanRemote, "/")
+			rel = path.Base(cleanRemote)
 		}
 	} else {
 		rel = strings.TrimPrefix(cleanRemote, "/")
+		rel = trimServerAbsoluteAncestors(rel)
 	}
 
 	if rel == "" {
@@ -2557,6 +2560,28 @@ func packageRelativeLocalPathWithRoot(remotePath, packageRoot string) (string, e
 		return "", fmt.Errorf("远程路径非法: %s", remotePath)
 	}
 	return cleanRel, nil
+}
+
+func relativePathAfterRootName(packageRoot, remotePath string) string {
+	rootName := path.Base(cleanRemoteDownloadPath(packageRoot))
+	if rootName == "." || rootName == "/" || rootName == "" {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(cleanRemoteDownloadPath(remotePath), "/"), "/")
+	for i, part := range parts {
+		if part == rootName && i+1 < len(parts) {
+			return strings.Join(parts[i+1:], "/")
+		}
+	}
+	return ""
+}
+
+func trimServerAbsoluteAncestors(relativePath string) string {
+	parts := strings.Split(strings.Trim(relativePath, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "root" {
+		return strings.Join(parts[2:], "/")
+	}
+	return relativePath
 }
 
 func downloadRemoteItemsToLocal(ctx context.Context, fs remoteArtifactFS, items []downloadJobItem, onProgress func(downloadProgress)) ([]string, error) {

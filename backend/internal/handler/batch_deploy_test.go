@@ -514,6 +514,26 @@ func TestPackageRelativeLocalPathUsesPathRelativeToPackageRoot(t *testing.T) {
 	}
 }
 
+func TestPackageRelativeLocalPathDoesNotKeepServerAbsoluteAncestors(t *testing.T) {
+	relativePath, err := packageRelativeLocalPathWithRoot("/root/DFHIS/HIS更新/测试中版本", "/")
+	if err != nil {
+		t.Fatalf("resolve relative path: %v", err)
+	}
+	if relativePath != "HIS更新/测试中版本" {
+		t.Fatalf("expected absolute server ancestors to be removed, got %s", relativePath)
+	}
+}
+
+func TestPackageRelativeLocalPathFallsBackToPackageRootName(t *testing.T) {
+	relativePath, err := packageRelativeLocalPathWithRoot("/DFHIS/HIS更新/测试中版本", "/root/DFHIS")
+	if err != nil {
+		t.Fatalf("resolve relative path: %v", err)
+	}
+	if relativePath != "HIS更新/测试中版本" {
+		t.Fatalf("expected path after package root name, got %s", relativePath)
+	}
+}
+
 func stringSlicesEqual(left, right []string) bool {
 	if len(left) != len(right) {
 		return false
