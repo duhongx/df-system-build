@@ -1493,10 +1493,15 @@ func (h *BatchDeployHandler) ListPackageDownloadLocalDir(c *gin.Context) {
 		response.Fail(c, 13023, "创建下载工作区失败: "+err.Error())
 		return
 	}
+	if err := normalizeLegacyPackageDownloadDirs(root); err != nil {
+		response.Fail(c, 13023, "整理历史下载目录失败: "+err.Error())
+		return
+	}
 
 	queryPath := strings.TrimSpace(c.Query("path"))
 	dir := root
 	if queryPath != "" {
+		queryPath = normalizeLegacyPackageDownloadQueryPath(root, queryPath)
 		dir, err = resolveBatchWorkspaceDir(queryPath)
 		if err != nil {
 			response.Fail(c, 13023, err.Error())
@@ -1541,6 +1546,92 @@ func (h *BatchDeployHandler) ListPackageDownloadLocalDir(c *gin.Context) {
 	})
 
 	response.OK(c, gin.H{"root": root, "path": dir, "files": files})
+}
+
+func normalizeLegacyPackageDownloadDirs(root string) error {
+	legacyRoot := filepath.Join(root, "root")
+	entries, err := os.ReadDir(legacyRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		serverRoot := filepath.Join(legacyRoot, entry.Name())
+		children, err := os.ReadDir(serverRoot)
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			src := filepath.Join(serverRoot, child.Name())
+			dst := filepath.Join(root, child.Name())
+			if err := mergeLegacyDownloadPath(src, dst); err != nil {
+				return err
+			}
+		}
+		_ = os.Remove(serverRoot)
+	}
+	_ = os.Remove(legacyRoot)
+	return nil
+}
+
+func normalizeLegacyPackageDownloadQueryPath(root, queryPath string) string {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return queryPath
+	}
+	queryAbs, err := filepath.Abs(queryPath)
+	if err != nil {
+		return queryPath
+	}
+	legacyRoot := filepath.Join(rootAbs, "root")
+	rel, err := filepath.Rel(legacyRoot, queryAbs)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return queryPath
+	}
+	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+	if len(parts) <= 1 {
+		return rootAbs
+	}
+	return filepath.Join(append([]string{rootAbs}, parts[1:]...)...)
+}
+
+func mergeLegacyDownloadPath(src, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	dstInfo, err := os.Stat(dst)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return err
+		}
+		return os.Rename(src, dst)
+	}
+	if err != nil {
+		return err
+	}
+	if srcInfo.IsDir() && dstInfo.IsDir() {
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if err := mergeLegacyDownloadPath(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
+				return err
+			}
+		}
+		return os.Remove(src)
+	}
+	return os.RemoveAll(src)
 }
 
 func (h *BatchDeployHandler) ListPackageServerDir(c *gin.Context) {

@@ -534,6 +534,39 @@ func TestPackageRelativeLocalPathFallsBackToPackageRootName(t *testing.T) {
 	}
 }
 
+func TestNormalizeLegacyPackageDownloadDirsRemovesServerAbsoluteAncestors(t *testing.T) {
+	root := t.TempDir()
+	legacyDir := filepath.Join(root, "root", "DFHIS", "HIS更新", "测试中版本")
+	if err := os.MkdirAll(legacyDir, 0755); err != nil {
+		t.Fatalf("mkdir legacy dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "his-gateway.jar"), []byte("jar"), 0644); err != nil {
+		t.Fatalf("write legacy artifact: %v", err)
+	}
+
+	if err := normalizeLegacyPackageDownloadDirs(root); err != nil {
+		t.Fatalf("normalize legacy dirs: %v", err)
+	}
+
+	normalizedPath := filepath.Join(root, "HIS更新", "测试中版本", "his-gateway.jar")
+	if _, err := os.Stat(normalizedPath); err != nil {
+		t.Fatalf("expected normalized artifact at %s: %v", normalizedPath, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "root")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected legacy root directory to be removed, stat err=%v", err)
+	}
+}
+
+func TestNormalizeLegacyPackageDownloadQueryPathMapsOldPathToNewPath(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "root", "DFHIS", "HIS更新", "测试中版本")
+	expected := filepath.Join(root, "HIS更新", "测试中版本")
+
+	if got := normalizeLegacyPackageDownloadQueryPath(root, oldPath); got != expected {
+		t.Fatalf("expected old query path to map to %s, got %s", expected, got)
+	}
+}
+
 func stringSlicesEqual(left, right []string) bool {
 	if len(left) != len(right) {
 		return false
