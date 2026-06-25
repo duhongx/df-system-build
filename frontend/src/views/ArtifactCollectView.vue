@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Document, Folder, Upload } from '@element-plus/icons-vue'
 import {
   cancelDownloadJob,
@@ -10,6 +10,7 @@ import {
   listDownloadBatches,
   listPackageDownloadLocalDir,
   listPackageDownloadDir,
+  clearDownloadBatch,
   startDownloadRemoteDir,
   type DownloadJob,
   type DownloadJobItem,
@@ -473,6 +474,30 @@ function formatBeijingTime(value?: string) {
 function downloadHistoryRowClassName({ row }: { row: DownloadJob }) {
   return row.id === selectedDownloadHistory.value?.id ? 'selected-download-history-row' : ''
 }
+
+async function handleClearDownloadBatch(row: DownloadJob) {
+  try {
+    await ElMessageBox.confirm(`确认删除下载记录 ${row.batchId || row.id}？此操作会清理本地下载目录`, '删除下载记录', {
+      confirmButtonText: '确认',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch {
+    return
+  }
+
+  try {
+    await clearDownloadBatch(row.batchId || row.id)
+    ElMessage.success('下载记录已删除')
+    if (selectedDownloadHistory.value?.id === row.id) {
+      selectedDownloadHistory.value = null
+    }
+    await loadDownloadHistory()
+    await loadLocalDownloadDir()
+  } catch {
+    // handled globally
+  }
+}
 </script>
 
 <template>
@@ -701,6 +726,11 @@ function downloadHistoryRowClassName({ row }: { row: DownloadJob }) {
             </el-table-column>
             <el-table-column label="更新时间" width="170">
               <template #default="{ row }">{{ formatBeijingTime(row.updatedAt || row.startedAt) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="90" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="danger" size="small" @click.stop="handleClearDownloadBatch(row)">删除</el-button>
+              </template>
             </el-table-column>
           </el-table>
 
