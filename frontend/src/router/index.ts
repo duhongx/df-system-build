@@ -18,7 +18,7 @@ const routes = [
       { path: 'tasks', name: 'TaskList', component: () => import('../views/TaskListView.vue'), meta: { title: '任务列表' } },
       { path: 'artifact-collect', redirect: '/artifacts/import' },
       { path: 'artifact-batches', redirect: '/artifacts/versions' },
-      { path: 'batch-deploy', name: 'BatchDeploy', component: () => import('../views/BatchDeployView.vue'), meta: { title: '批量部署' } },
+      { path: 'batch-deploy', name: 'BatchDeploy', component: () => import('../views/BatchDeployView.vue'), meta: { title: '新增更新任务' } },
       { path: 'build-queue', name: 'BuildQueue', component: () => import('../views/BuildQueueView.vue'), meta: { title: '构建队列' } },
       { path: 'release', name: 'ReleaseList', component: () => import('../views/ReleaseListView.vue'), meta: { title: '构建历史' } },
       { path: 'release/:id', name: 'PipelineDetail', component: () => import('../views/PipelineDetailView.vue'), meta: { title: 'Pipeline 详情' } },

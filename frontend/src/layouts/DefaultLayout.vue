@@ -315,7 +315,7 @@ async function handleSavePassword() {
             <span>任务中心</span>
           </template>
           <el-menu-item v-if="settingsStore.showTaskList" index="/tasks">任务列表</el-menu-item>
-          <el-menu-item v-if="settingsStore.showBatchDeploy" index="/batch-deploy">批量部署</el-menu-item>
+          <el-menu-item v-if="settingsStore.showBatchDeploy" index="/batch-deploy">新增更新任务</el-menu-item>
           <el-menu-item index="/build-queue">构建队列</el-menu-item>
           <el-menu-item index="/release">构建历史</el-menu-item>
         </el-sub-menu>
