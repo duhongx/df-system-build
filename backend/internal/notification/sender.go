@@ -13,13 +13,14 @@ import (
 )
 
 type BuildEvent struct {
-	AppName     string
-	Branch      string
-	Status      string
-	TriggerUser string
-	Duration    int
-	ErrorStage  string
-	ErrorMsg    string
+	DeploymentProgress string
+	AppName            string
+	Branch             string
+	Status             string
+	TriggerUser        string
+	Duration           int
+	ErrorStage         string
+	ErrorMsg           string
 }
 
 // SendBuildNotification sends notifications for a build event
@@ -67,12 +68,16 @@ func sendDingTalk(wh model.NotificationWebhook, event BuildEvent) error {
 	if event.Status == "FAILED" {
 		statusEmoji = "❌"
 	}
+	statusText := event.Status
+	if event.DeploymentProgress == "completed" && event.Status == "FAILED" {
+		statusText, statusEmoji = "部署成功，结果记录异常", "⚠️"
+	}
 
 	content := fmt.Sprintf("%s 构建通知\n\n应用: %s\n分支: %s\n状态: %s\n触发人: %s\n耗时: %ds",
-		statusEmoji, event.AppName, event.Branch, event.Status, event.TriggerUser, event.Duration)
+		statusEmoji, event.AppName, event.Branch, statusText, event.TriggerUser, event.Duration)
 
 	if event.ErrorStage != "" {
-		content += fmt.Sprintf("\n失败阶段: %s\n错误: %s", event.ErrorStage, event.ErrorMsg)
+		content += fmt.Sprintf("\n异常阶段: %s\n错误: %s", event.ErrorStage, event.ErrorMsg)
 	}
 
 	payload := map[string]interface{}{
@@ -88,12 +93,16 @@ func sendWeCom(wh model.NotificationWebhook, event BuildEvent) error {
 	if event.Status == "FAILED" {
 		statusEmoji = "❌"
 	}
+	statusText := event.Status
+	if event.DeploymentProgress == "completed" && event.Status == "FAILED" {
+		statusText, statusEmoji = "部署成功，结果记录异常", "⚠️"
+	}
 
 	content := fmt.Sprintf("%s 构建通知\n\n应用: %s\n分支: %s\n状态: %s\n触发人: %s\n耗时: %ds",
-		statusEmoji, event.AppName, event.Branch, event.Status, event.TriggerUser, event.Duration)
+		statusEmoji, event.AppName, event.Branch, statusText, event.TriggerUser, event.Duration)
 
 	if event.ErrorStage != "" {
-		content += fmt.Sprintf("\n失败阶段: %s\n错误: %s", event.ErrorStage, event.ErrorMsg)
+		content += fmt.Sprintf("\n异常阶段: %s\n错误: %s", event.ErrorStage, event.ErrorMsg)
 	}
 
 	payload := map[string]interface{}{

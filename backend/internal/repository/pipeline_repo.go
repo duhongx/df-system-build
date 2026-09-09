@@ -69,7 +69,7 @@ func (r *PipelineRepo) GetRunning() ([]model.Pipeline, error) {
 
 func (r *PipelineRepo) GetPending() ([]model.Pipeline, error) {
 	var list []model.Pipeline
-	err := DB.Where("status = ?", "PENDING").Order("created_at ASC").Find(&list).Error
+	err := DB.Where("status IN ?", []string{"PENDING", "DEPLOYING"}).Order("created_at ASC").Find(&list).Error
 	return list, err
 }
 
@@ -90,8 +90,20 @@ func (r *PipelineRepo) UpdateStatus(id uint, status string) error {
 }
 
 // CancelOldImageReady cancels all IMAGE_READY pipelines for a given app except the current one
-func (r *PipelineRepo) CancelOldImageReady(applicationID uint, currentPipelineID uint) {
+func (r *PipelineRepo) CancelOldImageReady(applicationID uint, currentPipelineID uint, namespace string) {
 	DB.Model(&model.Pipeline{}).
 		Where("application_id = ? AND status = ? AND id != ?", applicationID, "IMAGE_READY", currentPipelineID).
+		Where("k8s_namespace = ?", namespace).
 		Update("status", "CANCELED")
+}
+
+func (r *PipelineRepo) ConfirmDeploy(id uint) (bool, error) {
+	result := DB.Model(&model.Pipeline{}).Where("id = ? AND status = ?", id, "IMAGE_READY").Update("status", "DEPLOYING")
+	return result.RowsAffected == 1, result.Error
+}
+
+func (r *PipelineRepo) SaveImageCheckpoint(p *model.Pipeline) error {
+	return DB.Model(&model.Pipeline{}).Where("id = ?", p.ID).Updates(map[string]any{
+		"image_name": p.ImageName, "frontend_baseline_json": p.FrontendBaselineJSON,
+	}).Error
 }

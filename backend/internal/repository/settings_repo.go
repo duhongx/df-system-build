@@ -1,6 +1,13 @@
 package repository
 
-import "df-build-server/internal/model"
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"df-build-server/internal/model"
+	"gorm.io/gorm"
+)
 
 type SettingsRepo struct{}
 
@@ -41,4 +48,19 @@ func (r *SettingsRepo) BatchUpdate(settings map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// Read distinguishes a missing optional setting from a storage failure.
+func (r *SettingsRepo) Read(key string, required bool) (string, error) {
+	return ReadSetting(r, key, required)
+}
+func ReadSetting(reader interface{ GetByKey(string) (string, error) }, key string, required bool) (string, error) {
+	value, err := reader.GetByKey(key)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", fmt.Errorf("读取配置项 %s 失败: %w", key, err)
+	}
+	if required && (err != nil || strings.TrimSpace(value) == "") {
+		return "", fmt.Errorf("必填配置项 %s 未配置，请在设置中配置", key)
+	}
+	return value, nil
 }

@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"context"
+	"df-build-server/internal/pipeline"
 	"testing"
 
 	"df-build-server/internal/model"
@@ -128,5 +130,72 @@ func TestCreateAndEnqueueUsesDefaultK8sNamespaceWhenTaskNamespaceEmpty(t *testin
 
 	if p.K8sNamespace != "customer-prod" {
 		t.Fatalf("expected pipeline namespace customer-prod, got %q", p.K8sNamespace)
+	}
+}
+
+func TestSchedulerConfirmationKeepsExistingStages(t *testing.T) {
+	setupSchedulerTestDB(t)
+	app := model.Application{AppName: "resume-web-review", AppType: "vue", VueRole: "main", GitRepo: "test"}
+	if err := repository.DB.Create(&app).Error; err != nil {
+		t.Fatal(err)
+	}
+	p := model.Pipeline{PipelineNo: "resume-web-review-1", ApplicationID: app.ID, AppName: app.AppName, AppType: "vue", Status: "IMAGE_READY", DeployMode: "manual", K8sNamespace: "resume-test", ImageName: "registry/web:v1", TriggerUser: "test"}
+	repo := repository.NewPipelineRepo()
+	if err := repo.Create(&p); err != nil {
+		t.Fatal(err)
+	}
+	stages := []model.PipelineStage{{PipelineID: p.ID, StageCode: "BUILD_IMAGE", StageOrder: 1, Status: "SUCCESS"}, {PipelineID: p.ID, StageCode: "PUSH_IMAGE", StageOrder: 2, Status: "SUCCESS"}, {PipelineID: p.ID, StageCode: "K8S_DEPLOY", StageOrder: 3, Status: "PENDING"}, {PipelineID: p.ID, StageCode: "NOTIFY", StageOrder: 4, Status: "PENDING"}}
+	if err := repository.DB.Create(&stages).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := repo.ConfirmDeploy(p.ID); err != nil || !ok {
+		t.Fatalf("first confirmation: %v %v", ok, err)
+	}
+	if ok, err := repo.ConfirmDeploy(p.ID); err != nil || ok {
+		t.Fatalf("duplicate confirmation: %v %v", ok, err)
+	}
+	// Stop before any real Docker/Kubernetes stage, but exercise scheduler -> engine.
+	// Use an unrelated (non-shared) Vue role so the canceled context reaches stage
+	// selection; otherwise cancellation would stop at the shared target guard.
+	app.VueRole = "standalone"
+	if err := repository.DB.Save(&app).Error; err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := &BuildScheduler{running: map[uint]context.CancelFunc{}, engine: pipeline.NewEngine(), pipelineRepo: repo, taskRepo: repository.NewTaskRepo(), appRepo: repository.NewApplicationRepo(), buildConfigRepo: repository.NewBuildConfigRepo(), settingsRepo: repository.NewSettingsRepo()}
+	s.executePipeline(ctx, p.ID)
+	got, err := repository.NewStageRepo().FindByPipelineID(p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 || got[0].Status != "SUCCESS" || got[1].Status != "SUCCESS" {
+		t.Fatalf("confirmation recreated or reran build: %+v", got)
+	}
+}
+
+func TestEnqueueIgnoresDuplicatePipeline(t *testing.T) {
+	logger.Init("error", "stdout", "")
+	s := &BuildScheduler{running: map[uint]context.CancelFunc{}}
+	s.Enqueue(42)
+	s.Enqueue(42)
+	if len(s.queue) != 1 {
+		t.Fatalf("queue = %v", s.queue)
+	}
+	s.running[43] = func() {}
+	s.Enqueue(43)
+	if len(s.queue) != 1 {
+		t.Fatal("running pipeline was enqueued again")
+	}
+}
+
+func TestConfirmationDuringBuildCompletionWaitsForCurrentWorker(t *testing.T) {
+	logger.Init("error", "stdout", "")
+	s := &BuildScheduler{running: map[uint]context.CancelFunc{42: func() {}}, maxSlots: 5}
+	// Without a guard, tryDispatch would start the second worker and access settings.
+	s.EnqueueDeployment(42)
+	s.EnqueueDeployment(42)
+	if len(s.queue) != 1 || s.queue[0] != 42 || len(s.running) != 1 {
+		t.Fatalf("resume lost or dispatched too early: %+v", s.queue)
 	}
 }

@@ -2,6 +2,7 @@ package stages
 
 import (
 	"archive/zip"
+	"df-build-server/internal/model"
 	"os"
 	"path/filepath"
 	"testing"
@@ -74,6 +75,7 @@ func TestReplaceWebMainPackagePreservingAppsDeletesOldRootAndKeepsExistingApps(t
 	mustWriteFile(t, filepath.Join(htmlDir, "index.html"), "old-main")
 	mustWriteFile(t, filepath.Join(htmlDir, "assets", "old-hash.js"), "old-hash")
 	mustWriteFile(t, filepath.Join(htmlDir, "apps", "04", "old-sub.js"), "old-sub")
+	mustWriteFile(t, filepath.Join(htmlDir, "apps", "04", "index.html"), "old-sub-index")
 
 	zipPath := filepath.Join(tmp, "web-main.zip")
 	writeTestZip(t, zipPath, map[string]string{
@@ -83,9 +85,14 @@ func TestReplaceWebMainPackagePreservingAppsDeletesOldRootAndKeepsExistingApps(t
 		"dist/apps/from-package/y.css": "must-not-survive",
 	})
 
-	if err := replaceWebMainPackagePreservingApps(nil, zipPath, htmlDir, dockerDir); err != nil {
-		t.Fatalf("replaceWebMainPackagePreservingApps failed: %v", err)
+	plan, err := prepareWebUpdate(tmp, filepath.Join(tmp, "inputs"), []model.FrontendArtifact{{FileName: "web-main.zip", Role: "main"}})
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, _, err := plan.assemble(htmlDir, dockerDir, false); err != nil {
+		t.Fatal(err)
+	}
+	htmlDir = dockerDir
 
 	assertFile(t, filepath.Join(htmlDir, "index.html"))
 	assertFile(t, filepath.Join(htmlDir, "assets", "new-hash.js"))
@@ -99,6 +106,7 @@ func TestSelectReadyPodForDeploymentUsesDeploymentSelectorAndReadyPod(t *testing
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "web-main"},
 		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web-main", Image: "registry/web:v1"}}}},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{"component": "web-main"},
 			},
@@ -119,6 +127,19 @@ func TestSelectReadyPodForDeploymentUsesDeploymentSelectorAndReadyPod(t *testing
 		},
 	}
 
+	for i := range pods {
+		pods[i].Spec.Containers = []corev1.Container{{Name: "web-main", Image: "registry/web:v1"}}
+		pods[i].Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "web-main", Image: "registry/web:v1", Ready: true}}
+	}
+	old := pods[2].DeepCopy()
+	old.Name = "ready-but-old-image"
+	old.Spec.Containers[0].Image = "registry/web:old"
+	old.Status.ContainerStatuses[0].Image = "registry/web:old"
+	terminating := pods[2].DeepCopy()
+	terminating.Name = "terminating"
+	now := metav1.Now()
+	terminating.DeletionTimestamp = &now
+	pods = append([]corev1.Pod{*old, *terminating}, pods...)
 	pod, ok := selectReadyPodForDeployment(deployment, pods)
 	if !ok {
 		t.Fatalf("expected a ready pod to be selected")

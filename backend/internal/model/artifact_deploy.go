@@ -40,6 +40,7 @@ type ArtifactDeployRecord struct {
 	Namespace                   string     `gorm:"size:64;index" json:"namespace"`
 	DeploymentName              string     `gorm:"size:128;index" json:"deploymentName"`
 	RuntimeVersionPath          string     `gorm:"size:512" json:"runtimeVersionPath"`
+	BeforeDesiredImage          string     `gorm:"size:512" json:"beforeDesiredImage"`
 	BeforeImage                 string     `gorm:"size:512" json:"beforeImage"`
 	AfterImage                  string     `gorm:"size:512" json:"afterImage"`
 	PackageVersionJSON          string     `gorm:"type:text" json:"packageVersionJson"`
@@ -51,6 +52,7 @@ type ArtifactDeployRecord struct {
 	VerifyStatus                string     `gorm:"size:32;index" json:"verifyStatus"`
 	RollbackStatus              string     `gorm:"size:32;index" json:"rollbackStatus"`
 	Status                      string     `gorm:"size:32;index" json:"status"`
+	VersionWarning              string     `gorm:"type:text" json:"versionWarning"`
 	ErrorMessage                string     `gorm:"type:text" json:"errorMessage"`
 	DeployedAt                  *time.Time `json:"deployedAt"`
 	RolledBackAt                *time.Time `json:"rolledBackAt"`

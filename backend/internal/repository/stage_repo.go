@@ -34,7 +34,7 @@ type StageLogRepo struct{}
 
 func NewStageLogRepo() *StageLogRepo { return &StageLogRepo{} }
 
-func (r *StageLogRepo) AppendLog(pipelineID, stageID uint, content, stream string) {
+func (r *StageLogRepo) AppendLog(pipelineID, stageID uint, content, stream string) (*model.StageLog, error) {
 	var maxLine int
 	DB.Model(&model.StageLog{}).Where("stage_id = ?", stageID).Select("COALESCE(MAX(line_number), 0)").Scan(&maxLine)
 
@@ -46,7 +46,8 @@ func (r *StageLogRepo) AppendLog(pipelineID, stageID uint, content, stream strin
 		Stream:     stream,
 		Timestamp:  time.Now(),
 	}
-	DB.Create(log)
+	err := DB.Create(log).Error
+	return log, err
 }
 
 func (r *StageLogRepo) GetByStageID(stageID uint) ([]model.StageLog, error) {

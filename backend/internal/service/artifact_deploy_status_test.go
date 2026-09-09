@@ -9,7 +9,7 @@ import (
 	"df-build-server/internal/repository"
 )
 
-func TestCaptureDeployVersionsStoresBeforeAfterAndFailsOnBusinessMismatch(t *testing.T) {
+func TestCaptureDeployVersionsDoesNotGateSuccessOnMetadata(t *testing.T) {
 	setupArtifactDeployRecordTestDB(t)
 	batch := model.ArtifactDeployBatch{DeployBatchNo: "batch-verify", VersionNo: "batch-verify", Namespace: "prod", Status: "deploying", TotalCount: 2}
 	if err := repository.DB.Create(&batch).Error; err != nil {
@@ -37,8 +37,8 @@ func TestCaptureDeployVersionsStoresBeforeAfterAndFailsOnBusinessMismatch(t *tes
 		t.Fatalf("capture before: %v", err)
 	}
 	err := CaptureAfterDeployVersions(context.Background(), 10, "web-main", "registry/web-main:new", reader.afterReader())
-	if err == nil {
-		t.Fatalf("expected business version mismatch to fail")
+	if err != nil {
+		t.Fatalf("metadata mismatch blocked rollout success: %v", err)
 	}
 
 	var got []model.ArtifactDeployRecord
@@ -54,11 +54,11 @@ func TestCaptureDeployVersionsStoresBeforeAfterAndFailsOnBusinessMismatch(t *tes
 	if okRecord.BeforeImage != "registry/web-main:old" || okRecord.AfterImage != "registry/web-main:new" {
 		t.Fatalf("images were not captured: %#v", okRecord)
 	}
-	if okRecord.VerifyStatus != "success" {
-		t.Fatalf("first record should verify successfully: %#v", okRecord)
+	if okRecord.VerifyStatus != "skipped" || okRecord.Status != "deployed" {
+		t.Fatalf("first record should remain deployed: %#v", okRecord)
 	}
-	if failedRecord.VerifyStatus != "failed" || failedRecord.Status != "failed" {
-		t.Fatalf("second record should fail verification: %#v", failedRecord)
+	if failedRecord.VerifyStatus != "skipped" || failedRecord.Status != "deployed" {
+		t.Fatalf("metadata mismatch should not change deployment success: %#v", failedRecord)
 	}
 }
 

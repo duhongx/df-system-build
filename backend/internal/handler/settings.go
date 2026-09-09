@@ -98,7 +98,7 @@ func (h *SettingsHandler) TestRegistry(c *gin.Context) {
 
 	// Test 2: If credentials provided, try docker login via SDK
 	if registryUser != "" && registryPass != "" {
-		dockerCli, err := docker.NewClient("")
+		dockerCli, err := docker.NewClient(c.Request.Context(), "")
 		if err != nil {
 			response.Fail(c, 10903, fmt.Sprintf("Docker 不可用: %v", err))
 			return

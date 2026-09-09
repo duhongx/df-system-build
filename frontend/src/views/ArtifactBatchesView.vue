@@ -64,7 +64,7 @@ function sortArtifactVersions(versions: ArtifactVersion[]) {
 }
 
 function isReady(batch: ArtifactVersion) {
-  return batch.status === 'available' || batch.status === 'ready' || batch.status === 'success'
+  return ['available', 'ready', 'success'].includes(batch.status) && (batch.remainingDeployableCount ?? batch.deployableCount) > 0
 }
 
 function statusType(batch: ArtifactVersion) {
@@ -74,6 +74,7 @@ function statusType(batch: ArtifactVersion) {
 }
 
 function statusText(batch: ArtifactVersion) {
+  if (batch.deployableCount > 0 && batch.remainingDeployableCount === 0) return '已提交更新'
   if (isReady(batch)) return '可用'
   if (batch.status === 'failed') return '失败'
   if (batch.status === 'collecting' || batch.status === 'running') return '采集中'
@@ -153,7 +154,7 @@ async function deleteVersion(batch: ArtifactVersion) {
           </template>
         </el-table-column>
         <el-table-column prop="count" label="制品数" width="90" />
-        <el-table-column prop="deployableCount" label="可部署" width="90" />
+        <el-table-column prop="remainingDeployableCount" label="可更新" width="90" />
         <el-table-column prop="invalidCount" label="不可读" width="90" />
         <el-table-column prop="unmatchedCount" label="未匹配" width="90" />
         <el-table-column label="本机目录" min-width="300" show-overflow-tooltip>

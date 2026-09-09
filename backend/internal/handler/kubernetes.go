@@ -65,12 +65,17 @@ func (h *KubernetesHandler) RegisterRoutes(r *gin.RouterGroup) {
 	}
 }
 
-func (h *KubernetesHandler) getNS(c *gin.Context) string {
+func (h *KubernetesHandler) getNS(c *gin.Context) (string, bool) {
 	ns := c.DefaultQuery("namespace", "")
 	if ns == "" {
-		ns = k8s.GetDefaultNamespace()
+		var err error
+		ns, err = k8s.GetDefaultNamespace()
+		if err != nil {
+			response.Fail(c, 12301, err.Error())
+			return "", false
+		}
 	}
-	return ns
+	return ns, true
 }
 
 // Overview returns cluster summary
@@ -80,7 +85,10 @@ func (h *KubernetesHandler) Overview(c *gin.Context) {
 		response.Fail(c, 12301, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	ctx := c.Request.Context()
 
 	nodes, _ := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -187,7 +195,10 @@ func (h *KubernetesHandler) Deployments(c *gin.Context) {
 		response.Fail(c, 12303, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	list, err := cs.AppsV1().Deployments(ns).List(c.Request.Context(), metav1.ListOptions{})
 	if err != nil {
 		response.Fail(c, 12303, "获取 Deployments 失败: "+err.Error())
@@ -198,7 +209,10 @@ func (h *KubernetesHandler) Deployments(c *gin.Context) {
 }
 
 func (h *KubernetesHandler) SyncDeploymentRuntimeVersions(c *gin.Context) {
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	var req struct {
 		Deployments []string `json:"deployments"`
 	}
@@ -220,7 +234,10 @@ func (h *KubernetesHandler) Pods(c *gin.Context) {
 		response.Fail(c, 12304, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	list, err := cs.CoreV1().Pods(ns).List(c.Request.Context(), metav1.ListOptions{})
 	if err != nil {
 		response.Fail(c, 12304, "获取 Pods 失败: "+err.Error())
@@ -236,7 +253,10 @@ func (h *KubernetesHandler) Services(c *gin.Context) {
 		response.Fail(c, 12305, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	list, err := cs.CoreV1().Services(ns).List(c.Request.Context(), metav1.ListOptions{})
 	if err != nil {
 		response.Fail(c, 12305, "获取 Services 失败: "+err.Error())
@@ -252,7 +272,10 @@ func (h *KubernetesHandler) ConfigMaps(c *gin.Context) {
 		response.Fail(c, 12316, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	list, err := cs.CoreV1().ConfigMaps(ns).List(c.Request.Context(), metav1.ListOptions{})
 	if err != nil {
 		response.Fail(c, 12316, "获取 ConfigMaps 失败: "+err.Error())
@@ -268,7 +291,10 @@ func (h *KubernetesHandler) GetConfigMap(c *gin.Context) {
 		response.Fail(c, 12319, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	name := c.Param("name")
 	cm, err := cs.CoreV1().ConfigMaps(ns).Get(c.Request.Context(), name, metav1.GetOptions{})
 	if err != nil {
@@ -285,7 +311,10 @@ func (h *KubernetesHandler) UpdateConfigMap(c *gin.Context) {
 		response.Fail(c, 12320, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	name := c.Param("name")
 
 	var req struct {
@@ -318,7 +347,10 @@ func (h *KubernetesHandler) Ingresses(c *gin.Context) {
 		response.Fail(c, 12317, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	list, err := cs.NetworkingV1().Ingresses(ns).List(c.Request.Context(), metav1.ListOptions{})
 	if err != nil {
 		response.Fail(c, 12317, "获取 Ingress 失败: "+err.Error())
@@ -334,7 +366,10 @@ func (h *KubernetesHandler) PodLogs(c *gin.Context) {
 		response.Fail(c, 12306, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	name := c.Param("name")
 	container := c.Query("container")
 	tailLines := int64(200)
@@ -366,7 +401,10 @@ func (h *KubernetesHandler) RestartDeployment(c *gin.Context) {
 		response.Fail(c, 12307, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	name := c.Param("name")
 
 	// Patch with restart annotation
@@ -386,7 +424,10 @@ func (h *KubernetesHandler) ScaleDeployment(c *gin.Context) {
 		response.Fail(c, 12308, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	name := c.Param("name")
 
 	var req struct {
@@ -419,7 +460,10 @@ func (h *KubernetesHandler) UpdateImage(c *gin.Context) {
 		response.Fail(c, 12310, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	name := c.Param("name")
 
 	var req struct {
@@ -452,7 +496,10 @@ func (h *KubernetesHandler) UpdateResources(c *gin.Context) {
 		response.Fail(c, 12311, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	name := c.Param("name")
 
 	var req struct {
@@ -519,7 +566,10 @@ func (h *KubernetesHandler) UpdateServicePorts(c *gin.Context) {
 		response.Fail(c, 12314, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	name := c.Param("name")
 
 	var req struct {
@@ -574,7 +624,10 @@ func (h *KubernetesHandler) DeleteService(c *gin.Context) {
 		response.Fail(c, 12315, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	name := c.Param("name")
 
 	err = cs.CoreV1().Services(ns).Delete(c.Request.Context(), name, metav1.DeleteOptions{})
@@ -592,7 +645,10 @@ func (h *KubernetesHandler) GetImageTags(c *gin.Context) {
 		response.Fail(c, 12318, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	name := c.Param("name")
 
 	dep, err := cs.AppsV1().Deployments(ns).Get(c.Request.Context(), name, metav1.GetOptions{})
@@ -695,7 +751,10 @@ func (h *KubernetesHandler) TopNodes(c *gin.Context) {
 
 // TopPods returns pod metrics
 func (h *KubernetesHandler) TopPods(c *gin.Context) {
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	cs, _ := k8s.GetClient()
 
 	result := cs.CoreV1().RESTClient().Get().AbsPath(fmt.Sprintf("/apis/metrics.k8s.io/v1beta1/namespaces/%s/pods", ns)).Do(c.Request.Context())
@@ -736,7 +795,10 @@ func (h *KubernetesHandler) GetResourceYAML(c *gin.Context) {
 		response.Fail(c, 12309, "K8s 连接失败: "+err.Error())
 		return
 	}
-	ns := h.getNS(c)
+	ns, nsOK := h.getNS(c)
+	if !nsOK {
+		return
+	}
 	kind := c.Param("kind")
 	name := c.Param("name")
 

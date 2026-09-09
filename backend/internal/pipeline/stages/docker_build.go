@@ -142,7 +142,7 @@ func (s *DockerBuildStage) runDocker(ctx context.Context, pCtx *types.PipelineCo
 		cacheMounts = docker.ParseCacheMounts(pCtx.BuildConfig.CacheMounts)
 	}
 
-	cli, err := docker.NewClient("")
+	cli, err := docker.NewClient(ctx, "")
 	if err != nil {
 		errMsg := fmt.Sprintf("Docker 不可用: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")

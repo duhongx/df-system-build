@@ -2,12 +2,12 @@ package stages
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"df-build-server/internal/docker"
@@ -15,28 +15,8 @@ import (
 	"df-build-server/internal/pipeline/types"
 	"df-build-server/internal/repository"
 	"df-build-server/pkg/logger"
-
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/tools/remotecommand"
+	"gorm.io/gorm"
 )
-
-// webMainBuildMutexes ensures only one web-main image build runs at a time per namespace.
-var webMainBuildMutexes = struct {
-	sync.Mutex
-	m map[string]*sync.Mutex
-}{m: make(map[string]*sync.Mutex)}
-
-func getWebMainMutex(namespace string) *sync.Mutex {
-	webMainBuildMutexes.Lock()
-	defer webMainBuildMutexes.Unlock()
-	if webMainBuildMutexes.m[namespace] == nil {
-		webMainBuildMutexes.m[namespace] = &sync.Mutex{}
-	}
-	return webMainBuildMutexes.m[namespace]
-}
 
 type BuildImageStage struct{}
 
@@ -46,11 +26,11 @@ func (s *BuildImageStage) Code() string { return "BUILD_IMAGE" }
 func (s *BuildImageStage) Run(ctx context.Context, pCtx *types.PipelineContext) (*types.StageResult, error) {
 	// Get registry settings
 	settingsRepo := repository.NewSettingsRepo()
-	registryURL, _ := settingsRepo.GetByKey("docker_registry_url")
-	if registryURL == "" {
-		errMsg := "Docker 镜像仓库地址未配置，请在设置中配置"
+	registryURL, err := readImageSetting(settingsRepo, "docker_registry_url", true)
+	if err != nil {
+		errMsg := err.Error()
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-		return &types.StageResult{ExitCode: 1, Error: errMsg}, fmt.Errorf("%s", errMsg)
+		return &types.StageResult{ExitCode: 1, Error: errMsg}, err
 	}
 
 	// Determine build strategy based on app type and vue role
@@ -75,45 +55,59 @@ func (s *BuildImageStage) buildStandardImage(ctx context.Context, pCtx *types.Pi
 	configRepo := repository.NewConfigItemRepo()
 	configItem, err := configRepo.GetByCode(dockerfileCode)
 	if err != nil {
-		errMsg := fmt.Sprintf("Dockerfile 模板 '%s' 不存在，请在配置项管理中创建", dockerfileCode)
+		errMsg := fmt.Sprintf("读取 Dockerfile 模板 %s 失败: %v", dockerfileCode, err)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			errMsg = fmt.Sprintf("Dockerfile 模板 %s 不存在，请在配置项管理中创建", dockerfileCode)
+		}
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return &types.StageResult{ExitCode: 1, Error: errMsg}, fmt.Errorf("%s", errMsg)
 	}
 
+	if strings.TrimSpace(configItem.Content) == "" {
+		err := fmt.Errorf("Dockerfile 模板 %s 内容为空", dockerfileCode)
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
+
 	// Build image tag
 	timestamp := time.Now().Format("20060102150405")
-	imageName := fmt.Sprintf("%s/%s:%s-%s",
-		strings.TrimRight(registryURL, "/"), pCtx.AppName, pCtx.GitBranch, timestamp)
-	imageLatest := fmt.Sprintf("%s/%s:%s-latest",
-		strings.TrimRight(registryURL, "/"), pCtx.AppName, pCtx.GitBranch)
+	imageName := fmt.Sprintf("%s/%s:%s-%s-p%d",
+		strings.TrimRight(registryURL, "/"), pCtx.AppName, pCtx.GitBranch, timestamp, pCtx.PipelineID)
 
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("目标镜像: %s", imageName), "stdout")
 
 	// Prepare build context
 	sourceDir := pCtx.Workspace.SourceDir()
 	dockerDir := pCtx.Workspace.PipelineDir() + "/docker-build"
-	os.MkdirAll(dockerDir, 0755)
+	if err := os.MkdirAll(dockerDir, 0755); err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, fmt.Errorf("创建镜像构建目录 %s 失败: %w", dockerDir, err)
+	}
 
 	// Render and write Dockerfile
 	dockerfileContent := renderTemplate(configItem.Content, map[string]string{
 		"registryUrl": registryURL, "appName": pCtx.AppName,
 		"branch": pCtx.GitBranch, "artifactName": pCtx.ArtifactName, "version": timestamp,
 	})
-	os.WriteFile(filepath.Join(dockerDir, "Dockerfile"), []byte(dockerfileContent), 0644)
-	pCtx.OnLog(pCtx.PipelineID, 0, "Dockerfile 已生成", "stdout")
+	if err := os.WriteFile(filepath.Join(dockerDir, "Dockerfile"), []byte(dockerfileContent), 0644); err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, fmt.Errorf("写入 Dockerfile %s 失败: %w", dockerDir, err)
+	}
+	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Dockerfile 已生成；模板=%s；路径=%s", dockerfileCode, filepath.Join(dockerDir, "Dockerfile")), "stdout")
 
 	// Copy artifact
 	var artifactSrc string
 	if pCtx.AppType == "vue" {
+		webLogger(pCtx).printf("本流水线更新独立应用=%s；制品=%s；目标 Deployment=%s；不合并到 web-main", pCtx.AppName, pCtx.ArtifactName, pCtx.AppName)
 		// For Vue apps: extract dist directory into docker build context
 		artifactSrc = filepath.Join(sourceDir, pCtx.ArtifactName)
 		distDir := filepath.Join(dockerDir, "dist")
-		os.MkdirAll(distDir, 0755)
-		if err := Unzip(artifactSrc, distDir); err != nil {
+		if err := os.MkdirAll(distDir, 0755); err != nil {
+			return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+		}
+		if err := webFileStep(webLogger(pCtx), "解压独立应用制品", artifactSrc, distDir, func() error { return extractWebZip(pCtx, artifactSrc, distDir) }); err != nil {
 			errMsg := fmt.Sprintf("解压制品失败: %v", err)
 			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 			return &types.StageResult{ExitCode: 1, Error: errMsg}, err
 		}
+		logWebTree(webLogger(pCtx), "独立应用制品解压完成", distDir)
 	} else {
 		// For Java apps: copy jar file
 		artifactSrc = filepath.Join(sourceDir, "build", "libs", pCtx.ArtifactName)
@@ -126,346 +120,95 @@ func (s *BuildImageStage) buildStandardImage(ctx context.Context, pCtx *types.Pi
 
 	// Copy scripts for Java
 	if pCtx.AppType == "java" {
-		s.copyScripts(pCtx, dockerDir, registryURL)
+		if err := s.copyScripts(pCtx, dockerDir, registryURL); err != nil {
+			pCtx.OnLog(pCtx.PipelineID, 0, err.Error(), "stderr")
+			return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+		}
 	}
 
 	// Build image
-	return s.execDockerBuild(ctx, pCtx, dockerDir, imageName, imageLatest)
+	return s.execDockerBuild(ctx, pCtx, dockerDir, imageName)
 }
 
-// buildWebMainImage handles web-main and web sub-app image builds
-// Both produce a web-main image with the full html/ directory
+// buildWebMainImage assembles the exact uploaded regions over a verified live baseline.
 func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.PipelineContext, settingsRepo *repository.SettingsRepo, registryURL string) (*types.StageResult, error) {
-	// Get K8s settings for namespace
+	log := webLogger(pCtx)
+	fail := func(err error) (*types.StageResult, error) {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
+	artifacts, err := frontendArtifacts(pCtx)
+	if err != nil {
+		return fail(err)
+	}
 	namespace := pCtx.K8sNamespace
 	if namespace == "" {
-		namespace = k8s.GetDefaultNamespace()
+		namespace, err = k8s.GetDefaultNamespace()
+		if err != nil {
+			return fail(err)
+		}
+		pCtx.K8sNamespace = namespace
 	}
-
-	// Acquire web-main build lock (per namespace) to prevent concurrent builds from conflicting
-	pCtx.OnLog(pCtx.PipelineID, 0, "等待 web-main 构建锁...", "stdout")
-	mu := getWebMainMutex(namespace)
-	mu.Lock()
-	defer mu.Unlock()
-	pCtx.OnLog(pCtx.PipelineID, 0, "已获取构建锁 ✓", "stdout")
-
-	// Check context hasn't been canceled while waiting for lock
-	if ctx.Err() != nil {
-		errMsg := "等待构建锁期间超时或已取消"
-		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-		return &types.StageResult{ExitCode: 1, Error: errMsg}, ctx.Err()
+	log.printf("本流水线合并 %d 个制品到共享 Deployment=%s/web-main", len(artifacts), namespace)
+	dockerDir := filepath.Join(pCtx.Workspace.PipelineDir(), "docker-build")
+	if err := webFileStep(log, "清空本地镜像构建工作目录", "本地工作空间", dockerDir, func() error { return os.RemoveAll(dockerDir) }); err != nil {
+		return fail(err)
 	}
-
-	timestamp := time.Now().Format("20060102150405")
-	// Image is always web-main regardless of whether we're updating main or sub
-	imageName := fmt.Sprintf("%s/web-main:%s-%s",
-		strings.TrimRight(registryURL, "/"), pCtx.GitBranch, timestamp)
-	imageLatest := fmt.Sprintf("%s/web-main:%s-latest",
-		strings.TrimRight(registryURL, "/"), pCtx.GitBranch)
-
-	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("目标镜像: %s (微前端模式)", imageName), "stdout")
-
-	sourceDir := pCtx.Workspace.SourceDir()
-	dockerDir := pCtx.Workspace.PipelineDir() + "/docker-build"
+	if err := os.MkdirAll(dockerDir, 0755); err != nil {
+		return fail(err)
+	}
+	inputDir, err := os.MkdirTemp(pCtx.Workspace.PipelineDir(), ".web-inputs-")
+	if err != nil {
+		return fail(err)
+	}
+	defer os.RemoveAll(inputDir)
+	plan, err := prepareWebUpdate(pCtx.Workspace.SourceDir(), inputDir, artifacts, log)
+	if err != nil {
+		return fail(err)
+	}
+	baselineDir := filepath.Join(inputDir, "baseline")
+	baseline, err := s.copyFromPod(ctx, pCtx, namespace, baselineDir)
+	if err != nil {
+		return fail(err)
+	}
 	htmlDir := filepath.Join(dockerDir, "html")
-	os.MkdirAll(dockerDir, 0755)
-
-	// Get K8s settings for kubectl cp
-	kubeconfigPath, _ := settingsRepo.GetByKey("k8s_kubeconfig_path")
-	if kubeconfigPath == "" {
-		kubeconfigPath = "/root/.kube/config"
-	}
-
-	// Try to get existing html from running web-main pod
-	podCopied := s.copyFromPod(ctx, pCtx, kubeconfigPath, namespace, htmlDir)
-
-	if pCtx.VueRole == "main" {
-		// Updating web-main: preserve apps/, replace everything else
-		if podCopied {
-			pCtx.OnLog(pCtx.PipelineID, 0, "更新主应用: 保留 apps/ 目录，替换其他文件", "stdout")
-			if err := replaceWebMainPackagePreservingApps(pCtx, filepath.Join(sourceDir, pCtx.ArtifactName), htmlDir, dockerDir); err != nil {
-				return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
-			}
-			s.bundleSubApps(pCtx, sourceDir, htmlDir)
-		} else {
-			// First deploy or pod not found: extract main + bundle sub-apps from source dir
-			pCtx.OnLog(pCtx.PipelineID, 0, "首次部署或 Pod 不存在，解压主应用", "stdout")
-			if err := replaceWebMainPackagePreservingApps(pCtx, filepath.Join(sourceDir, pCtx.ArtifactName), htmlDir, dockerDir); err != nil {
-				return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
-			}
-
-			// Check if sub-app zips exist in source dir (batch upload first deploy)
-			s.bundleSubApps(pCtx, sourceDir, htmlDir)
-		}
-	} else if pCtx.VueRole == "sub" {
-		// Updating sub-apps: replace apps/{appCode}/ for every sub-app zip in this batch.
-		appCode := pCtx.AppCode
-		if appCode == "" {
-			errMsg := "子应用 appCode 为空，无法确定目标目录"
-			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-			return &types.StageResult{ExitCode: 1, Error: errMsg}, fmt.Errorf("%s", errMsg)
-		}
-
-		if podCopied {
-			pCtx.OnLog(pCtx.PipelineID, 0, "更新子应用: 合并本批次子应用到 apps/ 目录", "stdout")
-			if bundled := s.bundleSubApps(pCtx, sourceDir, htmlDir); bundled == 0 {
-				errMsg := "未找到可合并的子应用 zip"
-				pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-				return &types.StageResult{ExitCode: 1, Error: errMsg}, fmt.Errorf("%s", errMsg)
-			}
-		} else {
-			// Pod doesn't exist - can't update sub-app without existing html
-			errMsg := "web-main Pod 不存在，无法更新子应用。请先部署 web-main 主应用"
-			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-			return &types.StageResult{ExitCode: 1, Error: errMsg}, fmt.Errorf("%s", errMsg)
-		}
-	}
-
-	// Write Dockerfile for web-main (simple COPY html)
-	dockerfile := fmt.Sprintf(`FROM %s/base/nginx:v1
-
-COPY html/ /usr/share/nginx/html/
-
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
-`, registryURL)
-	os.WriteFile(filepath.Join(dockerDir, "Dockerfile"), []byte(dockerfile), 0644)
-	pCtx.OnLog(pCtx.PipelineID, 0, "Dockerfile 已生成 (web-main 微前端模式)", "stdout")
-
-	// Build image
-	return s.execDockerBuild(ctx, pCtx, dockerDir, imageName, imageLatest)
-}
-
-// copyFromPod copies /usr/share/nginx/html from the running web-main pod using client-go
-func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineContext, kubeconfigPath, namespace, destDir string) bool {
-	pCtx.OnLog(pCtx.PipelineID, 0, "尝试从 web-main Pod 拷贝 html 目录...", "stdout")
-
-	cs, err := k8s.GetClient()
+	updated, preserved, err := plan.assemble(baselineDir, htmlDir, !baseline.Exists)
 	if err != nil {
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("K8s 客户端初始化失败: %v", err), "stderr")
-		return false
+		return fail(err)
 	}
-
-	deployment, err := cs.AppsV1().Deployments(namespace).Get(ctx, "web-main", metav1.GetOptions{})
+	pCtx.OnLog(pCtx.PipelineID, 0, "本次替换: "+strings.Join(updated, "、"), "stdout")
+	pCtx.OnLog(pCtx.PipelineID, 0, "保持不变: "+strings.Join(preserved, "、"), "stdout")
+	timestamp := time.Now().Format("20060102150405")
+	imageName := fmt.Sprintf("%s/web-main:%s-%s-p%d", strings.TrimRight(registryURL, "/"), pCtx.GitBranch, timestamp, pCtx.PipelineID)
+	baseline.NewImage = imageName
+	encoded, err := json.Marshal(baseline)
 	if err != nil {
-		pCtx.OnLog(pCtx.PipelineID, 0, "未找到 web-main Deployment (可能是首次部署)", "stdout")
-		return false
+		return fail(err)
 	}
-
-	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
-	if err != nil {
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("web-main Deployment selector 无效: %v", err), "stderr")
-		return false
+	if pCtx.Pipeline == nil {
+		return fail(fmt.Errorf("缺少前端流水线上下文"))
 	}
-
-	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
-	if err != nil || len(pods.Items) == 0 {
-		pCtx.OnLog(pCtx.PipelineID, 0, "未找到 web-main Ready Pod (可能是首次部署)", "stdout")
-		return false
+	pCtx.Pipeline.FrontendBaselineJSON = string(encoded)
+	dockerfile := webMainDockerfile(registryURL)
+	if err := os.WriteFile(filepath.Join(dockerDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
+		return fail(err)
 	}
-
-	pod, ok := selectReadyPodForDeployment(deployment, pods.Items)
-	if !ok {
-		pCtx.OnLog(pCtx.PipelineID, 0, "未找到 web-main Ready Pod", "stdout")
-		return false
-	}
-
-	podName := pod.Name
-	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("找到 Pod: %s", podName), "stdout")
-
-	// Use exec to run tar inside the pod and pipe to local
-	cfg, err := k8s.GetRestConfig()
-	if err != nil {
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("获取 REST config 失败: %v", err), "stderr")
-		return false
-	}
-
-	os.MkdirAll(destDir, 0755)
-
-	// Execute: kubectl cp equivalent via exec tar
-	execReq := cs.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(namespace).
-		SubResource("exec").
-		Param("command", "tar").
-		Param("command", "cf").
-		Param("command", "-").
-		Param("command", "-C").
-		Param("command", "/usr/share/nginx/html").
-		Param("command", ".").
-		Param("stdout", "true").
-		Param("stderr", "true")
-
-	exec2, err := remotecommand.NewSPDYExecutor(cfg, "POST", execReq.URL())
-	if err != nil {
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("创建 exec 失败: %v", err), "stderr")
-		return false
-	}
-
-	// Pipe tar output to local extraction using Go tar library
-	pr, pw := io.Pipe()
-	var execErr error
-	go func() {
-		execErr = exec2.Stream(remotecommand.StreamOptions{Stdout: pw, Stderr: io.Discard})
-		pw.Close()
-	}()
-
-	// Extract tar to destDir using Go standard library
-	if err := UntarFromReader(pr, destDir); err != nil {
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("解压 tar 失败: %v", err), "stderr")
-		return false
-	}
-
-	if execErr != nil {
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Pod exec 失败: %v", execErr), "stderr")
-		return false
-	}
-
-	pCtx.OnLog(pCtx.PipelineID, 0, "html 目录拷贝完成 ✓", "stdout")
-	return true
+	log.printf("Dockerfile 已写入=%s；基础镜像=%s/base/nginx:v1；先清空镜像静态目录，再复制 html/ 到 /usr/share/nginx/html/", filepath.Join(dockerDir, "Dockerfile"), strings.TrimRight(registryURL, "/"))
+	return s.execDockerBuild(ctx, pCtx, dockerDir, imageName)
 }
 
-func selectReadyPodForDeployment(deployment *appsv1.Deployment, pods []corev1.Pod) (*corev1.Pod, bool) {
-	if deployment == nil || deployment.Spec.Selector == nil {
-		return nil, false
-	}
-	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
-	if err != nil {
-		return nil, false
-	}
-
-	var selected *corev1.Pod
-	for i := range pods {
-		pod := &pods[i]
-		if pod.Status.Phase != corev1.PodRunning {
-			continue
-		}
-		if !selector.Matches(labelsSet(pod.Labels)) {
-			continue
-		}
-		if !isPodReady(pod) {
-			continue
-		}
-		if selected == nil || pod.CreationTimestamp.After(selected.CreationTimestamp.Time) {
-			selected = pod
-		}
-	}
-	return selected, selected != nil
-}
-
-func labelsSet(podLabels map[string]string) labels.Set {
-	if podLabels == nil {
-		return labels.Set{}
-	}
-	return labels.Set(podLabels)
-}
-
-func isPodReady(pod *corev1.Pod) bool {
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-			return true
-		}
-	}
-	return false
-}
-
-// extractZip extracts a zip file to a target directory using Go standard library
-func (s *BuildImageStage) extractZip(pCtx *types.PipelineContext, zipPath, targetDir string) error {
-	if err := extractWebZip(pCtx, zipPath, targetDir); err != nil {
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("解压失败: %v", err), "stderr")
-		return fmt.Errorf("解压 %s 失败: %v", filepath.Base(zipPath), err)
-	}
-	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("解压完成: %s → %s", filepath.Base(zipPath), targetDir), "stdout")
-	return nil
-}
-
-// bundleSubApps looks for sub-app zip files in sourceDir and extracts them into html/apps/{appCode}/
-// This is used during first deploy when web-main.zip and sub-app zips are uploaded together.
-func (s *BuildImageStage) bundleSubApps(pCtx *types.PipelineContext, sourceDir, htmlDir string) int {
-	// Load all sub-apps from database
-	appRepo := repository.NewApplicationRepo()
-	apps, _, _ := appRepo.List(repository.AppListParams{PageSize: 1000, AppType: "vue"})
-
-	appsDir := filepath.Join(htmlDir, "apps")
-	bundled := 0
-
-	for _, app := range apps {
-		if app.VueRole != "sub" || app.AppCode == "" {
-			continue
-		}
-
-		// Look for {appCode}.zip in source dir
-		zipPath := filepath.Join(sourceDir, app.AppCode+".zip")
-		if _, err := os.Stat(zipPath); os.IsNotExist(err) {
-			continue
-		}
-
-		// Extract to html/apps/{appCode}/
-		subDir := filepath.Join(appsDir, app.AppCode)
-		if err := replaceWebZip(pCtx, zipPath, subDir); err != nil {
-			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("子应用 %s 解压失败: %v", app.AppCode, err), "stderr")
-			continue
-		}
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("子应用 %s 已打包到 apps/%s/", app.AppName, app.AppCode), "stdout")
-		bundled++
-	}
-
-	if bundled > 0 {
-		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("共打包 %d 个子应用", bundled), "stdout")
-	}
-	return bundled
-}
-
-func replaceWebMainPackagePreservingApps(pCtx *types.PipelineContext, zipPath, htmlDir, dockerDir string) error {
-	appsDir := filepath.Join(htmlDir, "apps")
-	appsBackupDir := filepath.Join(dockerDir, "apps-backup")
-	if err := os.RemoveAll(appsBackupDir); err != nil {
-		return err
-	}
-
-	hasExistingApps := false
-	if info, err := os.Stat(appsDir); err == nil && info.IsDir() {
-		if err := os.MkdirAll(dockerDir, 0755); err != nil {
-			return err
-		}
-		if err := os.Rename(appsDir, appsBackupDir); err != nil {
-			return err
-		}
-		hasExistingApps = true
-	}
-
-	if err := replaceWebZip(pCtx, zipPath, htmlDir); err != nil {
-		if hasExistingApps {
-			_ = os.MkdirAll(htmlDir, 0755)
-			_ = os.Rename(appsBackupDir, appsDir)
-		}
-		return err
-	}
-
-	if hasExistingApps {
-		// The new web-main package must not keep any embedded apps/ directory.
-		// Existing apps are restored first, then this batch's sub-app zips replace
-		// their own apps/{appCode}/ directories.
-		if err := os.RemoveAll(appsDir); err != nil {
-			return err
-		}
-		if err := os.Rename(appsBackupDir, appsDir); err != nil {
-			return err
-		}
-		if pCtx != nil && pCtx.OnLog != nil {
-			pCtx.OnLog(pCtx.PipelineID, 0, "apps/ 目录已恢复", "stdout")
-		}
-	}
-
-	return nil
+func webMainDockerfile(registryURL string) string {
+	return fmt.Sprintf("FROM %s/base/nginx:v1\nRUN rm -rf /usr/share/nginx/html && mkdir -p /usr/share/nginx/html\nCOPY html/ /usr/share/nginx/html/\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]\n", strings.TrimRight(registryURL, "/"))
 }
 
 func replaceWebZip(pCtx *types.PipelineContext, zipPath, targetDir string) error {
 	return extractWebZip(pCtx, zipPath, targetDir)
 }
 
-func extractWebZip(_ *types.PipelineContext, zipPath, targetDir string) error {
+func extractWebZip(pCtx *types.PipelineContext, zipPath, targetDir string, logs ...webLog) error {
+	log := webLogger(pCtx)
+	if len(logs) > 0 {
+		log = logs[0]
+	}
 	parent := filepath.Dir(targetDir)
 	if err := os.MkdirAll(parent, 0755); err != nil {
 		return err
@@ -476,6 +219,7 @@ func extractWebZip(_ *types.PipelineContext, zipPath, targetDir string) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	log.printf("开始解压 ZIP；来源=%s；临时目录=%s", zipPath, tmpDir)
 	if err := Unzip(zipPath, tmpDir); err != nil {
 		return err
 	}
@@ -486,13 +230,22 @@ func extractWebZip(_ *types.PipelineContext, zipPath, targetDir string) error {
 		sourceDir = distDir
 	}
 
+	log.printf("ZIP 解压完成；识别站点根目录=%s；将其内容写入=%s", sourceDir, targetDir)
+	if err := requireWebIndex(sourceDir); err != nil {
+		return err
+	}
+	nextDir, err := os.MkdirTemp(parent, ".webcopy-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(nextDir)
+	if err := copyDirContents(sourceDir, nextDir); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(targetDir); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return err
-	}
-	return copyDirContents(sourceDir, targetDir)
+	return os.Rename(nextDir, targetDir)
 }
 
 func copyDirContents(sourceDir, targetDir string) error {
@@ -515,6 +268,9 @@ func copyDirContents(sourceDir, targetDir string) error {
 		if entry.IsDir() {
 			return os.MkdirAll(targetPath, info.Mode())
 		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("前端目录不允许符号链接或特殊文件: %s", path)
+		}
 		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 			return err
 		}
@@ -523,53 +279,65 @@ func copyDirContents(sourceDir, targetDir string) error {
 }
 
 // copyScripts copies app.sh and delete_app.sh from config items
-func (s *BuildImageStage) copyScripts(pCtx *types.PipelineContext, dockerDir, registryURL string) {
+func (s *BuildImageStage) copyScripts(pCtx *types.PipelineContext, dockerDir, registryURL string) error {
 	configRepo := repository.NewConfigItemRepo()
 	settingsRepo := repository.NewSettingsRepo()
 
 	// Read environment config for script variables
-	skywalkingOapUrl, _ := settingsRepo.GetByKey("skywalking_oap_url")
-	nacosUser, _ := settingsRepo.GetByKey("nacos_user")
-	nacosPass, _ := settingsRepo.GetByKey("nacos_password")
+	values := make(map[string]string)
+	for _, key := range []string{"skywalking_oap_url", "nacos_user", "nacos_password"} {
+		value, err := readImageSetting(settingsRepo, key, false)
+		if err != nil {
+			return err
+		}
+		values[key] = value
+	}
 
 	for _, scriptCode := range []string{"app-sh-java", "delete-app-java"} {
 		scriptItem, err := configRepo.GetByCode(scriptCode)
-		if err == nil && scriptItem.Content != "" {
-			scriptName := "app.sh"
-			if scriptCode == "delete-app-java" {
-				scriptName = "delete_app.sh"
-			}
-			scriptContent := renderTemplate(scriptItem.Content, map[string]string{
-				"registryUrl":      registryURL,
-				"appName":          pCtx.AppName,
-				"branch":           pCtx.GitBranch,
-				"artifactName":     pCtx.ArtifactName,
-				"skywalkingOapUrl": skywalkingOapUrl,
-				"nacosUser":        nacosUser,
-				"nacosPass":        nacosPass,
-			})
-			os.WriteFile(filepath.Join(dockerDir, scriptName), []byte(scriptContent), 0755)
-			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("脚本 %s 已生成", scriptName), "stdout")
+		if err != nil {
+			return fmt.Errorf("读取 Java 脚本模板 %s 失败: %w", scriptCode, err)
 		}
+		if strings.TrimSpace(scriptItem.Content) == "" {
+			return fmt.Errorf("Java 脚本模板 %s 内容为空", scriptCode)
+		}
+		scriptName := "app.sh"
+		if scriptCode == "delete-app-java" {
+			scriptName = "delete_app.sh"
+		}
+		scriptContent := renderTemplate(scriptItem.Content, map[string]string{
+			"registryUrl":      registryURL,
+			"appName":          pCtx.AppName,
+			"branch":           pCtx.GitBranch,
+			"artifactName":     pCtx.ArtifactName,
+			"skywalkingOapUrl": values["skywalking_oap_url"],
+			"nacosUser":        values["nacos_user"],
+			"nacosPass":        values["nacos_password"],
+		})
+		if err := os.WriteFile(filepath.Join(dockerDir, scriptName), []byte(scriptContent), 0755); err != nil {
+			return fmt.Errorf("写入 Java 脚本 %s 失败: %w", filepath.Join(dockerDir, scriptName), err)
+		}
+		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("脚本 %s 已生成", scriptName), "stdout")
 	}
+	return nil
 }
 
 // execDockerBuild runs docker build and returns the result
-func (s *BuildImageStage) execDockerBuild(ctx context.Context, pCtx *types.PipelineContext, dockerDir, imageName, imageLatest string) (*types.StageResult, error) {
-	pCtx.OnLog(pCtx.PipelineID, 0, "开始构建 Docker 镜像...", "stdout")
+func (s *BuildImageStage) execDockerBuild(ctx context.Context, pCtx *types.PipelineContext, dockerDir, imageName string) (*types.StageResult, error) {
+	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("开始制作并上传 Docker 构建上下文；本地目录=%s；Dockerfile=%s；目标镜像=%s", dockerDir, filepath.Join(dockerDir, "Dockerfile"), imageName), "stdout")
 
-	cli, err := docker.NewClient("")
+	// Read credentials before contacting Docker; database failures are not anonymous auth.
+	registry, err := readImageRegistry(repository.NewSettingsRepo())
+	if err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
+	registryURL, registryUser, registryPass := registry.url, registry.user, registry.password
+	cli, err := docker.NewClient(ctx, "")
 	if err != nil {
 		errMsg := fmt.Sprintf("Docker 不可用: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return &types.StageResult{ExitCode: 1, Error: errMsg}, err
 	}
-
-	// Login to registry before build (FROM may reference private images)
-	settingsRepo := repository.NewSettingsRepo()
-	registryURL, _ := settingsRepo.GetByKey("docker_registry_url")
-	registryUser, _ := settingsRepo.GetByKey("docker_registry_user")
-	registryPass, _ := settingsRepo.GetByKey("docker_registry_password")
 
 	var authConfigs map[string]docker.AuthConfig
 	if registryURL != "" && registryUser != "" && registryPass != "" {
@@ -578,18 +346,22 @@ func (s *BuildImageStage) execDockerBuild(ctx context.Context, pCtx *types.Pipel
 		}
 	}
 
-	cmdReader, err := cli.BuildImageWithAuth(ctx, dockerDir, authConfigs, imageName, imageLatest)
+	cmdReader, err := cli.BuildImageWithAuth(ctx, dockerDir, authConfigs, imageName)
 	if err != nil {
 		errMsg := fmt.Sprintf("Docker build 启动失败: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return &types.StageResult{ExitCode: 1, Error: errMsg}, err
 	}
 
-	docker.ReadLines(cmdReader, func(line string) {
+	readErr := docker.ReadLines(cmdReader, func(line string) {
 		pCtx.OnLog(pCtx.PipelineID, 0, line, "stdout")
 	})
 
-	cmdReader.Close()
+	closeErr := cmdReader.Close()
+	if readErr != nil || closeErr != nil {
+		err := fmt.Errorf("镜像构建失败；镜像=%s；日志读取=%v；Docker结果=%v", imageName, readErr, closeErr)
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
 	exitCode := cmdReader.ExitCode
 
 	if ctx.Err() != nil {

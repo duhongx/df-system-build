@@ -52,8 +52,17 @@ func ResetClient() {
 
 func buildClient() (*kubernetes.Clientset, *rest.Config, error) {
 	settingsRepo := repository.NewSettingsRepo()
-	kubeconfigContent, _ := settingsRepo.GetByKey("k8s_kubeconfig_content")
-	kubeconfigPath, _ := settingsRepo.GetByKey("k8s_kubeconfig_path")
+	kubeconfigContent, err := settingsRepo.Read("k8s_kubeconfig_content", false)
+	if err != nil {
+		return nil, nil, err
+	}
+	kubeconfigPath := ""
+	if kubeconfigContent == "" {
+		kubeconfigPath, err = settingsRepo.Read("k8s_kubeconfig_path", false)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	return buildClientFromSettings(map[string]string{
 		"k8s_kubeconfig_content": kubeconfigContent,
 		"k8s_kubeconfig_path":    kubeconfigPath,
@@ -97,13 +106,16 @@ func buildClientFromSettings(settings map[string]string) (*kubernetes.Clientset,
 }
 
 // GetDefaultNamespace returns the configured default namespace
-func GetDefaultNamespace() string {
+func GetDefaultNamespace() (string, error) {
 	settingsRepo := repository.NewSettingsRepo()
-	ns, _ := settingsRepo.GetByKey("k8s_namespace")
-	if ns == "" {
-		return "default"
+	ns, err := settingsRepo.Read("k8s_namespace", false)
+	if err != nil {
+		return "", err
 	}
-	return ns
+	if ns == "" {
+		return "default", nil
+	}
+	return ns, nil
 }
 
 // ListNamespaces returns all namespace names
@@ -143,21 +155,24 @@ func listNamespaces(ctx context.Context, cs *kubernetes.Clientset) ([]string, er
 }
 
 // GetFirstNodeIP returns the InternalIP of the first Node
-func GetFirstNodeIP(ctx context.Context) string {
+func GetFirstNodeIP(ctx context.Context) (string, error) {
 	cs, err := GetClient()
 	if err != nil {
-		return ""
+		return "", err
 	}
 
 	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil || len(nodes.Items) == 0 {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("读取节点地址失败: %w", err)
 	}
 
+	if len(nodes.Items) == 0 {
+		return "", fmt.Errorf("集群没有可用于模板的节点地址")
+	}
 	for _, addr := range nodes.Items[0].Status.Addresses {
 		if addr.Type == "InternalIP" {
-			return addr.Address
+			return addr.Address, nil
 		}
 	}
-	return ""
+	return "", fmt.Errorf("节点 %s 没有 InternalIP", nodes.Items[0].Name)
 }

@@ -34,6 +34,7 @@ export interface Pipeline {
   uploadPath?: string
   uploadTargets?: string
   batchId?: string
+  deploymentProgress?: string
   deployMode?: string
   startTime?: string | null
   endTime?: string | null

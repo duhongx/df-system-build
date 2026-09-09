@@ -2,17 +2,21 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { getPipeline, getStageLogs, streamLogsUrl, type Pipeline, type PipelineStage, type StageLog } from '../api/pipeline'
+import { hasCompletedDeploymentError } from '../utils/pipeline-result'
 import { formatTime } from '../utils/time'
 
 const route = useRoute()
 const task = ref<Pipeline | null>(null)
 const loading = ref(true)
+const stateError = ref('')
 const activeStageId = ref<number | null>(null)
 const logLines = ref<StageLog[]>([])
 const logLoading = ref(false)
 let eventSource: EventSource | null = null
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
+let logRequest = 0
+const activeStatuses = new Set(['PENDING', 'RUNNING', 'DEPLOYING'])
 const pipelineId = Number(route.params.id)
 
 onMounted(async () => {
@@ -25,7 +29,7 @@ onMounted(async () => {
       const target = failed || running || task.value.stages[task.value.stages.length - 1]
       await selectStage(target)
     }
-    if (task.value?.status === 'RUNNING') {
+    if (task.value && activeStatuses.has(task.value.status)) {
       subscribeToLogs()
       startPolling()
     }
@@ -43,19 +47,13 @@ onUnmounted(() => {
 
 function subscribeToLogs() {
   eventSource = new EventSource(streamLogsUrl(pipelineId))
-  eventSource.addEventListener('log', (e: any) => {
-    // Append live log line to current view
-    const line = e.data
-    logLines.value.push({
-      id: logLines.value.length + 1,
-      pipelineId,
-      stageId: activeStageId.value || 0,
-      lineNumber: logLines.value.length + 1,
-      content: line,
-      stream: 'stdout',
-      timestamp: new Date().toISOString(),
-    })
+  eventSource.addEventListener('stage_log', (e: MessageEvent) => {
+    const entry = JSON.parse(e.data) as StageLog
+    if (entry.stageId === activeStageId.value) {
+      logLines.value = mergeLogs(logLines.value, [entry])
+    }
   })
+  eventSource.addEventListener('state_error', (e: MessageEvent) => { stateError.value = e.data })
   eventSource.addEventListener('done', () => {
     eventSource?.close()
     if (pollTimer) clearInterval(pollTimer)
@@ -68,7 +66,7 @@ function startPolling() {
   pollTimer = setInterval(async () => {
     await refreshPipeline()
     // Stop polling when pipeline is no longer running
-    if (task.value && task.value.status !== 'RUNNING' && task.value.status !== 'PENDING') {
+    if (task.value && !activeStatuses.has(task.value.status)) {
       if (pollTimer) clearInterval(pollTimer)
       pollTimer = null
     }
@@ -79,21 +77,51 @@ async function refreshPipeline() {
   try {
     const updated = await getPipeline(pipelineId)
     if (updated) {
-      // Update stages status without losing log view
+      const previousRunning = task.value?.stages?.find(s => s.status === 'RUNNING')
       task.value = { ...task.value!, ...updated, stages: updated.stages }
+      const running = updated.stages?.find(s => s.status === 'RUNNING')
+      if (running && (activeStageId.value === null || activeStageId.value === previousRunning?.id)) {
+        if (activeStageId.value !== running.id) await selectStage(running)
+        else await loadStageLogs(running.id)
+      } else if (activeStageId.value !== null) {
+        await loadStageLogs(activeStageId.value)
+      } else if (updated.stages?.length) {
+        const target = updated.stages.find(s => s.status === 'FAILED') || updated.stages[updated.stages.length - 1]!
+        await selectStage(target)
+      }
     }
   } catch (_) {}
 }
 
+function mergeLogs(saved: StageLog[], live: StageLog[]): StageLog[] {
+  const entries = new Map<string, StageLog>()
+  for (const row of [...saved, ...live]) {
+    const key = row.id ? String(row.id) : `${row.stageId}:${row.timestamp}:${row.content}`
+    entries.set(key, row)
+  }
+  return [...entries.values()].sort((a, b) => a.lineNumber - b.lineNumber || a.id - b.id)
+}
+
+async function loadStageLogs(stageId: number) {
+  const request = ++logRequest
+  try {
+    const saved = await getStageLogs(pipelineId, stageId)
+    if (request === logRequest && activeStageId.value === stageId) {
+      logLines.value = mergeLogs(saved, logLines.value)
+    }
+  } finally {
+    if (request === logRequest) logLoading.value = false
+  }
+}
+
 async function selectStage(stage: PipelineStage) {
   activeStageId.value = stage.id
+  logLines.value = []
   logLoading.value = true
   try {
-    logLines.value = await getStageLogs(pipelineId, stage.id)
-  } catch (e) {
-    logLines.value = []
-  } finally {
-    logLoading.value = false
+    await loadStageLogs(stage.id)
+  } catch (_) {
+    // Keep live entries received while the history request was in flight.
   }
 }
 
@@ -121,6 +149,8 @@ function statusLabel(status: string) {
   return map[status] || status
 }
 
+const deploymentRecordError = computed(() => !!task.value && hasCompletedDeploymentError(task.value))
+
 const activeStage = computed(() => {
   if (!task.value) return null
   return (task.value.stages || []).find(s => s.id === activeStageId.value) || null
@@ -132,7 +162,7 @@ const activeStage = computed(() => {
     <template v-if="task">
       <div class="info-bar">
         <div class="info-bar-left">
-          <el-tag :type="statusType(task.status)" effect="dark" size="default">{{ statusLabel(task.status) }}</el-tag>
+          <el-tag :type="deploymentRecordError ? 'warning' : statusType(task.status)" effect="dark" size="default">{{ deploymentRecordError ? '部署成功，结果记录异常' : statusLabel(task.status) }}</el-tag>
           <span class="info-task-no">{{ task.pipelineNo }}</span>
           <span class="info-sep">|</span>
           <span class="info-app">{{ task.appName }}</span>
@@ -146,11 +176,12 @@ const activeStage = computed(() => {
         </div>
       </div>
 
+      <el-alert v-if="stateError" title="结果记录保存失败" :description="stateError" type="error" show-icon :closable="false" style="margin-bottom: 12px" />
       <el-alert
         v-if="task.errorMessage"
-        :title="'失败阶段: ' + task.errorStage"
+        :title="deploymentRecordError ? '部署已成功，结果记录异常' : '失败阶段: ' + task.errorStage"
         :description="task.errorMessage"
-        type="error"
+        :type="deploymentRecordError ? 'warning' : 'error'"
         show-icon
         :closable="false"
         style="margin-bottom: 12px; border-radius: 6px;"

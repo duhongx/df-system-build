@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, type TableInstance } from 'element-plus'
+import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { Document, Folder, Upload } from '@element-plus/icons-vue'
 import {
   cancelDownloadJob,
@@ -21,7 +21,7 @@ import {
 } from '../api/batch-deploy'
 import { getSettings } from '../api/settings'
 import { useSettingsStore } from '../stores/settings'
-import { isDeployableMatch, selectedDeployableFileNames } from '../utils/batch-deploy-selection'
+import { buildDeployConfirmation, isDeployableMatch, selectedDeployableFileNames } from '../utils/batch-deploy-selection'
 import type { DeployMode } from '../utils/batch-deploy-flow'
 import type { FileItem } from '../api/server-mgmt'
 
@@ -145,7 +145,7 @@ async function loadVersions() {
 }
 
 function isVersionReady(version: ArtifactVersion) {
-  return (version.status === 'available' || version.status === 'ready' || version.status === 'success') && version.deployableCount > 0
+  return (version.status === 'available' || version.status === 'ready' || version.status === 'success') && (version.remainingDeployableCount ?? version.deployableCount) > 0
 }
 
 function versionStatusType(version: ArtifactVersion) {
@@ -156,6 +156,7 @@ function versionStatusType(version: ArtifactVersion) {
 
 function versionStatusText(version: ArtifactVersion) {
   if (isVersionReady(version)) return '可部署'
+  if (version.deployableCount > 0 && version.remainingDeployableCount === 0) return '已提交更新'
   if (version.status === 'failed') return '失败'
   if (version.status === 'collecting' || version.status === 'running') return '导入中'
   if (version.deployableCount === 0) return '无可部署制品'
@@ -179,7 +180,7 @@ async function selectVersion(version: ArtifactVersion) {
   await activateVersion(version.versionNo)
 }
 
-async function loadVersionDetail(versionNo: string) {
+async function loadVersionDetail(versionNo: string, notifyEmpty = true) {
   loading.value = true
   try {
     const result = await getArtifactVersion(versionNo)
@@ -196,7 +197,7 @@ async function loadVersionDetail(versionNo: string) {
         matchTableRef.value?.toggleRowSelection(row, true)
       }
     }
-    if (selectedFiles.value.length === 0) {
+    if (notifyEmpty && selectedFiles.value.length === 0) {
       ElMessage.warning('当前版本没有可部署制品')
     }
   } finally {
@@ -207,8 +208,11 @@ async function loadVersionDetail(versionNo: string) {
 function versionItemToMatchResult(item: ArtifactVersionItem): MatchResult {
   return {
     fileName: item.fileName,
+    updateUsed: item.updateUsed,
     appName: item.appName,
     appType: item.appType,
+    vueRole: item.vueRole,
+    appCode: item.appCode,
     appId: item.appId,
     matched: item.matchStatus === 'matched',
     valid: item.validateStatus === 'valid',
@@ -225,6 +229,7 @@ function sourceTypeText(type: string) {
 }
 
 function resultStatus(result: MatchResult) {
+  if (result.updateUsed) return { type: 'info', text: '已提交更新' }
   if (result.skipped) return { type: 'info', text: '忽略' }
   if (!result.valid) return { type: 'danger', text: '不可读' }
   if (!result.matched) return { type: 'warning', text: '未匹配' }
@@ -242,6 +247,7 @@ function resetSelection() {
 }
 
 async function executeDeploy() {
+  if (executing.value) return
   if (deployableResults.value.length === 0) {
     ElMessage.warning('没有可部署制品')
     return
@@ -249,14 +255,32 @@ async function executeDeploy() {
   const items = deployableResults.value.map(result => ({ fileName: result.fileName, appId: result.appId }))
   executing.value = true
   try {
+    if (deployableResults.value.some(item => item.appType === 'vue')) {
+      try {
+        await ElMessageBox.confirm(
+          buildDeployConfirmation(deployableResults.value, namespace.value.trim()),
+          '确认更新范围', { customClass: 'deploy-scope-confirm', type: 'warning', confirmButtonText: '确认更新', cancelButtonText: '取消' },
+        )
+      } catch { return }
+    }
     const result = await executeBatchDeploy(sourceDir.value, items, namespace.value.trim(), batchId.value, deployMode.value)
+    // Once accepted, inputs stay disabled even if execution fails or is rolled back.
+    const submittedFiles = new Set(result.consumedFiles || [])
+    matchResults.value.forEach(item => { if (submittedFiles.has(item.fileName)) item.updateUsed = true })
+    selectedFiles.value = selectedFiles.value.filter(file => !submittedFiles.has(file))
+    // Refresh failures must not hide accepted tasks or re-enable their inputs.
+    await Promise.allSettled([loadVersionDetail(batchId.value, false), loadVersions()])
     const errors = result.errors || []
     if (errors.length > 0) {
-      ElMessage.warning(`已创建 ${result.pipelines?.length || 0} 个任务，${errors.length} 个失败`)
+      await ElMessageBox.alert(
+        errors.join('\n\n'),
+        `已创建 ${result.pipelines?.length || 0} 个任务，其他任务已跳过`,
+        { type: 'warning', confirmButtonText: '查看已创建任务' },
+      ).catch(() => {})
     } else {
       ElMessage.success(`已创建 ${result.pipelines?.length || 0} 个构建任务`)
     }
-    router.push(deployMode.value === 'cutover' ? '/build-queue' : '/release')
+    if (result.pipelines?.length) router.push(deployMode.value === 'cutover' ? '/build-queue' : '/release')
   } finally {
     executing.value = false
   }
@@ -724,7 +748,7 @@ function formatDownloadSize(size?: number) {
             </template>
           </el-table-column>
           <el-table-column prop="count" label="制品数" width="86" />
-          <el-table-column prop="deployableCount" label="可部署" width="86" />
+          <el-table-column prop="remainingDeployableCount" label="可更新" width="86" />
           <el-table-column prop="invalidCount" label="不可读" width="86" />
           <el-table-column prop="unmatchedCount" label="未匹配" width="86" />
           <el-table-column label="更新时间" width="170">
@@ -800,16 +824,22 @@ function formatDownloadSize(size?: number) {
             { label: '卡点部署', value: 'cutover' },
           ]"
         />
-        <span>{{ deployMode === 'cutover' ? '只构建并推送镜像，维护窗口再更新 Deployment。' : '镜像构建成功后自动更新 Deployment。' }}</span>
+        <span>每份制品仅允许更新一次；再次更新请重新上传。</span>
+        <span>{{ deployMode === 'cutover' ? '先构建镜像，维护窗口确认后部署；前端线上版本已变化时需重新构建。' : '镜像构建成功后自动更新 Deployment。' }}</span>
       </div>
       <el-button type="primary" :disabled="deployableResults.length === 0" :loading="executing" @click="executeDeploy">
-        创建 {{ deployableResults.length }} 个构建任务
+        {{ matchResults.length > 0 && matchResults.every(item => item.updateUsed || !item.matched || !item.valid || item.skipped) ? '无可更新制品' : `更新 ${deployableResults.length} 个制品` }}
       </el-button>
     </section>
   </div>
 </template>
 
 <style scoped>
+:global(.deploy-scope-confirm .el-message-box__message) {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
 .batch-deploy-page { display: flex; flex-direction: column; gap: 12px; }
 .page-header,
 .step-strip,

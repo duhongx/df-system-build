@@ -1,65 +1,36 @@
-# ops-builder-node:18-yarn1 执行器镜像
+# Vue 构建执行器镜像
 
-## 构建步骤（在 192.168.1.10 服务器上执行）
+核对日期：2026-09-09。镜像示例名为 `ops-builder-node:18-yarn1`，实际构建以同目录 [Dockerfile](Dockerfile) 为准。
+
+## 构建上下文
+
+当前 Dockerfile 使用镜像仓库中的 `node:18-slim`，安装 Yarn 1.22.22、zip 和 git，复制名为 `.npmrc` 的配置文件：
+
+```text
+构建目录/
+├── Dockerfile
+└── .npmrc
+```
+
+需要自行准备可用于构建环境的 npm 配置。文件必须保留前导点，不能使用旧说明中的 `npmrc`；当前指令为 `COPY .npmrc /root/.npmrc`。该配置会进入镜像层，内容应按构建镜像的使用范围管理。
+
+## 构建与验证
+
+在准备好的上下文目录执行：
 
 ```bash
-# 1. 创建构建目录
-mkdir -p /tmp/ops-builder-node && cd /tmp/ops-builder-node
-
-# 2. 拷贝 Dockerfile（从 git 或手动上传）
-cp /path/to/df-build-system/docker/node18-yarn/Dockerfile .
-
-# 3. 拷贝 .npmrc（注意文件名改成 npmrc，没有点号前缀）
-cp /root/.npmrc ./npmrc
-
-# 4. 构建镜像
 docker build -t ops-builder-node:18-yarn1 .
-
-# 5. 验证
 docker run --rm ops-builder-node:18-yarn1 node --version
 docker run --rm ops-builder-node:18-yarn1 yarn --version
 docker run --rm ops-builder-node:18-yarn1 npm config get registry
-
-# 6. 清理
-rm -rf /tmp/ops-builder-node
 ```
 
-## 目录结构
+Yarn registry 在 Dockerfile 中设为 `https://registry.npmmirror.com`；npm 配置由提供的 `.npmrc` 决定。构建依赖基础镜像、apt 和 npm 源可达。
 
-构建前确保当前目录有这 2 个文件：
-```
-/tmp/ops-builder-node/
-├── Dockerfile    ← 本文件同目录
-└── npmrc         ← 从 /root/.npmrc 拷贝（注意去掉点号前缀）
-```
+## 平台使用
 
-> 为什么文件名是 `npmrc` 不是 `.npmrc`？
-> Docker COPY 命令对 `.` 开头的文件有时会被 .dockerignore 忽略，用 `npmrc` 更安全。
+在“设置 → 编译配置”选择 Vue、Docker 模式，填写镜像、依赖安装命令、构建命令、制品目录及缓存挂载。平台通过 Docker SDK 启动容器，以下仅为手动运行示例：
 
-## 镜像内容
-
-| 组件 | 版本 | 说明 |
-|---|---|---|
-| Node.js | 18 LTS | 基础运行时 |
-| Yarn | 1.22.x | 包管理器 |
-| npm | 随 Node 18 自带 | 用于 `npm run build` |
-| zip | 系统包 | 打包 dist 目录 |
-| .npmrc | - | 淘宝镜像 + 阿里云私服 token |
-
-## 使用方式
-
-系统构建时自动执行：
-```bash
-docker run --rm \
-  -v /path/to/source:/workspace \
-  -w /workspace \
-  ops-builder-node:18-yarn1 \
-  sh -c "yarn install && npm run build:new"
-```
-
-## 缓存加速（可选）
-
-挂载 yarn/npm 缓存目录：
 ```bash
 docker run --rm \
   -v /path/to/source:/workspace \
@@ -70,4 +41,6 @@ docker run --rm \
   sh -c "yarn install && npm run build:new"
 ```
 
-首次构建后依赖缓存留在宿主机，后续构建直接复用。
+`build:new` 是业务应用命令示例，需按目标项目 package.json 调整。它与本仓库管理界面的 `npm run build` 不同。微前端打包与更新规则见 [Vue 流程](../../docs/vue-app-build-flow.md)。
+
+本次文档更新未重新构建该镜像。

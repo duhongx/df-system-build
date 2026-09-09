@@ -44,7 +44,14 @@ func (h *K8sWatchHandler) Watch(c *gin.Context) {
 		return
 	}
 
-	namespace := c.DefaultQuery("namespace", k8s.GetDefaultNamespace())
+	namespace := c.Query("namespace")
+	if namespace == "" {
+		namespace, err = k8s.GetDefaultNamespace()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	resource := c.DefaultQuery("resource", "deployments") // deployments / pods
 
 	// Upgrade to WebSocket

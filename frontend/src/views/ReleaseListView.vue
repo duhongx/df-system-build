@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { hasCompletedDeploymentError } from '../utils/pipeline-result'
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listPipelines, cancelPipeline, deployPipeline, type Pipeline } from '../api/pipeline'
@@ -167,9 +168,9 @@ function handleSizeChange(newSize: number) {
         <el-table-column prop="pipelineNo" label="任务编号" width="170" />
         <el-table-column prop="appName" label="应用" width="140" />
         <el-table-column prop="gitBranch" label="分支" width="200" show-overflow-tooltip />
-        <el-table-column label="状态" width="90" align="center">
+        <el-table-column label="状态" width="200" align="center">
           <template #default="{ row }">
-            <el-tag :type="statusType(row.status)" size="small" effect="dark">{{ statusLabel(row.status) }}</el-tag>
+            <el-tag :type="hasCompletedDeploymentError(row) ? 'warning' : statusType(row.status)" size="small" effect="dark">{{ hasCompletedDeploymentError(row) ? '部署成功，结果记录异常' : statusLabel(row.status) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="错误阶段" width="110">

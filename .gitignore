@@ -31,7 +31,6 @@ backend/config/*.yaml
 backend/config/*.yml
 !backend/config/*.example.yaml
 !backend/config/*.example.yml
-.kiro/specs/*/.config.kiro
 
 # ======================================
 # Logs
@@ -62,9 +61,3 @@ frontend/dist/
 frontend/dist-ssr/
 frontend/.vite/
 frontend/*.local
-
-# ======================================
-# Kiro workflow (keep specs, ignore local state)
-# ======================================
-.kiro/hooks/
-.kiro/.cache/

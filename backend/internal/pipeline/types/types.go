@@ -44,6 +44,7 @@ type PipelineContext struct {
 	IsGateway bool
 
 	// Deploy-related fields
+	ResumeDeployment bool
 	DeployMode       string
 	K8sNamespace     string
 	ImageName        string

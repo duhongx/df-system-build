@@ -1,5 +1,7 @@
 # SQL Risk Hardening Implementation Plan
 
+> 文档状态（2026-09-09）：本文保留需求／设计／实施计划历史，不作为当前功能或验收清单。已实现范围、现行入口与限制见 [当前说明](../postgresql.md) 和 [实现状态](../../PROGRESS.md)；下文旧架构、命令、目标及任务勾选项可能与现行代码不同。
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 补齐 SQL 执行中“细粒度风险判断、CREATE OR REPLACE VIEW 兼容性、DROP/TRUNCATE 策略、事务策略、视图依赖处理”的规划能力，并保持实施人员操作入口简单。

@@ -127,12 +127,19 @@ func (h *PipelineHandler) Deploy(c *gin.Context) {
 		return
 	}
 
-	// Update status to DEPLOYING and re-enqueue
-	p.Status = "DEPLOYING"
-	h.pipelineRepo.Update(p)
+	// Claim confirmation atomically; duplicate clicks must not enqueue twice.
+	confirmed, err := h.pipelineRepo.ConfirmDeploy(p.ID)
+	if err != nil {
+		response.Fail(c, 10306, "保存部署状态失败")
+		return
+	}
+	if !confirmed {
+		response.Fail(c, 10306, "该流水线已确认或状态已变化，请刷新")
+		return
+	}
 
 	// Re-enqueue to scheduler for K8S_DEPLOY stage execution
-	scheduler.DefaultScheduler.Enqueue(p.ID)
+	scheduler.DefaultScheduler.EnqueueDeployment(p.ID)
 
 	response.OKWithMessage(c, "部署已触发", nil)
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"df-build-server/pkg/logger"
 
@@ -45,7 +46,10 @@ type Client struct {
 }
 
 // NewClient creates a Docker client via SDK
-func NewClient(host string) (*Client, error) {
+func NewClient(ctx context.Context, host string) (*Client, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	opts := []client.Opt{client.FromEnv, client.WithAPIVersionNegotiation()}
 	if host != "" {
 		opts = append(opts, client.WithHost(host))
@@ -54,8 +58,11 @@ func NewClient(host string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Docker 客户端创建失败: %w", err)
 	}
-	_, err = cli.Ping(context.Background())
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err = cli.Ping(pingCtx)
 	if err != nil {
+		_ = cli.Close()
 		return nil, fmt.Errorf("Docker 连接失败: %w", err)
 	}
 	return &Client{cli: cli}, nil
@@ -63,11 +70,14 @@ func NewClient(host string) (*Client, error) {
 
 // CmdReader wraps a reader and captures exit code
 type CmdReader struct {
-	reader   io.ReadCloser
-	ExitCode int
-	done     bool
-	hasError atomic.Bool
-	waitFn   func() int64
+	reader     io.ReadCloser
+	ExitCode   int
+	done       bool
+	hasError   atomic.Bool
+	waitFn     func() int64
+	streamDone <-chan struct{}
+	streamErr  error
+	stopStream func()
 }
 
 func (r *CmdReader) Read(p []byte) (n int, err error) {
@@ -76,6 +86,16 @@ func (r *CmdReader) Read(p []byte) (n int, err error) {
 
 func (r *CmdReader) Close() error {
 	r.reader.Close()
+	if r.streamDone != nil {
+		if r.stopStream != nil {
+			r.stopStream()
+		}
+		<-r.streamDone
+		if r.streamErr != nil {
+			r.ExitCode = 1
+			return r.streamErr
+		}
+	}
 	if !r.done && r.waitFn != nil {
 		r.ExitCode = int(r.waitFn())
 		r.done = true
@@ -100,15 +120,19 @@ func (c *Client) RunContainer(ctx context.Context, opts ContainerOpts) (*CmdRead
 	}
 
 	var memLimit int64
-	if opts.MemLimit != "" { memLimit = parseMemory(opts.MemLimit) }
+	if opts.MemLimit != "" {
+		memLimit = parseMemory(opts.MemLimit)
+	}
 	var cpuQuota int64
-	if opts.CPULimit != "" { cpuQuota = parseCPU(opts.CPULimit) }
+	if opts.CPULimit != "" {
+		cpuQuota = parseCPU(opts.CPULimit)
+	}
 
 	cfg := &container.Config{
 		Image: opts.Image, Cmd: opts.Command, WorkingDir: opts.WorkDir,
 	}
 	hostCfg := &container.HostConfig{
-		Binds: binds,
+		Binds:     binds,
 		Resources: container.Resources{Memory: memLimit, CPUQuota: cpuQuota},
 	}
 
@@ -176,7 +200,9 @@ func (c *Client) RunContainer(ctx context.Context, opts ContainerOpts) (*CmdRead
 // PullImage pulls a Docker image if not present locally
 func (c *Client) PullImage(ctx context.Context, imageName string) error {
 	_, _, err := c.cli.ImageInspectWithRaw(ctx, imageName)
-	if err == nil { return nil }
+	if err == nil {
+		return nil
+	}
 
 	logger.Log.Infof("Pulling image: %s", imageName)
 	reader, err := c.cli.ImagePull(ctx, imageName, types.ImagePullOptions{})
@@ -210,39 +236,29 @@ func (c *Client) BuildImageWithAuth(ctx context.Context, contextDir string, auth
 		buildOpts.AuthConfigs = authConfigs
 	}
 
+	defer tar.Close()
 	resp, err := c.cli.ImageBuild(ctx, tar, buildOpts)
 	if err != nil {
 		return nil, fmt.Errorf("docker build 启动失败: %w", err)
 	}
 
-	pr, pw := io.Pipe()
-	cmdReader := &CmdReader{reader: pr, ExitCode: 0}
-	go func() {
-		defer pw.Close()
-		defer resp.Body.Close()
-		decoder := json.NewDecoder(resp.Body)
-		for {
-			select {
-			case <-ctx.Done():
-				cmdReader.hasError.Store(true)
-				return
-			default:
-			}
-			var msg struct {
-				Stream string `json:"stream"`
-				Error  string `json:"error"`
-			}
-			if err := decoder.Decode(&msg); err != nil { break }
-			if msg.Error != "" {
-				pw.Write([]byte("ERROR: " + msg.Error + "\n"))
-				cmdReader.hasError.Store(true)
-				break
-			}
-			if msg.Stream != "" { pw.Write([]byte(msg.Stream)) }
+	return dockerJSONStream(ctx, resp.Body, func(ctx context.Context, _ string) error {
+		if len(tags) == 0 {
+			return fmt.Errorf("构建结果缺少目标标签，无法确认镜像")
 		}
-	}()
-
-	return cmdReader, nil
+		var imageID string
+		for _, tag := range tags {
+			info, _, err := c.cli.ImageInspectWithRaw(ctx, tag)
+			if err != nil {
+				return fmt.Errorf("确认构建镜像 %s 失败: %w", tag, err)
+			}
+			if info.ID == "" || (imageID != "" && info.ID != imageID) {
+				return fmt.Errorf("构建镜像标签指向不一致: %s", tag)
+			}
+			imageID = info.ID
+		}
+		return nil
+	}), nil
 }
 
 // PushImage pushes a Docker image to a registry
@@ -259,34 +275,19 @@ func (c *Client) PushImageWithAuth(ctx context.Context, imageName, registryAuth 
 		return nil, fmt.Errorf("docker push 启动失败: %w", err)
 	}
 
-	pr, pw := io.Pipe()
-	cmdReader := &CmdReader{reader: pr, ExitCode: 0}
-	go func() {
-		defer pw.Close()
-		defer resp.Close()
-		decoder := json.NewDecoder(resp)
-		for {
-			select {
-			case <-ctx.Done():
-				cmdReader.hasError.Store(true)
-				return
-			default:
-			}
-			var msg struct {
-				Status string `json:"status"`
-				Error  string `json:"error"`
-			}
-			if err := decoder.Decode(&msg); err != nil { break }
-			if msg.Error != "" {
-				pw.Write([]byte("ERROR: " + msg.Error + "\n"))
-				cmdReader.hasError.Store(true)
-				break
-			}
-			if msg.Status != "" { pw.Write([]byte(msg.Status + "\n")) }
+	return dockerJSONStream(ctx, resp, func(ctx context.Context, digest string) error {
+		if digest == "" {
+			return fmt.Errorf("推送响应提前结束，未收到镜像 %s 的完成 digest", imageName)
 		}
-	}()
-
-	return cmdReader, nil
+		remote, err := c.cli.DistributionInspect(ctx, imageName, registryAuth)
+		if err != nil {
+			return fmt.Errorf("确认仓库镜像 %s 失败: %w", imageName, err)
+		}
+		if remote.Descriptor.Digest.String() != digest {
+			return fmt.Errorf("仓库镜像 digest 不一致: %s；推送=%s；仓库=%s", imageName, digest, remote.Descriptor.Digest)
+		}
+		return nil
+	}), nil
 }
 
 // Login authenticates with a Docker registry
@@ -312,7 +313,9 @@ func GetAuthStr(username, password string) string {
 
 // ParseCacheMounts parses JSON string into CacheMount slice
 func ParseCacheMounts(jsonStr string) []CacheMount {
-	if jsonStr == "" || jsonStr == "[]" { return nil }
+	if jsonStr == "" || jsonStr == "[]" {
+		return nil
+	}
 	var mounts []CacheMount
 	if err := json.Unmarshal([]byte(jsonStr), &mounts); err != nil {
 		logger.Log.Warnf("Failed to parse cacheMounts: %v", err)
@@ -322,16 +325,23 @@ func ParseCacheMounts(jsonStr string) []CacheMount {
 }
 
 // ReadLines reads from a reader line by line
-func ReadLines(reader io.Reader, callback func(line string)) {
+func ReadLines(reader io.Reader, callback func(line string)) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() { callback(scanner.Text()) }
+	for scanner.Scan() {
+		callback(scanner.Text())
+	}
+	return scanner.Err()
 }
 
 func parseMemory(s string) int64 {
 	s = strings.TrimSpace(strings.ToLower(s))
-	if strings.HasSuffix(s, "g") { return parseInt64(strings.TrimSuffix(s, "g")) * 1024 * 1024 * 1024 }
-	if strings.HasSuffix(s, "m") { return parseInt64(strings.TrimSuffix(s, "m")) * 1024 * 1024 }
+	if strings.HasSuffix(s, "g") {
+		return parseInt64(strings.TrimSuffix(s, "g")) * 1024 * 1024 * 1024
+	}
+	if strings.HasSuffix(s, "m") {
+		return parseInt64(strings.TrimSuffix(s, "m")) * 1024 * 1024
+	}
 	return parseInt64(s)
 }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -24,7 +24,10 @@ const version = ref<ArtifactVersion | null>(null)
 const items = ref<ArtifactVersionItem[]>([])
 const deployBatch = ref<ArtifactDeployBatch | null>(null)
 const deployRecords = ref<ArtifactDeployRecord[]>([])
-const rollbacking = ref(false)
+const rollbackSubmitting = ref(false)
+const rollbacking = computed(() => rollbackSubmitting.value || deployBatch.value?.status === 'rolling_back')
+let rollbackPoll: ReturnType<typeof setTimeout> | undefined
+let disposed = false
 const itemOperatingId = ref<number | null>(null)
 const replaceInput = ref<HTMLInputElement>()
 const replacingItem = ref<ArtifactVersionItem | null>(null)
@@ -33,14 +36,18 @@ const versionJsonDialogTitle = ref('')
 const versionJsonDialogContent = ref('')
 
 const versionNo = computed(() => String(route.params.versionNo || ''))
-const deployableItems = computed(() => items.value.filter(item => item.deployable))
+const deployableItems = computed(() => items.value.filter(item => item.deployable && !item.updateUsed))
 const invalidItems = computed(() => items.value.filter(item => item.validateStatus === 'invalid'))
 const unmatchedItems = computed(() => items.value.filter(item => item.matchStatus === 'unmatched' && item.validateStatus === 'valid'))
-const versionEditable = computed(() => !deployBatch.value)
+const versionEditable = computed(() => !deployBatch.value && !items.value.some(item => item.updateUsed))
 const versionRows = computed(() => buildVersionRows(items.value))
 const deployRecordRows = computed(() => buildDeployRecordRows(deployRecords.value))
 
 onMounted(loadDetail)
+onUnmounted(() => {
+  disposed = true
+  clearTimeout(rollbackPoll)
+})
 
 async function loadDetail() {
   loading.value = true
@@ -55,16 +62,27 @@ async function loadDetail() {
 }
 
 async function loadDeployBatch() {
+  clearTimeout(rollbackPoll)
+  if (deployLoading.value || disposed) return
   deployLoading.value = true
   try {
+    const wasRollingBack = deployBatch.value?.status === 'rolling_back'
     const result = await getArtifactDeployBatch(versionNo.value)
+    if (disposed) return
     deployBatch.value = result.batch
     deployRecords.value = result.records || []
-  } catch (e) {
-    deployBatch.value = null
-    deployRecords.value = []
+    if (wasRollingBack && result.batch?.status === 'rolled_back') {
+      ElMessage.success('整体回滚完成，需恢复的旧镜像已恢复并就绪')
+    } else if (wasRollingBack && result.batch?.status === 'rollback_failed') {
+      ElMessage.error('回滚未全部完成，请查看各目标的详细错误')
+    }
+  } catch {
+    // Retain the last known progress after a transient request failure.
   } finally {
     deployLoading.value = false
+    if (!disposed && deployBatch.value?.status === 'rolling_back') {
+      rollbackPoll = setTimeout(() => { void loadDeployBatch() }, 3000)
+    }
   }
 }
 
@@ -107,6 +125,10 @@ function formatBytes(size?: number) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
+function deploymentRecordError(record: ArtifactDeployRecord) {
+  return record.status === 'failed' && record.deployStatus === 'success' && record.rollbackStatus !== 'failed'
+}
+
 function deployRecordStatusType(status?: string) {
   if (status === 'deployed' || status === 'rolled_back') return 'success'
   if (status === 'failed' || status === 'rollback_failed') return 'danger'
@@ -121,7 +143,15 @@ function deployRecordStatusText(status?: string) {
   if (status === 'deployed') return '已部署'
   if (status === 'rolled_back') return '已回滚'
   if (status === 'failed') return '失败'
+  if (status === 'rolling_back') return '回滚中'
+  if (status === 'rollback_failed') return '回滚未全部完成'
+  if (status === 'deploying') return '部署中'
+  if (status === 'pending') return '等待部署'
   return status || '-'
+}
+
+function rollbackStatusText(status?: string) {
+  return ({ pending: '等待回滚', running: '回滚中', success: '回滚成功', failed: '回滚失败', skipped: '无需回滚（未提交部署）' } as Record<string, string>)[status || ''] || '-'
 }
 
 function formatRawJson(value?: string) {
@@ -345,16 +375,16 @@ async function handleRedownloadItem(item: ArtifactVersionItem) {
 }
 
 async function handleRollback() {
-  if (!deployBatch.value) return
-  await ElMessageBox.confirm(`确定整体回滚版本 "${deployBatch.value.versionNo}" 吗？会把本版本涉及的 Deployment 镜像恢复到更新前镜像。`, '整体回滚', { type: 'warning' })
-  rollbacking.value = true
+  if (!deployBatch.value || rollbacking.value) return
+  await ElMessageBox.confirm(`确定整体回滚版本 "${deployBatch.value.versionNo}" 吗？会在后台把本版本涉及的 Deployment 恢复到记录的可回滚镜像；未提交部署的目标无需回滚。`, '整体回滚', { type: 'warning' })
+  rollbackSubmitting.value = true
   try {
     const result = await rollbackArtifactDeployBatch(deployBatch.value.deployBatchNo)
     deployBatch.value = result.batch
-    deployRecords.value = result.records || []
-    ElMessage.success('已触发整体回滚并完成版本校验')
+    ElMessage.success(result.batch.status === 'rolled_back' ? '该批次已完成回滚' : '后台回滚已提交，可在此页面查看进度')
+    void loadDeployBatch()
   } finally {
-    rollbacking.value = false
+    rollbackSubmitting.value = false
   }
 }
 </script>
@@ -380,7 +410,7 @@ async function handleRollback() {
       <div class="summary-grid">
         <div><span>来源</span><strong>{{ sourceTypeText(version.sourceType) }}</strong></div>
         <div><span>制品数</span><strong>{{ version.count }}</strong></div>
-        <div><span>可部署</span><strong>{{ deployableItems.length }}</strong></div>
+        <div><span>可更新</span><strong>{{ deployableItems.length }}</strong></div>
         <div><span>不可读</span><strong>{{ invalidItems.length }}</strong></div>
         <div><span>未匹配</span><strong>{{ unmatchedItems.length }}</strong></div>
         <div><span>更新时间</span><strong>{{ formatTime(version.updatedAt) }}</strong></div>
@@ -435,9 +465,9 @@ async function handleRollback() {
         <el-table-column prop="appType" label="应用类型" width="100">
           <template #default="{ row }">{{ row.appType || '-' }}</template>
         </el-table-column>
-        <el-table-column label="可部署" width="90">
+        <el-table-column label="更新状态" width="120">
           <template #default="{ row }">
-            <el-tag :type="row.deployable ? 'success' : 'info'" size="small">{{ row.deployable ? '是' : '否' }}</el-tag>
+            <el-tag :type="row.deployable && !row.updateUsed ? 'success' : 'info'" size="small">{{ row.updateUsed ? '已提交更新' : row.deployable ? '可更新' : '不可更新' }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="sha256" label="SHA256" min-width="140" show-overflow-tooltip>
@@ -487,6 +517,8 @@ async function handleRollback() {
           </div>
         </div>
       </template>
+      <el-alert v-if="deployBatch?.status === 'rolling_back'" title="正在后台回滚，关闭页面不会中断任务；进度每 3 秒刷新。" type="info" :closable="false" />
+      <el-alert v-if="deployBatch?.errorMessage" :title="deployBatch.errorMessage" type="error" :closable="false" />
       <el-table
         :data="deployRecordRows"
         border
@@ -504,12 +536,16 @@ async function handleRollback() {
         </el-table-column>
         <el-table-column prop="fileName" label="制品" min-width="150" show-overflow-tooltip />
         <el-table-column prop="appName" label="应用" min-width="150" show-overflow-tooltip />
-        <el-table-column label="状态" width="100">
+        <el-table-column label="状态" width="200">
           <template #default="{ row }">
-            <el-tag :type="deployRecordStatusType(row.status)" size="small">{{ deployRecordStatusText(row.status) }}</el-tag>
+            <el-tag :type="deploymentRecordError(row) ? 'warning' : deployRecordStatusType(row.status)" size="small">{{ deploymentRecordError(row) ? '部署成功，结果记录异常' : deployRecordStatusText(row.status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="beforeImage" label="更新前镜像" min-width="230" show-overflow-tooltip />
+        <el-table-column label="回滚进度" min-width="200">
+          <template #default="{ row }">{{ rollbackStatusText(row.rollbackStatus) }}</template>
+        </el-table-column>
+        <el-table-column prop="beforeDesiredImage" label="更新前目标镜像" min-width="230" show-overflow-tooltip />
+        <el-table-column prop="beforeImage" label="可回滚镜像" min-width="230" show-overflow-tooltip />
         <el-table-column prop="afterImage" label="更新后镜像" min-width="230" show-overflow-tooltip />
         <el-table-column label="更新包版本" min-width="320">
           <template #default="{ row }">
@@ -559,6 +595,7 @@ async function handleRollback() {
             <span v-else>-</span>
           </template>
         </el-table-column>
+        <el-table-column prop="versionWarning" label="版本信息提示（不影响结果）" min-width="240" show-overflow-tooltip />
         <el-table-column prop="errorMessage" label="错误" min-width="220" show-overflow-tooltip />
       </el-table>
     </el-card>

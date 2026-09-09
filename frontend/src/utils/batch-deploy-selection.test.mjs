@@ -13,3 +13,29 @@ assert.deepEqual(
   selectedDeployableFileNames(results),
   ['his-gateway.jar', 'df-dataforge.jar'],
 )
+
+// Consumed uploads stay unselectable; a fresh upload with the same name can be selected.
+assert.deepEqual(selectedDeployableFileNames([
+  { fileName: 'used.zip', matched: true, valid: true, updateUsed: true },
+  { fileName: 'fresh.zip', matched: true, valid: true, updateUsed: false },
+]), ['fresh.zip'])
+assert.deepEqual(selectedDeployableFileNames([
+  { fileName: 'used.zip', matched: true, valid: true, updateUsed: false },
+]), ['used.zip'])
+
+const { buildDeployConfirmation } = await import('./compiled/batch-deploy-selection.js')
+const standalone = buildDeployConfirmation([
+  { fileName: 'web-cdr.zip', appName: 'web-cdr', appType: 'vue', vueRole: 'standalone' },
+  { fileName: 'web-opm.zip', appName: 'web-opm', appType: 'vue', vueRole: 'standalone' },
+], 'test')
+assert.match(standalone, /独立更新/)
+assert.doesNotMatch(standalone, /web-main|apps\/\{appCode\}/)
+const shared = buildDeployConfirmation([
+  { fileName: 'web-main.zip', appName: 'web-main', appType: 'vue', vueRole: 'main' },
+  { fileName: '04.zip', appName: 'web-alpha', appType: 'vue', vueRole: 'sub', appCode: '04' },
+  { fileName: 'service.jar', appName: 'service', appType: 'java' },
+], 'test')
+assert.match(shared, /独立更新.*\nservice：service.jar/)
+assert.match(shared, /合并更新 web-main/)
+assert.match(shared, /子应用 04：04.zip/)
+assert.match(shared, /同一个子应用不能同时来自主应用包和独立 ZIP/)

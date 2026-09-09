@@ -73,7 +73,18 @@ func Unzip(zipPath, targetDir string) error {
 	}
 	defer r.Close()
 
+	if len(r.File) > 100000 {
+		return fmt.Errorf("ZIP 文件数量超过限制")
+	}
+	var total uint64
 	for _, f := range r.File {
+		if f.UncompressedSize64 > 4<<30 || total > (4<<30)-f.UncompressedSize64 {
+			return fmt.Errorf("ZIP 解压大小超过 4 GiB")
+		}
+		total += f.UncompressedSize64
+		if f.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("ZIP 不允许符号链接: %s", f.Name)
+		}
 		fpath := filepath.Join(targetDir, f.Name)
 
 		// Security: prevent zip slip
@@ -84,7 +95,9 @@ func Unzip(zipPath, targetDir string) error {
 		}
 
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(fpath, 0755)
+			if err := os.MkdirAll(fpath, 0755); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -104,8 +117,11 @@ func Unzip(zipPath, targetDir string) error {
 		}
 
 		_, err = io.Copy(outFile, rc)
-		outFile.Close()
+		closeErr := outFile.Close()
 		rc.Close()
+		if closeErr != nil {
+			return closeErr
+		}
 		if err != nil {
 			return err
 		}
@@ -116,6 +132,8 @@ func Unzip(zipPath, targetDir string) error {
 // UntarFromReader extracts a tar stream to a target directory
 func UntarFromReader(reader io.Reader, targetDir string) error {
 	tr := tar.NewReader(reader)
+	var total int64
+	files := 0
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -125,26 +143,43 @@ func UntarFromReader(reader io.Reader, targetDir string) error {
 			return fmt.Errorf("读取 tar 失败: %w", err)
 		}
 
+		files++
+		if files > 100000 || header.Size < 0 || header.Size > 4<<30 || total > (4<<30)-header.Size {
+			return fmt.Errorf("Pod 导出目录超过文件数量或大小限制")
+		}
+		total += header.Size
 		fpath := filepath.Join(targetDir, header.Name)
 
 		// Security: prevent path traversal
 		if !strings.HasPrefix(filepath.Clean(fpath), filepath.Clean(targetDir)+string(os.PathSeparator)) {
 			if filepath.Clean(fpath) != filepath.Clean(targetDir) {
-				continue
+				return fmt.Errorf("tar 包含非法路径: %s", header.Name)
 			}
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			os.MkdirAll(fpath, 0755)
+			if err := os.MkdirAll(fpath, 0755); err != nil {
+				return err
+			}
 		case tar.TypeReg:
-			os.MkdirAll(filepath.Dir(fpath), 0755)
+			if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
+				return err
+			}
 			outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(header.Mode))
 			if err != nil {
 				return err
 			}
-			io.Copy(outFile, tr)
-			outFile.Close()
+			_, copyErr := io.Copy(outFile, tr)
+			closeErr := outFile.Close()
+			if copyErr != nil {
+				return fmt.Errorf("tar 文件复制失败: %w", copyErr)
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+		default:
+			return fmt.Errorf("Pod 导出不允许链接或特殊文件: %s", header.Name)
 		}
 	}
 	return nil

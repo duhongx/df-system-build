@@ -32,6 +32,13 @@ func NewK8sDeploymentRollbacker() K8sDeploymentRollbacker {
 }
 
 func (K8sDeploymentRollbacker) RollbackDeployment(ctx context.Context, namespace, deploymentName, image string) error {
+	if deploymentName == "web-main" {
+		unlock, err := k8s.LockDeployment(ctx, namespace, deploymentName)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
 	cs, err := k8s.GetClient()
 	if err != nil {
 		return err
@@ -52,7 +59,11 @@ func (K8sDeploymentRollbacker) RollbackDeployment(ctx context.Context, namespace
 func (K8sRuntimeVersionReader) ReadBusinessVersion(ctx context.Context, record model.ArtifactDeployRecord) (string, error) {
 	namespace := strings.TrimSpace(record.Namespace)
 	if namespace == "" {
-		namespace = k8s.GetDefaultNamespace()
+		var err error
+		namespace, err = k8s.GetDefaultNamespace()
+		if err != nil {
+			return "", err
+		}
 	}
 	deploymentName := strings.TrimSpace(record.DeploymentName)
 	if deploymentName == "" {

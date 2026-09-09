@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -57,6 +58,10 @@ func Init() {
 		}
 	}
 
+	if err := service.RecoverInterruptedRollbacks(); err != nil {
+		logger.Log.Errorf("恢复中断回滚任务状态失败: %v", err)
+	}
+
 	// Recover pending pipelines on startup
 	DefaultScheduler.recoverPending()
 
@@ -68,7 +73,35 @@ func (s *BuildScheduler) recoverPending() {
 	var stranded []model.Pipeline
 	repository.DB.Where("status = ?", "RUNNING").Find(&stranded)
 	for _, p := range stranded {
-		s.pipelineRepo.UpdateStatus(p.ID, "FAILED")
+		p.Status = "FAILED"
+		ended := time.Now()
+		p.EndTime = &ended
+		p.ErrorMessage = fmt.Sprintf("服务重启中断更新，已停止任务；最后记录部署进度=%s；已提交的 Kubernetes 操作可能仍在执行，请核对线上镜像和滚动状态后处理", p.DeploymentProgress)
+		stages, stageErr := repository.NewStageRepo().FindByPipelineID(p.ID)
+		if stageErr != nil {
+			logger.Log.Errorf("读取中断任务阶段失败: %v", stageErr)
+		}
+		for _, stage := range stages {
+			if stage.Status == "RUNNING" {
+				p.ErrorStage = stage.StageCode
+				stage.Status, stage.ErrorMessage = "FAILED", p.ErrorMessage
+				if err := repository.NewStageRepo().Update(&stage); err != nil {
+					logger.Log.Errorf("保存中断阶段失败: %v", err)
+				}
+				_, _ = repository.NewStageLogRepo().AppendLog(p.ID, stage.ID, p.ErrorMessage, "stderr")
+			} else if stage.Status == "PENDING" {
+				stage.Status = "SKIPPED"
+				if err := repository.NewStageRepo().Update(&stage); err != nil {
+					logger.Log.Errorf("跳过中断任务后续阶段失败: %v", err)
+				}
+			}
+		}
+		if err := s.pipelineRepo.Update(&p); err != nil {
+			logger.Log.Errorf("保存中断任务失败: %v", err)
+		}
+		if err := service.MarkPipelineFailed(p.ID, p.ErrorMessage, p.DeploymentProgress); err != nil {
+			s.reportStateError(&p, fmt.Errorf("保存部署失败记录失败: %w", err))
+		}
 		logger.Log.Warnf("Marked stranded RUNNING pipeline %d (%s) as FAILED", p.ID, p.PipelineNo)
 	}
 
@@ -83,10 +116,24 @@ func (s *BuildScheduler) recoverPending() {
 	}
 }
 
-func (s *BuildScheduler) Enqueue(pipelineID uint) {
+func (s *BuildScheduler) Enqueue(pipelineID uint) { s.enqueue(pipelineID, false) }
+
+// Confirmation can arrive while the build worker is finishing IMAGE_READY.
+// Keep the resume queued until that worker has released its running slot.
+func (s *BuildScheduler) EnqueueDeployment(pipelineID uint) { s.enqueue(pipelineID, true) }
+
+func (s *BuildScheduler) enqueue(pipelineID uint, resume bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if _, ok := s.running[pipelineID]; ok && !resume {
+		return
+	}
+	for _, id := range s.queue {
+		if id == pipelineID {
+			return
+		}
+	}
 	s.queue = append(s.queue, pipelineID)
 	logger.Log.Infof("Pipeline %d enqueued (queue size: %d, running: %d)", pipelineID, len(s.queue), len(s.running))
 	s.tryDispatch()
@@ -135,8 +182,18 @@ func (s *BuildScheduler) GetQueueSize() int {
 
 func (s *BuildScheduler) tryDispatch() {
 	for len(s.running) < s.maxSlots && len(s.queue) > 0 {
-		pipelineID := s.queue[0]
-		s.queue = s.queue[1:]
+		index := -1
+		for i, id := range s.queue {
+			if _, active := s.running[id]; !active {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return
+		}
+		pipelineID := s.queue[index]
+		s.queue = append(s.queue[:index], s.queue[index+1:]...)
 
 		// Read build timeout from settings
 		timeout := 30 * time.Minute
@@ -170,9 +227,18 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 
 	// Mark as running
 	now := time.Now()
+	if p.Status != "PENDING" && p.Status != "DEPLOYING" {
+		return
+	}
+	resumeDeployment := p.Status == "DEPLOYING"
 	p.Status = "RUNNING"
-	p.StartTime = &now
-	s.pipelineRepo.Update(p)
+	if p.StartTime == nil {
+		p.StartTime = &now
+	}
+	if err := s.pipelineRepo.Update(p); err != nil {
+		logger.Log.Errorf("Pipeline %d status update failed: %v", p.ID, err)
+		return
+	}
 
 	// Build pipeline context
 	pCtx := s.buildContext(p)
@@ -181,9 +247,11 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 		p.ErrorMessage = "构建上下文初始化失败"
 		endTime := time.Now()
 		p.EndTime = &endTime
-		s.pipelineRepo.Update(p)
+		s.savePipelineResult(p)
 		return
 	}
+
+	pCtx.ResumeDeployment = resumeDeployment
 
 	// Execute
 	execErr := s.engine.Execute(ctx, p, pCtx)
@@ -198,14 +266,19 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 		if errors.Is(execErr, pipeline.ErrImageReady) {
 			// Manual mode: pause at IMAGE_READY, don't mark as failed
 			// Cancel any existing IMAGE_READY pipelines for the same app (keep only latest)
-			s.pipelineRepo.CancelOldImageReady(p.ApplicationID, p.ID)
+			s.pipelineRepo.CancelOldImageReady(p.ApplicationID, p.ID, p.K8sNamespace)
 
-				p.Status = "IMAGE_READY"
-				p.EndTime = nil
-				p.DurationSeconds = nil
-				s.pipelineRepo.Update(p)
-				service.MarkPipelineImageReady(p.ID, p.ImageName)
-				sse.DefaultHub.Publish(pipelineID, sse.Event{Type: "image_ready", Data: "镜像已就绪，等待确认部署"})
+			p.Status = "IMAGE_READY"
+			p.EndTime = nil
+			p.DurationSeconds = nil
+			if !s.savePipelineResult(p) {
+				return
+			}
+			if err := service.MarkPipelineImageReady(p.ID, p.ImageName); err != nil {
+				s.reportStateError(p, fmt.Errorf("保存镜像待部署记录失败: %w", err))
+				return
+			}
+			sse.DefaultHub.Publish(pipelineID, sse.Event{Type: "image_ready", Data: "镜像已就绪，等待确认部署"})
 			// Create notification
 			notifyRepo := repository.NewNotificationMsgRepo()
 			notifyRepo.Create(&model.NotificationMsg{
@@ -219,16 +292,23 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 		latest, _ := s.pipelineRepo.FindByID(pipelineID)
 		if latest != nil && latest.Status == "CANCELED" {
 			p.Status = "CANCELED"
-			p.ErrorMessage = "构建已取消"
-			} else {
-				p.Status = "FAILED"
-				p.ErrorMessage = execErr.Error()
-				service.MarkPipelineFailed(p.ID, p.ErrorMessage)
-			}
+			p.ErrorMessage = "更新已取消；" + execErr.Error()
+		} else {
+			p.Status = "FAILED"
+			p.ErrorMessage = execErr.Error()
+		}
 	} else {
 		p.Status = "SUCCESS"
 	}
-	s.pipelineRepo.Update(p)
+	if !s.savePipelineResult(p) {
+		return
+	}
+	if p.Status == "FAILED" || p.Status == "CANCELED" {
+		if err := service.MarkPipelineFailed(p.ID, p.ErrorMessage, p.DeploymentProgress); err != nil {
+			s.reportStateError(p, fmt.Errorf("保存部署失败记录失败: %w", err))
+			return
+		}
+	}
 
 	// Create notification for final status
 	notifyRepo := repository.NewNotificationMsgRepo()
@@ -239,11 +319,11 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 			Level:   "success", PipelineID: p.ID,
 		})
 	} else if p.Status == "FAILED" {
-		notifyRepo.Create(&model.NotificationMsg{
-			Type: "deploy_failed", Title: fmt.Sprintf("%s 更新失败", p.AppName),
-			Content: fmt.Sprintf("应用 %s 部署失败: %s", p.AppName, p.ErrorMessage),
-			Level:   "error", PipelineID: p.ID,
-		})
+		title, content, level := fmt.Sprintf("%s 更新失败", p.AppName), fmt.Sprintf("应用 %s 部署失败: %s", p.AppName, p.ErrorMessage), "error"
+		if p.DeploymentProgress == "completed" {
+			title, content, level = fmt.Sprintf("%s 部署成功，结果记录异常", p.AppName), fmt.Sprintf("应用 %s 滚动更新已完成，后续结果记录异常: %s", p.AppName, p.ErrorMessage), "warning"
+		}
+		notifyRepo.Create(&model.NotificationMsg{Type: "deploy_failed", Title: title, Content: content, Level: level, PipelineID: p.ID})
 	}
 
 	// Update task last run info
@@ -274,13 +354,14 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 	// Send notifications (Task 12 integration)
 	go func() {
 		event := notification.BuildEvent{
-			AppName:     p.AppName,
-			Branch:      p.GitBranch,
-			Status:      p.Status,
-			TriggerUser: p.TriggerUser,
-			Duration:    dur,
-			ErrorStage:  p.ErrorStage,
-			ErrorMsg:    p.ErrorMessage,
+			DeploymentProgress: p.DeploymentProgress,
+			AppName:            p.AppName,
+			Branch:             p.GitBranch,
+			Status:             p.Status,
+			TriggerUser:        p.TriggerUser,
+			Duration:           dur,
+			ErrorStage:         p.ErrorStage,
+			ErrorMsg:           p.ErrorMessage,
 		}
 		notification.SendBuildNotification(event)
 	}()
@@ -289,6 +370,25 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 	sse.DefaultHub.Close(pipelineID)
 
 	logger.Log.Infof("Pipeline %d completed: %s (%ds)", pipelineID, p.Status, dur)
+}
+
+// A persistence failure must not emit an ordinary completion notification.
+func (s *BuildScheduler) savePipelineResult(p *model.Pipeline) bool {
+	if err := s.pipelineRepo.Update(p); err != nil {
+		s.reportStateError(p, fmt.Errorf("保存流水线最终状态失败: %w", err))
+		return false
+	}
+	return true
+}
+
+func (s *BuildScheduler) reportStateError(p *model.Pipeline, err error) {
+	msg := fmt.Sprintf("流水线=%s；执行结果=%s；%v；原始执行信息=%s。集群操作不会因此撤销，请核对执行日志；页面持久化状态可能尚未更新。", p.PipelineNo, p.Status, err, p.ErrorMessage)
+	if p.DeploymentProgress == "completed" {
+		msg = "部署已成功，结果记录保存失败；" + msg
+	}
+	logger.Log.Error(msg)
+	sse.DefaultHub.Publish(p.ID, sse.Event{Type: "state_error", Data: msg})
+	sse.DefaultHub.Close(p.ID)
 }
 
 func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext {
@@ -330,6 +430,21 @@ func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext 
 		configMapContent = app.ConfigMapContent
 		isGateway = app.IsGateway
 		ingresses = app.GetIngresses()
+	}
+	// Uploaded frontend roles and directories are fixed when the batch is submitted.
+	if p.FrontendArtifactsJSON != "" {
+		var artifacts []model.FrontendArtifact
+		if err := json.Unmarshal([]byte(p.FrontendArtifactsJSON), &artifacts); err != nil || len(artifacts) == 0 {
+			logger.Log.Errorf("Pipeline %d frontend artifact manifest is invalid", p.ID)
+			return nil
+		}
+		vueRole, appCode = "sub", artifacts[0].AppCode
+		for _, artifact := range artifacts {
+			if artifact.Role == "main" {
+				vueRole, appCode = "main", ""
+				break
+			}
+		}
 	}
 	// Fall back to BuildConfig commands
 	if buildCmd == "" && buildConfig != nil {
@@ -416,7 +531,10 @@ func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string, autoDeploy boo
 	}
 	namespace := task.K8sNamespace
 	if namespace == "" {
-		namespace = k8s.GetDefaultNamespace()
+		namespace, err = k8s.GetDefaultNamespace()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	p := &model.Pipeline{

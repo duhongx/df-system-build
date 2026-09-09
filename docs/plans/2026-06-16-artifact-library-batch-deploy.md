@@ -1,5 +1,7 @@
 # Artifact Library Batch Deploy Implementation Plan
 
+> 文档状态（2026-09-09）：本文保留需求／设计／实施计划历史，不作为当前功能或验收清单。已实现范围、现行入口与限制见 [当前说明](../../PROGRESS.md) 和 [实现状态](../../PROGRESS.md)；下文旧架构、命令、目标及任务勾选项可能与现行代码不同。
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Make batch deploy sources automatically maintain the latest artifact library while keeping unmatched files non-blocking.

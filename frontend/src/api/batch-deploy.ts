@@ -2,6 +2,9 @@ import request from './request'
 import type { FileItem } from './server-mgmt'
 
 export interface MatchResult {
+  vueRole?: string
+  appCode?: string
+  updateUsed?: boolean
   fileName: string
   appName: string
   appType: string
@@ -22,7 +25,7 @@ export const executeBatchDeploy = (
   batchId?: string,
   deployMode?: 'immediate' | 'cutover',
 ) =>
-  request.post<any, { pipelines: any[]; errors: string[] }>('/batch-deploy/execute', { sourceDir, items, namespace, batchId, deployMode })
+  request.post<any, { pipelines: any[]; errors: string[]; consumedFiles: string[] }>('/batch-deploy/execute', { sourceDir, items, namespace, batchId, deployMode })
 
 export const listLocalDir = (path: string, batchId?: string) =>
   request.get<any, { path: string; files: string[]; count: number }>('/batch-deploy/local-dir', { params: { path, batchId } })
@@ -78,6 +81,7 @@ export interface ArtifactSourceBatch {
 }
 
 export interface ArtifactVersion {
+  remainingDeployableCount?: number
   id: number
   versionNo: string
   sourceType: 'upload' | 'download' | 'artifact' | string
@@ -99,6 +103,9 @@ export interface ArtifactVersion {
 }
 
 export interface ArtifactVersionItem {
+  vueRole?: string
+  appCode?: string
+  updateUsed?: boolean
   id: number
   versionNo: string
   fileName: string
@@ -151,11 +158,13 @@ export interface ArtifactDeployRecord {
   namespace: string
   deploymentName: string
   runtimeVersionPath: string
+  beforeDesiredImage?: string
   beforeImage: string
   afterImage: string
   packageVersionJson: string
   beforeBusinessVersionJson: string
   afterBusinessVersionJson: string
+  versionWarning?: string
   restoredBusinessVersionJson: string
   buildStatus: string
   deployStatus: string
@@ -219,7 +228,7 @@ export const getArtifactDeployBatch = (batchNo: string) =>
   request.get<any, { batch: ArtifactDeployBatch; records: ArtifactDeployRecord[] }>(`/batch-deploy/deploy-batches/${encodeURIComponent(batchNo)}`)
 
 export const rollbackArtifactDeployBatch = (batchNo: string) =>
-  request.post<any, { batch: ArtifactDeployBatch; records: ArtifactDeployRecord[] }>(`/batch-deploy/deploy-batches/${encodeURIComponent(batchNo)}/rollback`)
+  request.post<any, { taskId: string; batch: ArtifactDeployBatch }>(`/batch-deploy/deploy-batches/${encodeURIComponent(batchNo)}/rollback`)
 
 export const downloadRemoteDir = (remotePath: string, localPath: string) =>
   request.post<any, { targetPath: string; batchId: string; files: string[]; count: number }>('/batch-deploy/download-remote-dir', { remotePath, localPath })

@@ -17,6 +17,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -71,7 +72,34 @@ func resolvePlan(pCtx *types.PipelineContext) templatePlan {
 	return plan
 }
 
-func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (*types.StageResult, error) {
+func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (result *types.StageResult, runErr error) {
+	phase := "precheck"
+	defer func() {
+		if runErr == nil {
+			return
+		}
+		states := map[string]string{
+			"precheck":   "尚未由本阶段提交线上修改",
+			"preparing":  "部署准备阶段；配置资源可能已创建，尚未提交 Deployment 更新",
+			"submitting": "Deployment 请求可能已被接受，当前结果未确认",
+			"submitted":  "Deployment 更新请求已被接受，滚动结果尚未验证",
+			"completed":  "指定镜像滚动更新已完成，应用已就绪；后续记录保存可能失败",
+		}
+		runErr = fmt.Errorf("%w；部署进度=%s；线上状态=%s", runErr, phase, states[phase])
+		if result != nil {
+			result.Error = runErr.Error()
+		}
+	}()
+	checkpoint := func(next string) error {
+		if err := service.RecordDeploymentProgress(pCtx.PipelineID, next, pCtx.ImageName); err != nil {
+			return fmt.Errorf("记录部署进度 %s 失败，停止后续操作: %w", next, err)
+		}
+		phase = next
+		if pCtx.Pipeline != nil {
+			pCtx.Pipeline.DeploymentProgress = next
+		}
+		return nil
+	}
 	if pCtx.ImageName == "" {
 		errMsg := "镜像名称为空，无法执行 K8s 部署"
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
@@ -87,7 +115,10 @@ func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 
 	namespace := pCtx.K8sNamespace
 	if namespace == "" {
-		namespace = k8s.GetDefaultNamespace()
+		namespace, err = k8s.GetDefaultNamespace()
+		if err != nil {
+			return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+		}
 	}
 
 	plan := resolvePlan(pCtx)
@@ -108,16 +139,34 @@ func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Deployment: %s", deploymentName), "stdout")
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("目标镜像: %s", pCtx.ImageName), "stdout")
 
+	sharedWeb := pCtx.AppType == "vue" && (pCtx.VueRole == "main" || pCtx.VueRole == "sub")
+	if sharedWeb {
+		if err := validateWebBaseline(ctx, cs, pCtx, namespace); err != nil {
+			return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+		}
+	}
+
 	reader := service.NewK8sRuntimeVersionReader()
-	beforeImage, imageErr := service.CurrentDeploymentImage(ctx, namespace, deploymentName)
+	beforeImages, imageErr := service.ImagesBeforeDeployment(ctx, namespace, deploymentName, pCtx.PipelineID)
 	if imageErr == nil {
-		if err := service.CaptureBeforeDeployVersions(ctx, pCtx.PipelineID, deploymentName, beforeImage, reader); err != nil {
+		if err := service.CaptureBeforeDeployImages(ctx, pCtx.PipelineID, deploymentName, beforeImages, reader); err != nil {
 			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("记录更新前版本失败: %v", err), "stderr")
-		} else if beforeImage != "" {
-			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("已记录更新前镜像: %s", beforeImage), "stdout")
+			return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+		} else {
+			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("已记录更新前目标镜像=%s；可回滚镜像=%s", beforeImages.Desired, beforeImages.Rollback), "stdout")
+			if beforeImages.Rollback == "" {
+				pCtx.OnLog(pCtx.PipelineID, 0, "当前目标镜像尚未完成滚动且没有可恢复镜像记录；继续本次更新，暂无旧镜像可供回滚", "stderr")
+			}
 		}
 	} else {
+		if !apierrors.IsNotFound(imageErr) {
+			return &types.StageResult{ExitCode: 1, Error: imageErr.Error()}, imageErr
+		}
 		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("未读取到更新前镜像: %v", imageErr), "stdout")
+	}
+
+	if err := checkpoint("preparing"); err != nil {
+		return &types.StageResult{ExitCode: 1}, err
 	}
 
 	// 1) ConfigMap (vue main or standalone)
@@ -129,21 +178,27 @@ func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 		}
 		// Only apply if there's content OR if it's a template-driven ConfigMap
 		if pCtx.ConfigMapContent != "" || (pCtx.AppType == "vue" && pCtx.VueRole == "standalone") {
+			pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("[配置检查] 命名空间=%s；ConfigMap 模板=%s", namespace, configMapCode), "stdout")
 			if err := s.applyConfigMap(ctx, cs, pCtx, namespace, configMapCode); err != nil {
-				// For standalone, ConfigMap is optional — log warning but don't fail
-				if pCtx.VueRole == "standalone" {
-					pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("ConfigMap 模板 '%s' 未找到，跳过", configMapCode), "stdout")
-				} else {
-					return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
-				}
+				return &types.StageResult{ExitCode: 1, Error: err.Error()}, fmt.Errorf("处理 ConfigMap %s/%s 失败，停止部署: %w", namespace, pCtx.AppName, err)
 			}
 		}
 	}
 
 	// 2) Deployment (create or update image)
+	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("[部署提交] 开始创建或更新 Deployment=%s/%s；目标镜像=%s", namespace, deploymentName, pCtx.ImageName), "stdout")
+	if err := checkpoint("submitting"); err != nil {
+		return &types.StageResult{ExitCode: 1}, err
+	}
 	if err := s.applyDeployment(ctx, cs, pCtx, namespace, deploymentName, plan.deploymentCode); err != nil {
 		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
 	}
+
+	phase = "submitted" // API accepted, even if saving the next checkpoint fails.
+	if err := checkpoint("submitted"); err != nil {
+		return &types.StageResult{ExitCode: 1}, err
+	}
+	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("[部署提交完成] Kubernetes 已接受 Deployment=%s/%s 的镜像更新；尚需等待滚动更新和验证", namespace, deploymentName), "stdout")
 
 	// 3) Service (when this app owns a service)
 	if plan.serviceCode != "" {
@@ -185,8 +240,16 @@ func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
 	}
 
+	phase = "completed" // Rollout already succeeded even if the following database write fails.
+	if pCtx.Pipeline != nil {
+		pCtx.Pipeline.DeploymentProgress = "completed"
+	}
+	if err := checkpoint("completed"); err != nil {
+		return &types.StageResult{ExitCode: 1}, err
+	}
+	pCtx.OnLog(pCtx.PipelineID, 0, "[滚动完成] 指定镜像已就绪；保存部署结果并采集版本信息（采集失败不影响部署结果）", "stdout")
 	if err := service.CaptureAfterDeployVersions(ctx, pCtx.PipelineID, deploymentName, pCtx.ImageName, reader); err != nil {
-		errMsg := fmt.Sprintf("业务版本校验失败: %v", err)
+		errMsg := fmt.Sprintf("滚动更新已完成，但保存部署结果失败: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return &types.StageResult{ExitCode: 1, Error: errMsg}, fmt.Errorf("%s", errMsg)
 	}
@@ -198,18 +261,29 @@ func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 
 // renderResource loads a config item template and renders it with the
 // standard variable set used across K8s resource templates.
-func (s *K8sDeployStage) renderResource(pCtx *types.PipelineContext, namespace, deploymentName, templateCode string, overrides map[string]string) (string, error) {
+func (s *K8sDeployStage) renderResource(ctx context.Context, pCtx *types.PipelineContext, namespace, deploymentName, templateCode string, overrides map[string]string) (string, error) {
 	configRepo := repository.NewConfigItemRepo()
 	tpl, err := configRepo.GetByCode(templateCode)
 	if err != nil {
-		errMsg := fmt.Sprintf("K8s 模板 '%s' 不存在，请在配置项管理中创建", templateCode)
+		errMsg := fmt.Sprintf("读取 K8s 模板 '%s' 失败: %v", templateCode, err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return "", fmt.Errorf("%s", errMsg)
 	}
 
 	settingsRepo := repository.NewSettingsRepo()
-	registryURL, _ := settingsRepo.GetByKey("docker_registry_url")
-	skywalkingGraphqlUrl, _ := settingsRepo.GetByKey("skywalking_graphql_url")
+	registryURL, skywalkingGraphqlUrl := "", ""
+	if strings.Contains(tpl.Content, "${registryUrl}") {
+		registryURL, err = settingsRepo.Read("docker_registry_url", true)
+		if err != nil {
+			return "", err
+		}
+	}
+	if strings.Contains(tpl.Content, "${skywalkingGraphqlUrl}") {
+		skywalkingGraphqlUrl, err = settingsRepo.Read("skywalking_graphql_url", false)
+		if err != nil {
+			return "", err
+		}
+	}
 
 	// Indent ConfigMap content for YAML embedding (used by deployment templates that inline conf)
 	indentedCM := ""
@@ -219,7 +293,15 @@ func (s *K8sDeployStage) renderResource(pCtx *types.PipelineContext, namespace, 
 		}
 	}
 
-	nodeIP := k8s.GetFirstNodeIP(context.Background())
+	nodeIP := ""
+	if strings.Contains(tpl.Content, "${nodeIP}") {
+		nodeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		nodeIP, err = k8s.GetFirstNodeIP(nodeCtx)
+		if err != nil {
+			return "", err
+		}
+	}
 
 	// First Ingress acts as default for templates that still use ${ingressHost}
 	defaultIngressHost := pCtx.IngressHost
@@ -256,7 +338,38 @@ func (s *K8sDeployStage) renderResource(pCtx *types.PipelineContext, namespace, 
 // applyDeployment creates or updates the Deployment for an application.
 func (s *K8sDeployStage) applyDeployment(ctx context.Context, cs kubernetes.Interface, pCtx *types.PipelineContext, namespace, deploymentName, templateCode string) error {
 	pCtx.OnLog(pCtx.PipelineID, 0, "检查 Deployment 是否存在...", "stdout")
-	_, err := cs.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	dep, err := cs.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("读取 Deployment 失败: %w", err)
+	}
+	sharedWeb := pCtx.AppType == "vue" && (pCtx.VueRole == "main" || pCtx.VueRole == "sub")
+	if sharedWeb {
+		baseline, loadErr := loadWebBaseline(pCtx)
+		if loadErr != nil {
+			return loadErr
+		}
+		cfg, cfgErr := k8s.GetRestConfig()
+		if cfgErr != nil {
+			return cfgErr
+		}
+		if apierrors.IsNotFound(err) {
+			dep = nil
+		}
+		if err := baseline.validate(dep, cfg.Host, namespace); err != nil {
+			return err
+		}
+		if dep != nil {
+			for i := range dep.Spec.Template.Spec.Containers {
+				if dep.Spec.Template.Spec.Containers[i].Name == "web-main" {
+					dep.Spec.Template.Spec.Containers[i].Image = pCtx.ImageName
+				}
+			}
+			// Use the fetched resourceVersion. Conflicts fail without overwriting
+			// a Deployment that changed after the baseline check.
+			_, err := cs.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+			return err
+		}
+	}
 	if err == nil {
 		// Exists: just patch the image
 		pCtx.OnLog(pCtx.PipelineID, 0, "Deployment 已存在，更新镜像...", "stdout")
@@ -271,20 +384,23 @@ func (s *K8sDeployStage) applyDeployment(ctx context.Context, cs kubernetes.Inte
 	}
 
 	pCtx.OnLog(pCtx.PipelineID, 0, "Deployment 不存在，从模板创建...", "stdout")
-	yamlContent, err := s.renderResource(pCtx, namespace, deploymentName, templateCode, nil)
+	yamlContent, err := s.renderResource(ctx, pCtx, namespace, deploymentName, templateCode, nil)
 	if err != nil {
 		return err
 	}
 
-	var dep appsv1.Deployment
-	if err := yaml.Unmarshal([]byte(yamlContent), &dep); err != nil {
+	var created appsv1.Deployment
+	if err := yaml.Unmarshal([]byte(yamlContent), &created); err != nil {
 		errMsg := fmt.Sprintf("Deployment 模板解析失败: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return fmt.Errorf("%s", errMsg)
 	}
-	dep.Namespace = namespace
+	created.Namespace = namespace
+	if sharedWeb && (created.Name != "web-main" || webContainerImage(&created) != pCtx.ImageName) {
+		return fmt.Errorf("前端 Deployment 模板的名称、容器或镜像与本次更新不一致")
+	}
 
-	if _, err := cs.AppsV1().Deployments(namespace).Create(ctx, &dep, metav1.CreateOptions{}); err != nil {
+	if _, err := cs.AppsV1().Deployments(namespace).Create(ctx, &created, metav1.CreateOptions{}); err != nil {
 		errMsg := fmt.Sprintf("创建 Deployment 失败: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return fmt.Errorf("%s", errMsg)
@@ -305,7 +421,7 @@ func (s *K8sDeployStage) applyService(ctx context.Context, cs kubernetes.Interfa
 		return fmt.Errorf("%s", errMsg)
 	}
 
-	yamlContent, err := s.renderResource(pCtx, namespace, deploymentName, templateCode, nil)
+	yamlContent, err := s.renderResource(ctx, pCtx, namespace, deploymentName, templateCode, nil)
 	if err != nil {
 		return err
 	}
@@ -343,7 +459,7 @@ func (s *K8sDeployStage) applyConfigMap(ctx context.Context, cs kubernetes.Inter
 		return fmt.Errorf("%s", errMsg)
 	}
 
-	yamlContent, err := s.renderResource(pCtx, namespace, pCtx.AppName, templateCode, nil)
+	yamlContent, err := s.renderResource(ctx, pCtx, namespace, pCtx.AppName, templateCode, nil)
 	if err != nil {
 		return err
 	}
@@ -382,7 +498,7 @@ func (s *K8sDeployStage) applyIngress(ctx context.Context, cs kubernetes.Interfa
 		"appName":     ingressName, // backwards-compat for templates referencing ${appName}
 		"ingressHost": host,
 	}
-	yamlContent, err := s.renderResource(pCtx, namespace, ingressName, "ingress", overrides)
+	yamlContent, err := s.renderResource(ctx, pCtx, namespace, ingressName, "ingress", overrides)
 	if err != nil {
 		return err
 	}
@@ -433,7 +549,15 @@ func convertNodePortToClusterIP(yamlContent string) string {
 	return yamlContent
 }
 
-func (s *K8sDeployStage) waitForRollout(ctx context.Context, cs *kubernetes.Clientset, namespace, name string, pCtx *types.PipelineContext) error {
+func (s *K8sDeployStage) waitForRollout(ctx context.Context, cs kubernetes.Interface, namespace, name string, pCtx *types.PipelineContext) (runErr error) {
+	defer func() {
+		if runErr != nil {
+			details := collectRolloutDiagnostics(cs, namespace, name, pCtx)
+			if details != "" {
+				runErr = fmt.Errorf("%w\n%s", runErr, details)
+			}
+		}
+	}()
 	timeout := 300 * time.Second // 5 minutes for slow-starting services
 	deadline := time.Now().Add(timeout)
 
@@ -442,7 +566,14 @@ func (s *K8sDeployStage) waitForRollout(ctx context.Context, cs *kubernetes.Clie
 	if err != nil {
 		return fmt.Errorf("获取 Deployment 失败: %v", err)
 	}
-	targetGeneration := dep.Generation
+	targetGeneration, targetUID := dep.Generation, dep.UID
+	replicas := int32(1)
+	if dep.Spec.Replicas != nil {
+		replicas = *dep.Spec.Replicas
+	}
+	if replicas < 1 {
+		return fmt.Errorf("Deployment %s/%s 副本数为 0，无法确认应用可用", namespace, name)
+	}
 
 	for time.Now().Before(deadline) {
 		select {
@@ -455,8 +586,11 @@ func (s *K8sDeployStage) waitForRollout(ctx context.Context, cs *kubernetes.Clie
 
 		dep, err = cs.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			time.Sleep(3 * time.Second)
-			continue
+			return fmt.Errorf("读取滚动更新状态失败（%s/%s）: %w", namespace, name, err)
+		}
+
+		if dep.UID != targetUID || dep.Generation != targetGeneration {
+			return fmt.Errorf("Deployment %s/%s 在等待期间发生变化，停止本次验证", namespace, name)
 		}
 
 		// Ensure we're looking at the latest update
@@ -473,20 +607,21 @@ func (s *K8sDeployStage) waitForRollout(ctx context.Context, cs *kubernetes.Clie
 		}
 
 		// Check Pod status for fatal errors (ImagePullBackOff, CrashLoopBackOff)
-		if errMsg := s.checkPodErrors(ctx, cs, namespace, name, pCtx); errMsg != "" {
+		if errMsg := s.checkPodErrors(ctx, cs, namespace, dep, pCtx); errMsg != "" {
 			return fmt.Errorf("%s", errMsg)
 		}
 
 		// Check if rollout is complete
-		if dep.Status.UpdatedReplicas == *dep.Spec.Replicas &&
-			dep.Status.ReadyReplicas == *dep.Spec.Replicas &&
-			dep.Status.AvailableReplicas == *dep.Spec.Replicas &&
+		if dep.Status.Replicas == replicas &&
+			dep.Status.UpdatedReplicas == replicas &&
+			dep.Status.ReadyReplicas == replicas &&
+			dep.Status.AvailableReplicas == replicas &&
 			dep.Status.UnavailableReplicas == 0 {
 			return nil
 		}
 
 		pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("等待中... (Ready: %d/%d, Updated: %d)",
-			dep.Status.ReadyReplicas, *dep.Spec.Replicas, dep.Status.UpdatedReplicas), "stdout")
+			dep.Status.ReadyReplicas, replicas, dep.Status.UpdatedReplicas), "stdout")
 		time.Sleep(5 * time.Second)
 	}
 
@@ -494,16 +629,14 @@ func (s *K8sDeployStage) waitForRollout(ctx context.Context, cs *kubernetes.Clie
 }
 
 // checkPodErrors checks if any new pods have fatal errors
-func (s *K8sDeployStage) checkPodErrors(ctx context.Context, cs *kubernetes.Clientset, namespace, deployName string, pCtx *types.PipelineContext) string {
-	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app=" + deployName,
-	})
+func (s *K8sDeployStage) checkPodErrors(ctx context.Context, cs kubernetes.Interface, namespace string, dep *appsv1.Deployment, pCtx *types.PipelineContext) string {
+	pods, err := currentDeploymentPods(ctx, cs, namespace, dep)
 	if err != nil {
-		return ""
+		return err.Error()
 	}
-
-	for _, pod := range pods.Items {
-		for _, cs := range pod.Status.ContainerStatuses {
+	for _, pod := range pods {
+		statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+		for _, cs := range statuses {
 			if cs.State.Waiting != nil {
 				reason := cs.State.Waiting.Reason
 				switch reason {
@@ -524,4 +657,46 @@ func (s *K8sDeployStage) checkPodErrors(ctx context.Context, cs *kubernetes.Clie
 		}
 	}
 	return ""
+}
+
+func currentDeploymentPods(ctx context.Context, cs kubernetes.Interface, namespace string, dep *appsv1.Deployment) ([]corev1.Pod, error) {
+	if dep.Spec.Selector == nil {
+		return nil, fmt.Errorf("Deployment 缺少 Pod selector，无法检查更新状态")
+	}
+	selector, err := metav1.LabelSelectorAsSelector(dep.Spec.Selector)
+	if err != nil {
+		return nil, fmt.Errorf("解析 Deployment selector 失败: %v", err)
+	}
+	options := metav1.ListOptions{LabelSelector: selector.String()}
+	sets, err := cs.AppsV1().ReplicaSets(namespace).List(ctx, options)
+	if err != nil {
+		return nil, fmt.Errorf("查询本次发布 ReplicaSet 失败: %v", err)
+	}
+	currentSets := map[string]bool{}
+	for _, set := range sets.Items {
+		owner := metav1.GetControllerOf(&set)
+		if owner == nil || owner.Kind != "Deployment" || owner.UID != dep.UID {
+			continue
+		}
+		expected, actual := dep.Spec.Template.DeepCopy(), set.Spec.Template.DeepCopy()
+		delete(expected.Labels, appsv1.DefaultDeploymentUniqueLabelKey)
+		delete(actual.Labels, appsv1.DefaultDeploymentUniqueLabelKey)
+		if apiequality.Semantic.DeepEqual(expected, actual) {
+			currentSets[string(set.UID)] = true
+		}
+	}
+	pods, err := cs.CoreV1().Pods(namespace).List(ctx, options)
+	if err != nil {
+		return nil, fmt.Errorf("查询本次发布 Pod 失败: %v", err)
+	}
+
+	var current []corev1.Pod
+	for _, pod := range pods.Items {
+		owner := metav1.GetControllerOf(&pod)
+		if pod.DeletionTimestamp != nil || owner == nil || owner.Kind != "ReplicaSet" || !currentSets[string(owner.UID)] {
+			continue
+		}
+		current = append(current, pod)
+	}
+	return current, nil
 }

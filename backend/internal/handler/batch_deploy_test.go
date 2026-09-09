@@ -1737,7 +1737,7 @@ func setupArtifactVersionTestDB(t *testing.T) {
 	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
 		t.Fatalf("init db: %v", err)
 	}
-	if err := repository.DB.AutoMigrate(&model.Application{}, &model.ArtifactVersion{}, &model.ArtifactVersionItem{}, &model.ArtifactDeployBatch{}, &model.ArtifactDeployRecord{}, &model.DeploymentRuntimeVersion{}); err != nil {
+	if err := repository.DB.AutoMigrate(&model.Application{}, &model.ArtifactVersion{}, &model.ArtifactVersionItem{}, &model.ArtifactUpdateClaim{}, &model.ArtifactDeployBatch{}, &model.ArtifactDeployRecord{}, &model.DeploymentRuntimeVersion{}); err != nil {
 		t.Fatalf("migrate artifact version tables: %v", err)
 	}
 	apps := []model.Application{
@@ -2051,4 +2051,59 @@ func seedDownloadJobForRouteTest(t *testing.T, job downloadJob) {
 		downloadJobCancelStore.items = oldCancels
 		downloadJobCancelStore.Unlock()
 	})
+}
+
+func TestExecuteRejectsPartialFrontendSelectionBeforeCreatingPipelines(t *testing.T) {
+	logger.Init("error", "stdout", "")
+	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DB.AutoMigrate(&model.Application{}, &model.Pipeline{}, &model.PipelineStage{}); err != nil {
+		t.Fatal(err)
+	}
+	app := model.Application{AppName: "web-main", AppType: "vue", VueRole: "main", GitRepo: "test"}
+	if err := repository.DB.Create(&app).Error; err != nil {
+		t.Fatal(err)
+	}
+	sub := model.Application{AppName: "web-selected-sub", AppType: "vue", VueRole: "sub", AppCode: "04", GitRepo: "test"}
+	if err := repository.DB.Create(&sub).Error; err != nil {
+		t.Fatal(err)
+	}
+	root, err := batchUploadRootDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(root, "frontend-preflight-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if err := createTestZip(filepath.Join(dir, "web-main.zip")); err != nil {
+		t.Fatal(err)
+	}
+	h := &BatchDeployHandler{appRepo: repository.NewApplicationRepo(), pipelineRepo: repository.NewPipelineRepo()}
+	for _, items := range []any{
+		[]map[string]any{{"fileName": "web-main.zip", "appId": app.ID}, {"fileName": "04.zip", "appId": sub.ID}},
+		[]map[string]any{{"fileName": "web-main.zip", "appId": app.ID}, {"fileName": "web-main.zip", "appId": app.ID}},
+	} {
+		body, _ := json.Marshal(map[string]any{"sourceDir": dir, "namespace": "test", "items": items})
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/execute", bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Execute(c)
+		var count int64
+		if err := repository.DB.Model(&model.Pipeline{}).Count(&count).Error; err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("invalid batch created %d pipelines", count)
+		}
+		if !strings.Contains(w.Body.String(), "未创建更新任务") {
+			t.Fatalf("unexpected response: %s", w.Body.String())
+		}
+	}
 }

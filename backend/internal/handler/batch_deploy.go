@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -193,6 +194,10 @@ func (h *BatchDeployHandler) ListArtifactVersions(c *gin.Context) {
 		response.Fail(c, 13019, "读取更新版本失败: "+err.Error())
 		return
 	}
+	if err := markVersionUsage(versions); err != nil {
+		response.Fail(c, 13019, "读取制品使用状态失败: "+err.Error())
+		return
+	}
 	response.OK(c, gin.H{"versions": versions})
 }
 
@@ -208,6 +213,10 @@ func (h *BatchDeployHandler) SyncArtifactVersionsFromWorkspace(c *gin.Context) {
 	versions := []model.ArtifactVersion{}
 	if err := repository.DB.Order("updated_at DESC").Find(&versions).Error; err != nil {
 		response.Fail(c, 13019, "读取更新版本失败: "+err.Error())
+		return
+	}
+	if err := markVersionUsage(versions); err != nil {
+		response.Fail(c, 13019, "读取制品使用状态失败: "+err.Error())
 		return
 	}
 	response.OK(c, gin.H{"versions": versions})
@@ -231,6 +240,32 @@ func (h *BatchDeployHandler) GetArtifactVersion(c *gin.Context) {
 	items := []model.ArtifactVersionItem{}
 	if err := repository.DB.Where("version_no = ?", versionNo).Order("file_name ASC").Find(&items).Error; err != nil {
 		response.Fail(c, 13020, "读取版本明细失败: "+err.Error())
+		return
+	}
+	// Resolve current frontend roles for the confirmation dialog, including older uploads.
+	ids := make([]uint, 0, len(items))
+	for _, item := range items {
+		if item.AppID != 0 {
+			ids = append(ids, item.AppID)
+		}
+	}
+	if len(ids) > 0 {
+		var apps []model.Application
+		if err := repository.DB.Select("id", "vue_role", "app_code").Where("id IN ?", ids).Find(&apps).Error; err != nil {
+			response.Fail(c, 13020, "读取应用更新范围失败: "+err.Error())
+			return
+		}
+		byID := make(map[uint]model.Application, len(apps))
+		for _, app := range apps {
+			byID[app.ID] = app
+		}
+		for i := range items {
+			app := byID[items[i].AppID]
+			items[i].VueRole, items[i].AppCode = app.VueRole, app.AppCode
+		}
+	}
+	if err := markArtifactUsage(&version, items); err != nil {
+		response.Fail(c, 13020, "读取制品使用状态失败: "+err.Error())
 		return
 	}
 	response.OK(c, gin.H{"version": version, "items": items})
@@ -260,6 +295,13 @@ func deleteArtifactVersion(versionNo string) error {
 			return fmt.Errorf("更新版本不存在")
 		}
 		return err
+	}
+	used, err := usedArtifactFiles(repository.DB, versionNo)
+	if err != nil {
+		return err
+	}
+	if len(used) > 0 {
+		return fmt.Errorf("该版本已有制品提交更新，不能删除；如需再次更新请重新上传")
 	}
 	if hasRunningDownloadJob(versionNo) {
 		return fmt.Errorf("下载任务正在执行，不能删除")
@@ -366,6 +408,15 @@ func (h *BatchDeployHandler) ReplaceArtifactVersionItem(c *gin.Context) {
 		response.Fail(c, 13024, err.Error())
 		return
 	}
+	used, err := usedArtifactFiles(repository.DB, version.VersionNo)
+	if err != nil {
+		response.Fail(c, 13024, "读取制品使用状态失败: "+err.Error())
+		return
+	}
+	if used[fileName] {
+		response.Fail(c, 13024, "目标制品已提交过更新，不能覆盖；请重新上传生成新版本")
+		return
+	}
 	if oldPath, err := resolveArtifactPath(version.TargetPath, item.FileName); err == nil && item.FileName != fileName {
 		if removeErr := os.Remove(oldPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			response.Fail(c, 13024, "删除旧制品文件失败: "+removeErr.Error())
@@ -439,6 +490,15 @@ func (h *BatchDeployHandler) loadArtifactVersionItem(c *gin.Context) (model.Arti
 		response.Fail(c, 13023, "制品不存在")
 		return model.ArtifactVersion{}, model.ArtifactVersionItem{}, false
 	}
+	used, err := usedArtifactFiles(repository.DB, versionNo)
+	if err != nil {
+		response.Fail(c, 13023, "读取制品使用记录失败: "+err.Error())
+		return model.ArtifactVersion{}, model.ArtifactVersionItem{}, false
+	}
+	if used[item.FileName] {
+		response.Fail(c, 13023, "该制品已提交过更新，不能修改；请重新上传生成新版本")
+		return model.ArtifactVersion{}, model.ArtifactVersionItem{}, false
+	}
 	return version, item, true
 }
 
@@ -473,7 +533,12 @@ func (h *BatchDeployHandler) GetArtifactDeployBatch(c *gin.Context) {
 	if err := repository.DB.Where("deploy_batch_no = ?", batchNo).First(&batch).Error; err != nil {
 		namespace := strings.TrimSpace(c.Query("namespace"))
 		if namespace == "" {
-			namespace = k8s.GetDefaultNamespace()
+			var nsErr error
+			namespace, nsErr = k8s.GetDefaultNamespace()
+			if nsErr != nil {
+				response.Fail(c, 13004, nsErr.Error())
+				return
+			}
 		}
 		records, previewErr := service.BuildArtifactDeployPreviewRecordsFromCache(c.Request.Context(), batchNo, namespace)
 		if previewErr != nil {
@@ -501,15 +566,12 @@ func (h *BatchDeployHandler) RollbackArtifactDeployBatch(c *gin.Context) {
 		response.Fail(c, 13023, "部署批次号无效")
 		return
 	}
-	if err := service.RollbackDeployBatch(c.Request.Context(), batchNo, service.NewK8sDeploymentRollbacker(), service.NewK8sRuntimeVersionReader()); err != nil {
-		response.Fail(c, 13023, "整体回滚失败: "+err.Error())
+	batch, err := service.StartRollbackDeployBatch(batchNo, service.NewK8sDeploymentRollbacker(), service.NewK8sRuntimeVersionReader())
+	if err != nil {
+		response.Fail(c, 13023, "提交回滚失败: "+err.Error())
 		return
 	}
-	var batch model.ArtifactDeployBatch
-	_ = repository.DB.Where("deploy_batch_no = ?", batchNo).First(&batch).Error
-	records := []model.ArtifactDeployRecord{}
-	_ = repository.DB.Where("deploy_batch_no = ?", batchNo).Order("deployment_name ASC, app_name ASC").Find(&records).Error
-	response.OK(c, gin.H{"batch": batch, "records": records})
+	response.OK(c, gin.H{"taskId": batchNo, "batch": batch})
 }
 
 func artifactSourceBatchesFromVersions(versions []model.ArtifactVersion) []artifactSourceBatch {
@@ -849,6 +911,17 @@ func (h *BatchDeployHandler) StartDownloadRemoteDir(c *gin.Context) {
 	if err != nil {
 		response.Fail(c, 13010, err.Error())
 		return
+	}
+	if repository.DB != nil {
+		used, err := usedArtifactFiles(repository.DB, versionNo)
+		if err != nil {
+			response.Fail(c, 13010, "读取制品使用状态失败: "+err.Error())
+			return
+		}
+		if len(used) > 0 {
+			response.Fail(c, 13010, "该下载版本已提交过更新，不能覆盖；如需再次更新请重新上传生成新版本")
+			return
+		}
 	}
 	if existing, ok := getDownloadJobSnapshot(jobID); ok && (existing.Status == "pending" || existing.Status == "running") {
 		response.OK(c, existing)
@@ -1342,7 +1415,7 @@ func persistArtifactVersionFromDir(input artifactVersionInput) (model.ArtifactVe
 }
 
 func refreshArtifactVersion(version model.ArtifactVersion) (model.ArtifactVersion, []model.ArtifactVersionItem, error) {
-	return persistArtifactVersionFromDir(artifactVersionInput{
+	updated, items, err := persistArtifactVersionFromDir(artifactVersionInput{
 		VersionNo:   version.VersionNo,
 		SourceType:  version.SourceType,
 		SourceLabel: version.SourceLabel,
@@ -1352,6 +1425,10 @@ func refreshArtifactVersion(version model.ArtifactVersion) (model.ArtifactVersio
 		RemotePath:  version.RemotePath,
 		Error:       version.Error,
 	})
+	if err == nil {
+		err = markArtifactUsage(&updated, items)
+	}
+	return updated, items, err
 }
 
 func refreshArtifactVersionStatus(status string) string {
@@ -1443,6 +1520,8 @@ func buildArtifactVersionItem(versionNo, sourceDir, fileName string, apps []mode
 		item.AppID = result.AppID
 		item.AppName = result.AppName
 		item.AppType = result.AppType
+		item.VueRole = result.VueRole
+		item.AppCode = result.AppCode
 		if result.AppType == "vue" {
 			item.FileType = "vue"
 		}
@@ -1797,6 +1876,9 @@ func (h *BatchDeployHandler) ListLocalBrowser(c *gin.Context) {
 }
 
 type matchResult struct {
+	VueRole     string `json:"vueRole"`
+	AppCode     string `json:"appCode"`
+	UpdateUsed  bool   `json:"updateUsed"`
 	FileName    string `json:"fileName"`
 	AppName     string `json:"appName"`
 	AppType     string `json:"appType"`
@@ -1867,6 +1949,16 @@ func (h *BatchDeployHandler) Match(c *gin.Context) {
 		results = append(results, result)
 	}
 
+	if repository.DB != nil && batchID != "" {
+		used, err := usedArtifactFiles(repository.DB, batchID)
+		if err != nil {
+			response.Fail(c, 13003, "读取制品使用状态失败: "+err.Error())
+			return
+		}
+		for i := range results {
+			results[i].UpdateUsed = used[results[i].FileName]
+		}
+	}
 	matched := 0
 	invalid := 0
 	skipped := 0
@@ -1900,6 +1992,8 @@ func (h *BatchDeployHandler) matchFile(fileName string, apps []model.Application
 				result.AppName = app.AppName
 				result.AppType = app.AppType
 				result.AppID = app.ID
+				result.VueRole = app.VueRole
+				result.AppCode = app.AppCode
 				result.MatchReason = "Java 应用名匹配"
 				return result
 			}
@@ -1909,6 +2003,8 @@ func (h *BatchDeployHandler) matchFile(fileName string, apps []model.Application
 				result.AppName = app.AppName
 				result.AppType = app.AppType
 				result.AppID = app.ID
+				result.VueRole = app.VueRole
+				result.AppCode = app.AppCode
 				result.MatchReason = fmt.Sprintf("Vue %s 应用名匹配", app.VueRole)
 				return result
 			}
@@ -1917,6 +2013,8 @@ func (h *BatchDeployHandler) matchFile(fileName string, apps []model.Application
 				result.AppName = app.AppName
 				result.AppType = app.AppType
 				result.AppID = app.ID
+				result.VueRole = app.VueRole
+				result.AppCode = app.AppCode
 				result.MatchReason = fmt.Sprintf("Vue 子应用 appCode=%s 匹配", app.AppCode)
 				return result
 			}
@@ -1958,7 +2056,12 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 	username := middleware.GetCurrentUsername(c)
 	namespace := strings.TrimSpace(req.Namespace)
 	if namespace == "" {
-		namespace = k8s.GetDefaultNamespace()
+		var nsErr error
+		namespace, nsErr = k8s.GetDefaultNamespace()
+		if nsErr != nil {
+			response.Fail(c, 13004, nsErr.Error())
+			return
+		}
 	}
 	batchID := strings.TrimSpace(req.BatchID)
 	if batchID == "" {
@@ -1976,6 +2079,37 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 	var pipelines []gin.H
 	var errors []string
 
+	preparationFailed := func(p *model.Pipeline, cause error) {
+		p.Status = "FAILED"
+		p.ErrorStage = "PREPARE_UPDATE"
+		p.ErrorMessage = fmt.Sprintf("准备更新失败：应用=%s；制品=%s；原因=%v；其他部署任务继续，修复后请重新上传", p.AppName, p.ArtifactName, cause)
+		now := time.Now()
+		p.EndTime = &now
+		if err := h.pipelineRepo.Update(p); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: 保存失败详情失败: %v；原始错误: %v", p.AppName, err, cause))
+		}
+
+		if err := service.MarkPipelineFailed(p.ID, p.ErrorMessage); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: 保存准备失败明细失败: %v；原始错误: %v", p.AppName, err, cause))
+		}
+	}
+
+	appByID := map[uint]model.Application{}
+	var frontendSummary []string
+	var webArtifacts []model.FrontendArtifact
+	seenApps := map[uint]bool{}
+	seenFiles := map[string]bool{}
+	seenCodes := map[string]bool{}
+	invalidApps := map[uint]bool{}
+	invalidSharedWeb := false
+	invalidate := func(app *model.Application, message string) {
+		errors = append(errors, message)
+		invalidApps[app.ID] = true
+		if app.AppType == "vue" && (app.VueRole == "main" || app.VueRole == "sub") {
+			invalidSharedWeb = true
+		}
+	}
+
 	// Separate web-main related items from others
 	var webMainItem *struct {
 		FileName string
@@ -1992,23 +2126,60 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 	}
 
 	for _, item := range req.Items {
+		app, err := h.appRepo.FindByID(item.AppID)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: 读取应用失败: %v", item.FileName, err))
+			continue
+		}
+		appByID[app.ID] = *app
 		fileName, err := safeArtifactFileName(item.FileName)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %s", item.FileName, err.Error()))
+			invalidate(app, fmt.Sprintf("%s: %s", item.FileName, err.Error()))
 			continue
 		}
 		item.FileName = fileName
 
-		app, err := h.appRepo.FindByID(item.AppID)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s: 应用不存在", item.FileName))
-			continue
-		}
 		if err := validateExecuteArtifact(sourceDir, item.FileName, *app); err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %s", item.FileName, err.Error()))
+			invalidate(app, fmt.Sprintf("%s: %s", item.FileName, err.Error()))
 			continue
 		}
 
+		if seenApps[app.ID] || seenFiles[item.FileName] {
+			invalidate(app, fmt.Sprintf("%s: 重复选择应用或制品", item.FileName))
+			continue
+		}
+		seenApps[app.ID], seenFiles[item.FileName] = true, true
+		if app.AppType == "vue" {
+			role := "独立应用"
+			if app.VueRole == "main" {
+				role = "主应用"
+			} else if app.VueRole == "sub" {
+				role = "子应用"
+			}
+			frontendSummary = append(frontendSummary, fmt.Sprintf("%s：%s；appCode=%s；制品=%s", role, app.AppName, app.AppCode, item.FileName))
+		}
+		if app.AppType == "vue" && (app.VueRole == "main" || app.VueRole == "sub") {
+			key := app.VueRole
+			if app.VueRole == "sub" {
+				key += ":" + app.AppCode
+			}
+			if seenCodes[key] {
+				invalidate(app, "web-main 更新组：同一批次不能包含多个主应用或相同 appCode 的子应用")
+				continue
+			}
+			seenCodes[key] = true
+			artifactPath, err := resolveArtifactPath(sourceDir, item.FileName)
+			if err != nil {
+				invalidate(app, fmt.Sprintf("%s: 定位制品失败: %v", item.FileName, err))
+				continue
+			}
+			_, hash, err := fileSHA256(artifactPath)
+			if err != nil {
+				invalidate(app, fmt.Sprintf("%s: 读取制品失败: %v", item.FileName, err))
+				continue
+			}
+			webArtifacts = append(webArtifacts, model.FrontendArtifact{FileName: item.FileName, Role: app.VueRole, AppCode: app.AppCode, SHA256: hash})
+		}
 		if app.AppType == "vue" && app.VueRole == "main" {
 			webMainItem = &struct {
 				FileName string
@@ -2028,178 +2199,148 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 		}
 	}
 
-	// Handle web-main + sub-apps as a single pipeline.
-	if webMainItem != nil {
-		app, _ := h.appRepo.FindByID(webMainItem.AppID)
-		p := &model.Pipeline{
-			PipelineNo:    h.pipelineRepo.GenerateNo(app.AppName),
-			ApplicationID: app.ID,
-			AppName:       app.AppName,
-			AppType:       app.AppType,
-			GitBranch:     "manual-upload",
-			Status:        "PENDING",
-			TriggerUser:   username,
-			ArtifactName:  webMainItem.FileName,
-			BatchID:       batchID,
-			DeployMode:    pipelineDeployMode,
-			K8sNamespace:  namespace,
-		}
-
-		if err := h.pipelineRepo.Create(p); err != nil {
-			errors = append(errors, fmt.Sprintf("%s: 创建 Pipeline 失败", webMainItem.FileName))
-		} else {
-			pipelineDir := fmt.Sprintf("./workspaces/%s/pipeline-%d/source", app.AppName, p.ID)
-			os.MkdirAll(pipelineDir, 0755)
-			copyOK := true
-
-			if err := copyArtifactFromSource(sourceDir, webMainItem.FileName, filepath.Join(pipelineDir, webMainItem.FileName)); err != nil {
-				h.pipelineRepo.UpdateStatus(p.ID, "FAILED")
-				errors = append(errors, fmt.Sprintf("%s: 复制制品失败: %v", webMainItem.FileName, err))
-				copyOK = false
-			}
-
-			if copyOK {
-				for _, sub := range subAppItems {
-					if err := copyArtifactFromSource(sourceDir, sub.FileName, filepath.Join(pipelineDir, sub.FileName)); err != nil {
-						h.pipelineRepo.UpdateStatus(p.ID, "FAILED")
-						errors = append(errors, fmt.Sprintf("%s: 复制制品失败: %v", sub.FileName, err))
-						copyOK = false
-						break
-					}
-				}
-			}
-
-			if copyOK {
-				refs := []deployRecordRef{{FileName: webMainItem.FileName, AppID: webMainItem.AppID}}
-				for _, sub := range subAppItems {
-					refs = append(refs, deployRecordRef{FileName: sub.FileName, AppID: sub.AppID})
-				}
-				if err := createDeployRecordsForPipeline(batchID, namespace, req.DeployMode, username, *p, refs); err != nil {
-					h.pipelineRepo.UpdateStatus(p.ID, "FAILED")
-					errors = append(errors, fmt.Sprintf("%s: 创建部署记录失败: %v", app.AppName, err))
-				} else {
-					scheduler.DefaultScheduler.Enqueue(p.ID)
-					pipelines = append(pipelines, gin.H{"id": p.ID, "no": p.PipelineNo, "app": app.AppName, "note": "包含子应用"})
-				}
-			}
-		}
-	} else {
-		// No web-main in batch: sub-apps share one web-main image update pipeline.
-		if len(subAppItems) > 0 {
-			firstSub := subAppItems[0]
-			app, _ := h.appRepo.FindByID(firstSub.AppID)
-			p := &model.Pipeline{
-				PipelineNo:    h.pipelineRepo.GenerateNo(app.AppName),
-				ApplicationID: app.ID,
-				AppName:       app.AppName,
-				AppType:       app.AppType,
-				GitBranch:     "manual-upload",
-				Status:        "PENDING",
-				TriggerUser:   username,
-				ArtifactName:  firstSub.FileName,
-				BatchID:       batchID,
-				DeployMode:    pipelineDeployMode,
-				K8sNamespace:  namespace,
-			}
-			if err := h.pipelineRepo.Create(p); err != nil {
-				errors = append(errors, "子应用批次: 创建 Pipeline 失败")
-			} else {
-				pipelineDir := fmt.Sprintf("./workspaces/%s/pipeline-%d/source", app.AppName, p.ID)
-				os.MkdirAll(pipelineDir, 0755)
-				copyOK := true
-				for _, sub := range subAppItems {
-					if err := copyArtifactFromSource(sourceDir, sub.FileName, filepath.Join(pipelineDir, sub.FileName)); err != nil {
-						h.pipelineRepo.UpdateStatus(p.ID, "FAILED")
-						errors = append(errors, fmt.Sprintf("%s: 复制制品失败: %v", sub.FileName, err))
-						copyOK = false
-						break
-					}
-				}
-
-				if copyOK {
-					refs := make([]deployRecordRef, 0, len(subAppItems))
-					for _, sub := range subAppItems {
-						refs = append(refs, deployRecordRef{FileName: sub.FileName, AppID: sub.AppID})
-					}
-					if err := createDeployRecordsForPipeline(batchID, namespace, req.DeployMode, username, *p, refs); err != nil {
-						h.pipelineRepo.UpdateStatus(p.ID, "FAILED")
-						errors = append(errors, fmt.Sprintf("子应用批次: 创建部署记录失败: %v", err))
-					} else {
-						scheduler.DefaultScheduler.Enqueue(p.ID)
-						pipelines = append(pipelines, gin.H{"id": p.ID, "no": p.PipelineNo, "app": app.AppName, "note": fmt.Sprintf("包含 %d 个子应用", len(subAppItems))})
-					}
-				}
-			}
+	// Each failed application is skipped without blocking other targets.
+	if invalidSharedWeb {
+		webMainItem, subAppItems, webArtifacts = nil, nil, nil
+		errors = append(errors, "web-main 更新组校验失败，主应用及本次所选子应用均跳过；其他独立服务继续")
+	}
+	validOthers := otherItems[:0]
+	for _, item := range otherItems {
+		if !invalidApps[item.AppID] {
+			validOthers = append(validOthers, item)
 		}
 	}
+	otherItems = validOthers
+	if webMainItem == nil && len(subAppItems) == 0 && len(otherItems) == 0 {
+		response.OKWithMessage(c, "制品校验失败，未创建更新任务", gin.H{"pipelines": pipelines, "errors": errors, "consumedFiles": []string{}})
+		return
+	}
 
-	// Handle other items (Java, standalone Vue) individually
+	// Consumption is atomic within each deployment target, independent across targets.
+	consumedFiles := []string{}
+	claimGroup := func(files []string) bool {
+		if err := claimArtifactUpdates(batchID, sourceDir, files); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", strings.Join(files, "、"), err))
+			return false
+		}
+		consumedFiles = append(consumedFiles, files...)
+		return true
+	}
+	var sharedFiles []string
+	for _, artifact := range webArtifacts {
+		sharedFiles = append(sharedFiles, artifact.FileName)
+	}
+	if len(sharedFiles) > 0 && !claimGroup(sharedFiles) {
+		webMainItem, subAppItems, webArtifacts = nil, nil, nil
+	}
+	claimedOthers := otherItems[:0]
 	for _, item := range otherItems {
-		app, err := h.appRepo.FindByID(item.AppID)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s: 应用不存在", item.FileName))
-			continue
+		if claimGroup([]string{item.FileName}) {
+			claimedOthers = append(claimedOthers, item)
 		}
+	}
+	otherItems = claimedOthers
+	if len(consumedFiles) == 0 {
+		response.Fail(c, 13004, strings.Join(errors, "；"))
+		return
+	}
 
-		p := &model.Pipeline{
-			PipelineNo:    h.pipelineRepo.GenerateNo(app.AppName),
-			ApplicationID: app.ID,
-			AppName:       app.AppName,
-			AppType:       app.AppType,
-			GitBranch:     "manual-upload",
-			Status:        "PENDING",
-			TriggerUser:   username,
-			ArtifactName:  item.FileName,
-			BatchID:       batchID,
-			DeployMode:    pipelineDeployMode,
-			K8sNamespace:  namespace,
-		}
+	webArtifactsJSON, err := json.Marshal(webArtifacts)
+	if err != nil {
+		response.Fail(c, 13004, "保存前端制品清单失败")
+		return
+	}
 
-		if err := h.pipelineRepo.Create(p); err != nil {
-			errors = append(errors, fmt.Sprintf("%s: 创建 Pipeline 失败", item.FileName))
-			continue
-		}
-
-		pipelineDir := fmt.Sprintf("./workspaces/%s/pipeline-%d/source", app.AppName, p.ID)
-		os.MkdirAll(pipelineDir, 0755)
-
-		if app.AppType == "java" {
-			os.MkdirAll(filepath.Join(pipelineDir, "build", "libs"), 0755)
-			if err := copyArtifactFromSource(sourceDir, item.FileName, filepath.Join(pipelineDir, "build", "libs", item.FileName)); err != nil {
-				h.pipelineRepo.UpdateStatus(p.ID, "FAILED")
-				errors = append(errors, fmt.Sprintf("%s: 复制制品失败: %v", item.FileName, err))
-				continue
-			}
+	type deployTarget struct {
+		app    model.Application
+		refs   []deployRecordRef
+		shared bool
+		note   string
+	}
+	var targets []deployTarget
+	if webMainItem != nil || len(subAppItems) > 0 {
+		target := deployTarget{shared: true}
+		if webMainItem != nil {
+			target.app = appByID[webMainItem.AppID]
+			target.refs = append(target.refs, deployRecordRef{FileName: webMainItem.FileName, AppID: webMainItem.AppID})
 		} else {
-			if err := copyArtifactFromSource(sourceDir, item.FileName, filepath.Join(pipelineDir, item.FileName)); err != nil {
-				h.pipelineRepo.UpdateStatus(p.ID, "FAILED")
-				errors = append(errors, fmt.Sprintf("%s: 复制制品失败: %v", item.FileName, err))
-				continue
-			}
+			target.app = appByID[subAppItems[0].AppID]
 		}
-
-		if err := createDeployRecordsForPipeline(batchID, namespace, req.DeployMode, username, *p, []deployRecordRef{{FileName: item.FileName, AppID: item.AppID}}); err != nil {
-			h.pipelineRepo.UpdateStatus(p.ID, "FAILED")
-			errors = append(errors, fmt.Sprintf("%s: 创建部署记录失败: %v", item.FileName, err))
+		for _, sub := range subAppItems {
+			target.refs = append(target.refs, deployRecordRef{FileName: sub.FileName, AppID: sub.AppID})
+		}
+		target.note = fmt.Sprintf("合并 %d 个制品更新 web-main", len(target.refs))
+		targets = append(targets, target)
+	}
+	for _, item := range otherItems {
+		targets = append(targets, deployTarget{app: appByID[item.AppID], refs: []deployRecordRef{{FileName: item.FileName, AppID: item.AppID}}})
+	}
+	// Use the applications already validated above. Create target records before
+	// touching its workspace, so preparation failures remain in batch results.
+	for _, target := range targets {
+		var fileNames []string
+		for _, ref := range target.refs {
+			fileNames = append(fileNames, ref.FileName)
+		}
+		targetLabel := strings.Join(fileNames, "、")
+		app := target.app
+		p := &model.Pipeline{
+			PipelineNo: h.pipelineRepo.GenerateNo(app.AppName), ApplicationID: app.ID,
+			AppName: app.AppName, AppType: app.AppType, GitBranch: "manual-upload",
+			Status: "PENDING", TriggerUser: username, ArtifactName: target.refs[0].FileName,
+			BatchID: batchID, DeployMode: pipelineDeployMode, K8sNamespace: namespace,
+			FrontendUpdateSummary: strings.Join(frontendSummary, "\n"),
+		}
+		if target.shared {
+			p.FrontendArtifactsJSON = string(webArtifactsJSON)
+		}
+		if err := h.pipelineRepo.Create(p); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: 创建 Pipeline 失败: %v", targetLabel, err))
 			continue
 		}
-
+		if err := createDeployRecordsForPipeline(batchID, namespace, req.DeployMode, username, *p, target.refs, appByID); err != nil {
+			preparationFailed(p, err)
+			errors = append(errors, fmt.Sprintf("%s: 创建部署记录失败: %v", targetLabel, err))
+			continue
+		}
+		pipelineDir := fmt.Sprintf("./workspaces/%s/pipeline-%d/source", app.AppName, p.ID)
+		if app.AppType == "java" {
+			pipelineDir = filepath.Join(pipelineDir, "build", "libs")
+		}
+		copyErr := os.MkdirAll(pipelineDir, 0755)
+		if copyErr != nil {
+			copyErr = fmt.Errorf("创建制品目录 %s 失败: %w", pipelineDir, copyErr)
+		}
+		for _, ref := range target.refs {
+			if copyErr != nil {
+				break
+			}
+			if err := copyArtifactFromSource(sourceDir, ref.FileName, filepath.Join(pipelineDir, ref.FileName)); err != nil {
+				copyErr = fmt.Errorf("复制制品 %s 失败: %w", ref.FileName, err)
+			}
+		}
+		if copyErr != nil {
+			preparationFailed(p, copyErr)
+			errors = append(errors, fmt.Sprintf("%s: %v", targetLabel, copyErr))
+			continue
+		}
 		scheduler.DefaultScheduler.Enqueue(p.ID)
-		pipelines = append(pipelines, gin.H{"id": p.ID, "no": p.PipelineNo, "app": app.AppName})
+		pipelines = append(pipelines, gin.H{"id": p.ID, "no": p.PipelineNo, "app": app.AppName, "note": target.note})
 	}
 
 	response.OKWithMessage(c, fmt.Sprintf("已创建 %d 个构建任务", len(pipelines)), gin.H{
-		"pipelines": pipelines,
-		"errors":    errors,
+		"pipelines":     pipelines,
+		"errors":        errors,
+		"consumedFiles": consumedFiles,
 	})
 }
 
-func createDeployRecordsForPipeline(versionNo, namespace, deployMode, username string, pipeline model.Pipeline, refs []deployRecordRef) error {
+func createDeployRecordsForPipeline(versionNo, namespace, deployMode, username string, pipeline model.Pipeline, refs []deployRecordRef, appByID map[uint]model.Application) error {
 	if len(refs) == 0 {
 		return nil
 	}
 	items := make([]model.ArtifactVersionItem, 0, len(refs))
-	appIDs := make([]uint, 0, len(refs))
+	apps := make([]model.Application, 0, len(refs))
 	seenApps := map[uint]bool{}
 	for _, ref := range refs {
 		var item model.ArtifactVersionItem
@@ -2210,17 +2351,11 @@ func createDeployRecordsForPipeline(versionNo, namespace, deployMode, username s
 		}
 		items = append(items, item)
 		if !seenApps[ref.AppID] {
-			appIDs = append(appIDs, ref.AppID)
+			apps = append(apps, appByID[ref.AppID])
 			seenApps[ref.AppID] = true
 		}
 	}
 
-	var apps []model.Application
-	if len(appIDs) > 0 {
-		if err := repository.DB.Where("id IN ?", appIDs).Find(&apps).Error; err != nil {
-			return err
-		}
-	}
 	return service.CreateArtifactDeployRecords(service.ArtifactDeployRecordInput{
 		VersionNo:    versionNo,
 		Namespace:    namespace,
@@ -3408,7 +3543,7 @@ func resolveBatchSourceDir(sourceDir, batchID string) (string, error) {
 		}
 		dir = filepath.Join(root, batchID)
 		if _, err := os.Stat(dir); err != nil {
-			for _, source := range []string{"local", "download", "artifact"} {
+			for _, source := range []string{"upload", "local", "download", "artifact"} {
 				candidate := filepath.Join(root, source, batchID)
 				if _, statErr := os.Stat(candidate); statErr == nil {
 					dir = candidate
