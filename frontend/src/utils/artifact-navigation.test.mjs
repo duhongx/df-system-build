@@ -66,7 +66,9 @@ assert.match(batchDeploy, /listArtifactVersions/, 'batch deploy should load pers
 assert.match(batchDeploy, /getArtifactVersion/, 'batch deploy should read version items from detail API')
 assert.doesNotMatch(batchDeploy, /listLocalDir|matchArtifacts/, 'batch deploy should not rescan directories or run match side effects')
 assert.match(batchDeploy, /选择更新版本/, 'batch deploy should let users select an update version')
-assert.match(batchDeploy, /卡点部署/, 'deploy mode should be configured on batch deploy page')
+assert.doesNotMatch(batchDeploy, /卡点部署|立即部署|deployMode/, 'image preparation must not expose deployment modes')
+assert.match(batchDeploy, /上传并制作镜像/, 'first step should prepare images')
+assert.match(batchDeploy, /滚动更新/, 'second step should roll prepared images')
 
 assert.match(artifactCollect, /importMode/, 'artifact import should have an explicit import mode')
 assert.match(artifactCollect, /v-if="importMode === 'upload'"/, 'artifact import should only show local upload when upload mode is selected')

@@ -22,7 +22,6 @@ import {
 import { getSettings } from '../api/settings'
 import { useSettingsStore } from '../stores/settings'
 import { buildDeployConfirmation, isDeployableMatch, selectedDeployableFileNames } from '../utils/batch-deploy-selection'
-import type { DeployMode } from '../utils/batch-deploy-flow'
 import type { FileItem } from '../api/server-mgmt'
 
 type UploadEntry = { file: File; path: string }
@@ -42,7 +41,6 @@ const batchId = ref('')
 const sourceType = ref('')
 const sourceDir = ref('')
 const namespace = ref('')
-const deployMode = ref<DeployMode>('immediate')
 const matchResults = ref<MatchResult[]>([])
 const selectedFiles = ref<string[]>([])
 const matchTableRef = ref<TableInstance>()
@@ -259,11 +257,11 @@ async function executeDeploy() {
       try {
         await ElMessageBox.confirm(
           buildDeployConfirmation(deployableResults.value, namespace.value.trim()),
-          '确认更新范围', { customClass: 'deploy-scope-confirm', type: 'warning', confirmButtonText: '确认更新', cancelButtonText: '取消' },
+          '确认镜像制作范围', { customClass: 'deploy-scope-confirm', type: 'warning', confirmButtonText: '制作镜像', cancelButtonText: '取消' },
         )
       } catch { return }
     }
-    const result = await executeBatchDeploy(sourceDir.value, items, namespace.value.trim(), batchId.value, deployMode.value)
+    const result = await executeBatchDeploy(sourceDir.value, items, namespace.value.trim(), batchId.value)
     // Once accepted, inputs stay disabled even if execution fails or is rolled back.
     const submittedFiles = new Set(result.consumedFiles || [])
     matchResults.value.forEach(item => { if (submittedFiles.has(item.fileName)) item.updateUsed = true })
@@ -280,7 +278,7 @@ async function executeDeploy() {
     } else {
       ElMessage.success(`已创建 ${result.pipelines?.length || 0} 个构建任务`)
     }
-    if (result.pipelines?.length) router.push(deployMode.value === 'cutover' ? '/build-queue' : '/release')
+    if (result.pipelines?.length) router.push('/build-queue')
   } finally {
     executing.value = false
   }
@@ -571,22 +569,18 @@ function formatDownloadSize(size?: number) {
     <div class="page-header">
       <div>
         <h4>新增更新任务</h4>
-        <p>制品上传、服务器下载、应用匹配、构建部署在同一页面完成。</p>
+        <p>第一步上传制品并制作、推送镜像；完成后执行第二步滚动更新。</p>
       </div>
       <div class="header-actions">
         <el-button @click="router.push('/artifacts/versions')">更新版本库</el-button>
-        <el-button @click="router.push('/build-queue')">等待卡点</el-button>
+        <el-button @click="router.push('/build-queue')">滚动更新</el-button>
       </div>
     </div>
 
     <section class="step-strip">
-      <div class="step-item active"><strong>1</strong><span>制品来源</span></div>
+      <div class="step-item active"><strong>1</strong><span>上传并制作镜像</span></div>
       <div class="step-line"></div>
-      <div class="step-item" :class="{ active: hasVersion || activeDownloadJob }"><strong>2</strong><span>制品准备</span></div>
-      <div class="step-line"></div>
-      <div class="step-item" :class="{ active: hasVersion }"><strong>3</strong><span>应用匹配</span></div>
-      <div class="step-line"></div>
-      <div class="step-item" :class="{ active: deployableResults.length > 0 }"><strong>4</strong><span>构建与部署</span></div>
+      <div class="step-item"><strong>2</strong><span>滚动更新</span></div>
     </section>
 
     <section class="workflow-section">
@@ -815,20 +809,13 @@ function formatDownloadSize(size?: number) {
 
     <section class="action-bar">
       <div class="deploy-options">
-        <strong>构建与部署</strong>
+        <strong>第一步：上传并制作镜像</strong>
         <el-input v-model="namespace" placeholder="Namespace" class="namespace-input" />
-        <el-segmented
-          v-model="deployMode"
-          :options="[
-            { label: '立即部署', value: 'immediate' },
-            { label: '卡点部署', value: 'cutover' },
-          ]"
-        />
         <span>每份制品仅允许更新一次；再次更新请重新上传。</span>
-        <span>{{ deployMode === 'cutover' ? '先构建镜像，维护窗口确认后部署；前端线上版本已变化时需重新构建。' : '镜像构建成功后自动更新 Deployment。' }}</span>
+        <span>镜像制作并推送完成后，前往第二步执行滚动更新。</span>
       </div>
       <el-button type="primary" :disabled="deployableResults.length === 0" :loading="executing" @click="executeDeploy">
-        {{ matchResults.length > 0 && matchResults.every(item => item.updateUsed || !item.matched || !item.valid || item.skipped) ? '无可更新制品' : `更新 ${deployableResults.length} 个制品` }}
+        {{ matchResults.length > 0 && matchResults.every(item => item.updateUsed || !item.matched || !item.valid || item.skipped) ? '无可用制品' : `制作镜像（${deployableResults.length} 个制品）` }}
       </el-button>
     </section>
   </div>

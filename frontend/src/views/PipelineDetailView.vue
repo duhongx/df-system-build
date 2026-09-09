@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { getPipeline, getStageLogs, streamLogsUrl, type Pipeline, type PipelineStage, type StageLog } from '../api/pipeline'
+import { ElMessage } from 'element-plus'
+import { rolloutPipeline, getPipeline, getStageLogs, streamLogsUrl, type Pipeline, type PipelineStage, type StageLog } from '../api/pipeline'
 import { hasCompletedDeploymentError } from '../utils/pipeline-result'
 import { formatTime } from '../utils/time'
 
@@ -9,6 +10,7 @@ const route = useRoute()
 const task = ref<Pipeline | null>(null)
 const loading = ref(true)
 const stateError = ref('')
+const rolling = ref(false)
 const activeStageId = ref<number | null>(null)
 const logLines = ref<StageLog[]>([])
 const logLoading = ref(false)
@@ -46,6 +48,7 @@ onUnmounted(() => {
 })
 
 function subscribeToLogs() {
+  eventSource?.close()
   eventSource = new EventSource(streamLogsUrl(pipelineId))
   eventSource.addEventListener('stage_log', (e: MessageEvent) => {
     const entry = JSON.parse(e.data) as StageLog
@@ -63,6 +66,7 @@ function subscribeToLogs() {
 }
 
 function startPolling() {
+  if (pollTimer) clearInterval(pollTimer)
   pollTimer = setInterval(async () => {
     await refreshPipeline()
     // Stop polling when pipeline is no longer running
@@ -125,6 +129,18 @@ async function selectStage(stage: PipelineStage) {
   }
 }
 
+async function handleRollout() {
+  if (rolling.value || task.value?.status !== 'IMAGE_READY') return
+  rolling.value = true
+  try {
+    await rolloutPipeline(pipelineId)
+    ElMessage.success('滚动更新已提交')
+    await refreshPipeline()
+    subscribeToLogs()
+    startPolling()
+  } finally { rolling.value = false }
+}
+
 function stageStatusColor(status: string) {
   const map: Record<string, string> = {
     SUCCESS: '#67c23a', FAILED: '#f56c6c', RUNNING: '#409eff',
@@ -136,7 +152,7 @@ function stageStatusColor(status: string) {
 function statusType(status: string) {
   const map: Record<string, string> = {
     SUCCESS: 'success', FAILED: 'danger', RUNNING: 'primary',
-    PENDING: 'info', CANCELED: 'warning',
+    PENDING: 'info', CANCELED: 'warning', IMAGE_READY: 'success', DEPLOYING: 'primary',
   }
   return map[status] || 'info'
 }
@@ -144,7 +160,7 @@ function statusType(status: string) {
 function statusLabel(status: string) {
   const map: Record<string, string> = {
     SUCCESS: '成功', FAILED: '失败', RUNNING: '运行中',
-    PENDING: '排队中', CANCELED: '已取消',
+    PENDING: '排队中', CANCELED: '已取消', IMAGE_READY: '镜像制作完成', DEPLOYING: '滚动更新排队中',
   }
   return map[status] || status
 }
@@ -170,12 +186,14 @@ const activeStage = computed(() => {
           <span class="info-branch">{{ task.gitBranch }}</span>
         </div>
         <div class="info-bar-right">
+          <el-button v-if="task.status === 'IMAGE_READY'" type="primary" :loading="rolling" @click="handleRollout">第二步：滚动更新</el-button>
           <span class="info-meta">触发人: {{ task.triggerUser }}</span>
           <span class="info-meta">耗时: {{ task.durationSeconds ? task.durationSeconds + 's' : '-' }}</span>
           <span class="info-meta">{{ formatTime(task.startTime) }}</span>
         </div>
       </div>
 
+      <el-alert v-if="task.status === 'IMAGE_READY'" title="第一步完成：镜像已制作并推送，可执行滚动更新。" :description="task.imageName" type="success" :closable="false" style="margin-bottom: 12px" />
       <el-alert v-if="stateError" title="结果记录保存失败" :description="stateError" type="error" show-icon :closable="false" style="margin-bottom: 12px" />
       <el-alert
         v-if="task.errorMessage"

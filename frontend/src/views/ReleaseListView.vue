@@ -2,7 +2,7 @@
 import { hasCompletedDeploymentError } from '../utils/pipeline-result'
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { listPipelines, cancelPipeline, deployPipeline, type Pipeline } from '../api/pipeline'
+import { listPipelines, cancelPipeline, rolloutPipeline, type Pipeline } from '../api/pipeline'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const route = useRoute()
@@ -64,7 +64,7 @@ function statusType(status: string) {
 function statusLabel(status: string) {
   const map: Record<string, string> = {
     SUCCESS: '成功', FAILED: '失败', RUNNING: '运行中',
-    PENDING: '排队中', CANCELED: '已取消', IMAGE_READY: '等待部署',
+    PENDING: '排队中', CANCELED: '已取消', IMAGE_READY: '镜像制作完成', DEPLOYING: '滚动更新排队中',
   }
   return map[status] || status
 }
@@ -109,10 +109,9 @@ async function handleDelete(p: Pipeline) {
 }
 
 async function handleDeploy(p: Pipeline) {
-  await ElMessageBox.confirm(`确定开始部署 "${p.pipelineNo}" 吗？`, '确认部署', { type: 'info' })
   try {
-    await deployPipeline(p.id)
-    ElMessage.success('部署已触发')
+    await rolloutPipeline(p.id)
+    ElMessage.success('滚动更新已提交')
     await load()
   } catch (e) {
     // handled
@@ -154,7 +153,7 @@ function handleSizeChange(newSize: number) {
           <el-option label="失败" value="FAILED" />
           <el-option label="排队中" value="PENDING" />
           <el-option label="已取消" value="CANCELED" />
-          <el-option label="等待部署" value="IMAGE_READY" />
+          <el-option label="镜像制作完成" value="IMAGE_READY" />
         </el-select>
         <el-select v-model="filterType" placeholder="应用类型" clearable style="width: 110px;" @change="load">
           <el-option label="Java" value="java" />
@@ -188,7 +187,7 @@ function handleSizeChange(newSize: number) {
         </el-table-column>
         <el-table-column label="操作" width="180" fixed="right" align="center">
           <template #default="{ row }">
-            <el-button v-if="row.status === 'IMAGE_READY'" type="warning" link size="small" @click.stop="handleDeploy(row)">开始部署</el-button>
+            <el-button v-if="row.status === 'IMAGE_READY'" type="warning" link size="small" @click.stop="handleDeploy(row)">滚动更新</el-button>
             <el-button type="primary" link size="small" @click.stop="goToDetail(row)">详情</el-button>
             <el-button type="danger" link size="small" @click.stop="handleDelete(row)">删除</el-button>
           </template>

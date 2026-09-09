@@ -32,7 +32,7 @@ func (h *PipelineHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("", h.List)
 		g.GET("/:id", h.Get)
 		g.POST("/:id/cancel", h.Cancel)
-		g.POST("/:id/deploy", h.Deploy)
+		g.POST("/:id/rollout", h.Rollout)
 		g.GET("/:id/stages/:stageId/logs", h.GetStageLogs)
 	}
 
@@ -113,33 +113,17 @@ func (h *PipelineHandler) CancelQueued(c *gin.Context) {
 	response.OKWithMessage(c, "已取消", nil)
 }
 
-// Deploy resumes a paused pipeline (IMAGE_READY → K8S_DEPLOY)
-func (h *PipelineHandler) Deploy(c *gin.Context) {
-	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	p, err := h.pipelineRepo.FindByID(uint(id))
+// Rollout submits the second step without rebuilding or pushing an image.
+func (h *PipelineHandler) Rollout(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		response.Fail(c, 10306, "更新任务编号无效")
+		return
+	}
+	p, err := scheduler.DefaultScheduler.StartRollout(uint(id))
 	if err != nil {
-		response.Fail(c, 10306, "流水线不存在")
+		response.Fail(c, 10306, err.Error())
 		return
 	}
-
-	if p.Status != "IMAGE_READY" {
-		response.Fail(c, 10306, "只有 IMAGE_READY 状态的流水线可以触发部署")
-		return
-	}
-
-	// Claim confirmation atomically; duplicate clicks must not enqueue twice.
-	confirmed, err := h.pipelineRepo.ConfirmDeploy(p.ID)
-	if err != nil {
-		response.Fail(c, 10306, "保存部署状态失败")
-		return
-	}
-	if !confirmed {
-		response.Fail(c, 10306, "该流水线已确认或状态已变化，请刷新")
-		return
-	}
-
-	// Re-enqueue to scheduler for K8S_DEPLOY stage execution
-	scheduler.DefaultScheduler.EnqueueDeployment(p.ID)
-
-	response.OKWithMessage(c, "部署已触发", nil)
+	response.OKWithMessage(c, "滚动更新已提交", p)
 }

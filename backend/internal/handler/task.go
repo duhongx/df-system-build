@@ -103,8 +103,7 @@ func (h *TaskHandler) Delete(c *gin.Context) {
 }
 
 type executeReq struct {
-	GitBranch  string `json:"gitBranch" binding:"required"`
-	AutoDeploy *bool  `json:"autoDeploy"` // nil=使用全局默认, true=自动部署, false=手动确认
+	GitBranch string `json:"gitBranch" binding:"required"`
 }
 
 func (h *TaskHandler) Execute(c *gin.Context) {
@@ -115,14 +114,8 @@ func (h *TaskHandler) Execute(c *gin.Context) {
 		return
 	}
 
-	// Default to auto deploy (no approval) unless explicitly set to false
-	autoDeploy := true
-	if req.AutoDeploy != nil {
-		autoDeploy = *req.AutoDeploy
-	}
-
 	username := middleware.GetCurrentUsername(c)
-	p, err := scheduler.CreateAndEnqueue(uint(id), req.GitBranch, username, autoDeploy)
+	p, err := scheduler.CreateAndEnqueue(uint(id), req.GitBranch, username)
 	if err != nil {
 		response.Fail(c, 10206, err.Error())
 		return
@@ -132,9 +125,8 @@ func (h *TaskHandler) Execute(c *gin.Context) {
 }
 
 type batchExecuteReq struct {
-	TaskIDs    []uint `json:"taskIds" binding:"required"`
-	GitBranch  string `json:"gitBranch" binding:"required"`
-	AutoDeploy *bool  `json:"autoDeploy"` // nil=使用全局默认, true=自动部署, false=手动确认
+	TaskIDs   []uint `json:"taskIds" binding:"required"`
+	GitBranch string `json:"gitBranch" binding:"required"`
 }
 
 func (h *TaskHandler) BatchExecute(c *gin.Context) {
@@ -149,15 +141,10 @@ func (h *TaskHandler) BatchExecute(c *gin.Context) {
 		return
 	}
 
-	autoDeploy := true
-	if req.AutoDeploy != nil {
-		autoDeploy = *req.AutoDeploy
-	}
-
 	username := middleware.GetCurrentUsername(c)
 	var pipelines []interface{}
 	for _, taskID := range req.TaskIDs {
-		p, err := scheduler.CreateAndEnqueue(taskID, req.GitBranch, username, autoDeploy)
+		p, err := scheduler.CreateAndEnqueue(taskID, req.GitBranch, username)
 		if err != nil {
 			continue
 		}

@@ -7,10 +7,10 @@
 | 模块 | 当前实现 | 主要代码依据 |
 |---|---|---|
 | 应用与编译配置 | Java／Vue 应用 CRUD、查询与分页；主／子／独立 Vue 角色；Git、制品命名、环境标签、NodePort、Ingress、Nginx 配置；Docker／本机编译模式、执行器、模板及配置项管理 | [应用模型](backend/internal/model/application.go)、[编译配置接口](backend/internal/handler/build_config.go) |
-| 流水线 | Git 拉取、Docker 编译、Vue 打包、制品上传、镜像构建／推送、K8s 部署与通知；仅上传、直接部署、上传并部署、等待确认部署和直接制品部署 | [阶段解析](backend/internal/pipeline/stage_resolver.go)、[执行引擎](backend/internal/pipeline/engine.go) |
+| 流水线 | Git 拉取、Docker 编译、Vue 打包、制品上传、镜像构建／推送、K8s 部署与通知；保留仅上传能力；镜像更新统一先制作并推送，再单独滚动更新 | [阶段解析](backend/internal/pipeline/stage_resolver.go)、[执行引擎](backend/internal/pipeline/engine.go) |
 | 调度与日志 | 单次／批量任务、FIFO 队列、并发槽位、取消、超时、启动恢复、构建历史、阶段日志与 SSE、日志保留清理 | [调度器](backend/internal/scheduler/scheduler.go)、[日志接口](backend/internal/handler/sse.go) |
 | 制品与版本 | 上传、本地／远程目录导入、远程下载进度及取消；文件识别与应用匹配；最新制品库、版本详情、替换／重下载／删除、工作区版本同步 | [制品与批量更新接口](backend/internal/handler/batch_deploy.go)、[版本模型](backend/internal/model/artifact_version.go) |
-| 批量更新 | 立即更新或先构建镜像等待卡点部署；同批 Vue 主／子应用合并到 web-main 流水线；记录更新前后镜像、业务版本和批次；按批次回滚并校验业务版本 | [批量更新页面](frontend/src/views/BatchDeployView.vue)、[回滚服务](backend/internal/service/artifact_deploy_rollback.go) |
+| 批量更新 | 先上传并制作镜像，再单独滚动更新；同批 Vue 主／子应用合并到 web-main 流水线；记录更新前后镜像、业务版本和批次；后台批次回滚，业务版本仅采集展示 | [批量更新页面](frontend/src/views/BatchDeployView.vue)、[回滚服务](backend/internal/service/artifact_deploy_rollback.go) |
 | Kubernetes 运维 | 概览、命名空间、Nodes、Deployments、Pods、Services、ConfigMaps、Ingress；Watch、日志、指标与 YAML；重启、扩缩容、镜像／资源调整、ConfigMap 编辑、Service 端口修改／删除、运行版本同步 | [K8s 接口](backend/internal/handler/kubernetes.go)、[Watch](backend/internal/handler/k8s_watch.go) |
 | 服务器运维 | 服务器 CRUD、连接测试与记录；WebSSH；SFTP 浏览、上传、下载、新建目录、重命名、删除；node_exporter CPU、内存、负载、磁盘、网络等指标 | [服务器](backend/internal/handler/server_mgmt.go)、[终端](backend/internal/handler/webssh.go)、[文件](backend/internal/handler/websftp.go)、[监控](backend/internal/handler/server_monitor.go) |
 | PostgreSQL | 配置实例状态及主从信息；SQL 解析、风险分类、schema 补全、编辑、单句／文件／批次执行、取消、跳过、历史、白名单与不可执行 SQL 导出 | [业务服务](backend/internal/service/postgresql_service.go)、[风险分析](backend/internal/service/sql_risk_analyzer.go) |
@@ -27,11 +27,11 @@ SQL 文件可以随制品导入，但不会进入微服务镜像部署；数据�
 | 邮件验证码 | 有内存存储、过期与校验逻辑；验证码仅写后端日志，未接入 SMTP，接口返回发送成功不代表邮件已送达 | [认证服务](backend/internal/service/auth_service.go) |
 | 页面修改密码 | 布局页已调用真实接口，但请求漏传后端必填的 `confirmPassword`，会被参数校验拒绝 | [页面请求](frontend/src/layouts/DefaultLayout.vue)、[请求结构](backend/internal/service/auth_service.go) |
 | 首次登录改密 | 后端存在 `mustChangePassword` 字段；前端登录和路由未强制处理，不能承诺首次改密流程完成 | [用户模型](backend/internal/model/user.go)、[登录页](frontend/src/views/LoginView.vue)、[路由](frontend/src/router/index.ts) |
-| 认证与权限 | 退出清除客户端 Token，后端未撤销已签发 JWT；未提供 Token 刷新接口、完整角色／项目权限或多级审批。等待确认部署只是执行暂停点 | [认证接口](backend/internal/handler/auth.go)、[鉴权](backend/internal/middleware/auth.go) |
+| 认证与权限 | 退出清除客户端 Token，后端未撤销已签发 JWT；未提供 Token 刷新接口、完整角色／项目权限或多级审批 | [认证接口](backend/internal/handler/auth.go)、[鉴权](backend/internal/middleware/auth.go) |
 | 远程同步／打包 | SSH 后端接口仍已注册，工作台快捷链接仍存在，但对应前端路由和页面缺失 | [远程接口](backend/internal/handler/remote.go)、[工作台](frontend/src/views/DashboardView.vue)、[路由](frontend/src/router/index.ts) |
 | 监控历史 | 当前直接读取 node_exporter 并刷新即时指标，未接入 Prometheus 历史区间查询和完整时间序列页面 | [监控接口](backend/internal/handler/server_monitor.go)、[页面](frontend/src/views/ServerMonitorView.vue) |
 | 统计文案 | 工作台核心数据来自接口；部分比较文案和登录页展示数字是静态值，不能当作实际运营统计 | [工作台](frontend/src/views/DashboardView.vue)、[登录页](frontend/src/views/LoginView.vue) |
-| 微前端更新 | 单实例按 namespace 串行完成 web-main 构建、推送与滚动部署；清单固定、失败只终止当前任务且其他目标继续、卡点基线校验；部署失败不自动回滚，人工整批回滚用于更新后的业务异常 | [更新流程](docs/vue-app-build-flow.md) |
+| 微前端更新 | 单实例按 namespace 串行完成 web-main 构建、推送与滚动部署；清单固定、失败只终止当前任务且其他目标继续、滚动更新前基线校验；部署失败不自动回滚，人工整批回滚用于更新后的业务异常 | [更新流程](docs/vue-app-build-flow.md) |
 | 独立前端更新 | web-cdr／web-opm 仍走标准镜像分支，已统一根目录／dist ZIP 展平和入口检查；独立应用和共享前端均以指定镜像滚动完成为准，不再要求上线目录全量校验 | [完整流程及故障处理](docs/vue-app-build-flow.md) |
 | 实例与集群配置 | 当前通过全局设置连接目标 PostgreSQL 和 Kubernetes，未实现任意多实例／多集群资产切换体系 | [环境页面](frontend/src/views/SettingsEnvironmentView.vue) |
 | 发布产物 | `make build` 不重新生成前端，必须先复制 `frontend/dist` 到 `backend/internal/web/dist`；运行配置与离线资源需要另行提供，仓库没有 Compose 配置 | [构建步骤](README.md#构建单二进制版本) |
@@ -49,7 +49,7 @@ SQL 文件可以随制品导入，但不会进入微服务镜像部署；数据�
 ### 前端更新改造验证（2026-09-09）
 
 - 已引入制品清单和 SHA-256、主／子应用按目录替换、未上传子应用保留、Pod 导出失败终止、上线文件内容校验。
-- 修复卡点确认重新构建；使用明确恢复标识复用阶段，补充重复确认及构建 worker 退出前确认的回归测试。
+- 修复第二步滚动更新时重复构建；使用明确恢复标识复用阶段，补充重复确认及构建 worker 退出前确认的回归测试。
 - 后端 `go test ./...` 通过（未配置测试数据库的集成用例跳过）；最后的调度调整后，pipeline、scheduler、handler、repository、k8s 相关包复测通过。
 - 临时独立 PostgreSQL 18 验证通过：`TestSchedulerConfirmationKeepsExistingStages`、`TestExecuteRejectsPartialFrontendSelectionBeforeCreatingPipelines`。测试数据库仅监听临时 Unix socket，完成后已停止，未使用业务数据库。
 - 前端 `npm run build` 通过；`git diff --check` 通过。
@@ -95,3 +95,11 @@ SQL 文件可以随制品导入，但不会进入微服务镜像部署；数据�
 - Java 脚本模板缺失、内容为空及写入失败明确报错，不再误报生成成功。应用查询失败只跳过该项，其他可识别目标继续。
 - 流水线最终状态、部署记录及批次汇总保存错误明确返回或报告；当前订阅的流水线详情页展示 state_error，停止普通完成通知，不自动回滚或重新部署。
 - 后端 go test ./... 通过（未配置数据库的集成用例跳过），前端 npm run build 通过。另用临时 PostgreSQL 18 独立数据库运行 11 项定向测试通过：版本信息非阻断、回滚采集、汇总写入失败、脚本准备错误、唯一标签构建推送、最终状态保存失败提示、混合批次继续、共享前端输入及部署进度回归。Docker 流程使用模拟 HTTP 接口，确认只构建一个标签并推送一次；没有操作真实 Docker／镜像仓库／Kubernetes。
+
+### 镜像制作与滚动更新拆分（2026-09-09）
+
+- 当前更新统一为两个独立操作：上传并制作、推送镜像；使用已保存镜像滚动更新。删除部署模式选择和源码任务自动／手动部署开关。
+- 镜像推送完成即结束第一步，记录状态 IMAGE_READY（页面：镜像制作完成）和耗时。第二步复用已有成功阶段，不重新制作或推送镜像。
+- 提供单目标、批次滚动更新接口及页面入口；部分目标制作失败不隐藏已完成镜像，单目标提交失败不阻断其他目标，共享 web-main 只提交一次。
+- 已有镜像制作记录保留，历史模式按同样的两步流程执行；制作新镜像不自动取消其他已制作镜像。
+- 验证通过：后端 `go test ./...`（未提供数据库时集成用例跳过）、前端生产构建、4 项前端检查；另用临时 PostgreSQL 18 独立数据库完成 8 项集成回归，包括两步边界、失败推送、混合批次、阶段复用、任务创建、一次性制品和共享前端。阶段边界测试使用模拟执行器，未执行真实 Docker／Kubernetes 部署。

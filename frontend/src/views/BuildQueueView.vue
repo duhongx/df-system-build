@@ -2,9 +2,10 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getBuildQueue, cancelQueued, deployPipeline, type Pipeline } from '../api/pipeline'
+import { getBuildQueue, cancelQueued, type Pipeline } from '../api/pipeline'
 import {
   getArtifactDeployBatch,
+  rolloutArtifactDeployBatch,
   listArtifactDeployBatches,
   type ArtifactDeployBatch,
   type ArtifactDeployRecord,
@@ -20,13 +21,14 @@ const selectedRecords = ref<ArtifactDeployRecord[]>([])
 const batchDrawerVisible = ref(false)
 const loading = ref(true)
 let refreshTimer: any = null
-const imageReadyBatches = computed(() => deployBatches.value.filter(batch => batch.deployMode === 'cutover' && batch.status === 'image_ready'))
+const imageReadyBatches = computed(() => deployBatches.value)
+const rollingBatch = ref<string | null>(null)
 
 async function load() {
   try {
     const [queueData, batchData] = await Promise.all([
       getBuildQueue(),
-      listArtifactDeployBatches('image_ready'),
+      listArtifactDeployBatches(undefined, true),
     ])
     runningTasks.value = queueData.running || []
     queuedTasks.value = queueData.pending || []
@@ -92,22 +94,25 @@ async function showBatchDetail(batch: ArtifactDeployBatch) {
 }
 
 async function handleDeployBatch(batch: ArtifactDeployBatch) {
-  await ElMessageBox.confirm(`确定开始部署版本 "${batch.versionNo}" 吗？将触发该版本中已构建镜像的 Deployment 更新。`, '确认批次部署', { type: 'info' })
+  if (rollingBatch.value) return
+  rollingBatch.value = batch.deployBatchNo
   try {
-    const result = await getArtifactDeployBatch(batch.deployBatchNo)
-    const pipelineIds = Array.from(new Set((result.records || []).map(record => record.pipelineId).filter(Boolean)))
-    for (const pipelineId of pipelineIds) {
-      await deployPipeline(pipelineId)
+    const result = await rolloutArtifactDeployBatch(batch.deployBatchNo)
+    if (result.errors.length) {
+      await ElMessageBox.alert(result.errors.join('\n'), `已提交 ${result.pipelines.length} 个滚动更新任务，部分目标未提交`, { type: 'warning' })
+    } else if (result.pipelines.length) {
+      ElMessage.success(`已提交 ${result.pipelines.length} 个滚动更新任务`)
+    } else {
+      ElMessage.info('该批次没有新的镜像可执行滚动更新，请刷新查看结果')
     }
-    ElMessage.success(`已触发 ${pipelineIds.length} 个部署任务`)
     await load()
-  } catch (e) {
-    // handled
+  } finally {
+    rollingBatch.value = null
   }
 }
 
 function batchStatusText(status: string) {
-  if (status === 'image_ready') return '镜像已就绪'
+  if (status === 'image_ready') return '镜像制作完成'
   if (status === 'deployed') return '已部署'
   if (status === 'failed') return '失败'
   return status || '-'
@@ -179,15 +184,16 @@ function batchStatusText(status: string) {
         <div class="section-header">
           <span class="section-title">
             <el-icon color="#e6a23c"><WarningFilled /></el-icon>
-            等待部署批次 ({{ imageReadyBatches.length }})
+            第二步：滚动更新 ({{ imageReadyBatches.length }})
           </span>
         </div>
       </template>
 
+      <el-alert title="仅滚动更新已制作完成的镜像。制作失败的目标保留错误，其他目标继续；多个子应用共用一个 web-main 更新任务。" type="info" :closable="false" />
       <el-table :data="imageReadyBatches" v-if="imageReadyBatches.length">
         <el-table-column prop="versionNo" label="版本号" min-width="220" show-overflow-tooltip />
         <el-table-column prop="namespace" label="命名空间" width="110" />
-        <el-table-column prop="totalCount" label="应用数" width="90" />
+        <el-table-column prop="totalCount" label="制品数" width="90" />
         <el-table-column label="镜像状态" width="120">
           <template #default="{ row }">
             <el-tag type="success" size="small">{{ batchStatusText(row.status) }}</el-tag>
@@ -200,18 +206,18 @@ function batchStatusText(status: string) {
         <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="showBatchDetail(row)">详情</el-button>
-            <el-button type="warning" link size="small" @click="handleDeployBatch(row)">开始部署</el-button>
+            <el-button type="warning" link size="small" @click="handleDeployBatch(row)" :loading="rollingBatch === row.deployBatchNo">滚动更新</el-button>
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-else description="暂无等待卡点部署的批次" :image-size="60" />
+      <el-empty v-else description="暂无已制作镜像可执行滚动更新的批次" :image-size="60" />
     </el-card>
 
-    <el-drawer v-model="batchDrawerVisible" size="56%" title="等待部署批次详情">
+    <el-drawer v-model="batchDrawerVisible" size="56%" title="第二步：滚动更新详情">
       <template v-if="selectedBatch">
         <div class="batch-summary">
           <div><span>版本号</span>{{ selectedBatch.versionNo }}</div>
-          <div><span>应用数</span>{{ selectedBatch.totalCount }}</div>
+          <div><span>制品数</span>{{ selectedBatch.totalCount }}</div>
           <div><span>状态</span>{{ batchStatusText(selectedBatch.status) }}</div>
           <div><span>创建人</span>{{ selectedBatch.triggerUser || '-' }}</div>
         </div>
@@ -222,7 +228,7 @@ function batchStatusText(status: string) {
           <el-table-column prop="afterImage" label="新镜像" min-width="220" show-overflow-tooltip />
           <el-table-column label="状态" width="110">
             <template #default="{ row }">
-              <el-tag type="warning" size="small">{{ row.status === 'image_ready' ? '等待部署' : row.status }}</el-tag>
+              <el-tag type="warning" size="small">{{ row.status === 'image_ready' ? '镜像制作完成' : row.status }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="100">

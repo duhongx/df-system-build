@@ -25,7 +25,7 @@ const buildConfigs = ref<BuildConfig[]>([])
 // Execute dialog
 const executeDialogVisible = ref(false)
 const executeMode = ref<'single' | 'batch'>('single')
-const executeForm = ref({ gitBranch: '', autoDeploy: true })
+const executeForm = ref({ gitBranch: '' })
 const currentTask = ref<Task | null>(null)
 
 // Edit dialog
@@ -36,7 +36,7 @@ const editForm = ref({
   applicationId: null as number | null,
   gitBranch: '',
   buildConfigId: null as number | null,
-  deployMode: 'deploy',
+  deployMode: 'build_image',
   k8sNamespace: '',
 })
 
@@ -47,7 +47,7 @@ const createForm = ref({
   applicationId: null as number | null,
   gitBranch: '',
   buildConfigId: null as number | null,
-  deployMode: 'deploy',
+  deployMode: 'build_image',
   k8sNamespace: '',
 })
 
@@ -98,6 +98,8 @@ function handleSelectionChange(rows: Task[]) {
 }
 
 function lastStatusTag(status: string | undefined) {
+  if (status === 'IMAGE_READY') return { type: 'success', text: '镜像制作完成' }
+  if (status === 'DEPLOYING') return { type: 'primary', text: '滚动更新排队中' }
   if (!status) return { type: 'info' as any, text: '-' }
   if (status === 'SUCCESS') return { type: 'success' as any, text: '成功' }
   if (status === 'FAILED') return { type: 'danger' as any, text: '失败' }
@@ -115,7 +117,7 @@ function formatDuration(seconds: number | null | undefined) {
 function handleExecute(task: Task) {
   currentTask.value = task
   executeMode.value = 'single'
-  executeForm.value = { gitBranch: task.gitBranch || '', autoDeploy: true }
+  executeForm.value = { gitBranch: task.gitBranch || '' }
   executeDialogVisible.value = true
 }
 
@@ -126,7 +128,7 @@ function handleBatchExecute() {
   }
   currentTask.value = null
   executeMode.value = 'batch'
-  executeForm.value = { gitBranch: '', autoDeploy: true }
+  executeForm.value = { gitBranch: '' }
   executeDialogVisible.value = true
 }
 
@@ -144,7 +146,6 @@ async function handleSubmitExecute() {
       await batchExecuteTasks({
         taskIds: selectedTasks.value.map(t => t.id),
         gitBranch: executeForm.value.gitBranch,
-        autoDeploy: executeForm.value.autoDeploy,
       })
       ElMessage.success(`已提交 ${selectedTasks.value.length} 个任务`)
     }
@@ -162,7 +163,7 @@ function handleCreate() {
     applicationId: null,
     gitBranch: '',
     buildConfigId: null,
-    deployMode: 'deploy',
+    deployMode: 'build_image',
     k8sNamespace: '',
   }
   createDialogVisible.value = true
@@ -195,7 +196,7 @@ function handleEdit(task: Task) {
     applicationId: task.applicationId,
     gitBranch: task.gitBranch,
     buildConfigId: task.buildConfigId,
-    deployMode: (task as any).deployMode || 'deploy',
+    deployMode: task.deployMode && !['deploy', 'deploy_with_approval'].includes(task.deployMode) ? task.deployMode : 'build_image',
     k8sNamespace: (task as any).k8sNamespace || '',
   }
   editDialogVisible.value = true
@@ -346,15 +347,7 @@ function handleHistory(task: Task) {
         <el-form-item label="Git 分支" required>
           <el-input v-model="executeForm.gitBranch" placeholder="如 release_2.15.3_250515" />
         </el-form-item>
-        <el-form-item label="更新方式">
-          <el-radio-group v-model="executeForm.autoDeploy">
-            <el-radio :value="true">自动执行</el-radio>
-            <el-radio :value="false">手动触发</el-radio>
-          </el-radio-group>
-          <div style="font-size: 12px; color: #909399; margin-top: 4px;">
-            自动执行: 镜像推送后直接更新 K8s；手动触发: 镜像就绪后等待确认再更新
-          </div>
-        </el-form-item>
+        <el-alert title="先编译并制作、推送镜像，完成后单独执行滚动更新。" type="info" :closable="false" />
       </el-form>
       <template #footer>
         <el-button @click="executeDialogVisible = false">取消</el-button>
@@ -381,11 +374,7 @@ function handleHistory(task: Task) {
             <el-option v-for="bc in buildConfigs" :key="bc.id" :label="`${bc.name} (${bc.buildMode})`" :value="bc.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="部署模式">
-          <el-radio-group v-model="createForm.deployMode">
-            <el-radio value="deploy">构建镜像 + K8s 部署</el-radio>
-          </el-radio-group>
-        </el-form-item>
+
         <el-form-item label="K8s 命名空间">
           <el-input v-model="createForm.k8sNamespace" :placeholder="`留空使用全局默认：${settingsStore.k8sNamespace}`" />
           <div class="form-hint">留空则使用系统设置中的全局默认命名空间</div>
@@ -416,11 +405,7 @@ function handleHistory(task: Task) {
             <el-option v-for="bc in buildConfigs" :key="bc.id" :label="`${bc.name} (${bc.buildMode})`" :value="bc.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="部署模式">
-          <el-radio-group v-model="editForm.deployMode">
-            <el-radio value="deploy">构建镜像 + K8s 部署</el-radio>
-          </el-radio-group>
-        </el-form-item>
+
         <el-form-item label="K8s 命名空间">
           <el-input v-model="editForm.k8sNamespace" :placeholder="`留空使用全局默认：${settingsStore.k8sNamespace}`" />
           <div class="form-hint">留空则使用系统设置中的全局默认命名空间</div>

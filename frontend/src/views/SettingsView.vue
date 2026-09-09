@@ -146,12 +146,12 @@ onMounted(() => {
             </el-select>
             <span class="form-hint">当前部署环境，影响应用过滤</span>
           </el-form-item>
-          <el-form-item label="部署模式">
+          <el-form-item label="镜像准备方式">
             <el-radio-group v-model="generalForm.deploy_mode">
-              <el-radio value="deploy">编译 + 部署</el-radio>
-              <el-radio value="upload_deploy">上传制品 + 部署</el-radio>
+              <el-radio value="deploy">编译并制作镜像</el-radio>
+              <el-radio value="upload_deploy">上传制品并制作镜像</el-radio>
             </el-radio-group>
-            <div class="form-hint-block">编译+部署: 源码编译 → 构建镜像 → K8s 部署；上传制品+部署: 上传 jar/zip → 构建镜像 → K8s 部署</div>
+            <div class="form-hint-block">镜像制作与滚动更新分为两步；制作并推送镜像完成后，单独执行滚动更新。</div>
           </el-form-item>
           <el-form-item label="制品上传路径" v-if="generalForm.deploy_mode === 'upload_deploy'">
             <el-input v-model="generalForm.default_upload_path" placeholder="/root/DFHIS/his-release" />

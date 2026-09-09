@@ -89,17 +89,23 @@ func (r *PipelineRepo) UpdateStatus(id uint, status string) error {
 	return DB.Model(&model.Pipeline{}).Where("id = ?", id).Update("status", status).Error
 }
 
-// CancelOldImageReady cancels all IMAGE_READY pipelines for a given app except the current one
-func (r *PipelineRepo) CancelOldImageReady(applicationID uint, currentPipelineID uint, namespace string) {
-	DB.Model(&model.Pipeline{}).
-		Where("application_id = ? AND status = ? AND id != ?", applicationID, "IMAGE_READY", currentPipelineID).
-		Where("k8s_namespace = ?", namespace).
-		Update("status", "CANCELED")
-}
-
-func (r *PipelineRepo) ConfirmDeploy(id uint) (bool, error) {
-	result := DB.Model(&model.Pipeline{}).Where("id = ? AND status = ?", id, "IMAGE_READY").Update("status", "DEPLOYING")
-	return result.RowsAffected == 1, result.Error
+func (r *PipelineRepo) StartRollout(id uint) (bool, error) {
+	started := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&model.Pipeline{}).Where("id = ? AND status = ?", id, "IMAGE_READY").Updates(map[string]any{"status": "DEPLOYING", "end_time": nil})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+		if err := tx.Model(&model.ArtifactDeployRecord{}).Where("pipeline_id = ?", id).Updates(map[string]any{"deploy_status": "queued", "status": "deploying"}).Error; err != nil {
+			return err
+		}
+		started = true
+		return nil
+	})
+	return started && err == nil, err
 }
 
 func (r *PipelineRepo) SaveImageCheckpoint(p *model.Pipeline) error {

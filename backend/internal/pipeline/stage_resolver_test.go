@@ -58,7 +58,7 @@ func TestPropertyUnknownAppType(t *testing.T) {
 func TestPropertyLastStageNotify(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		appType := rapid.SampledFrom([]string{"java", "vue"}).Draw(t, "appType")
-		mode := rapid.SampledFrom([]string{"deploy", "deploy_with_approval", "artifact_deploy"}).Draw(t, "mode")
+		mode := rapid.SampledFrom([]string{"build_image", "upload_and_build", "artifact_image"}).Draw(t, "mode")
 
 		stages := ResolveStagesWithMode(appType, mode)
 		if stages == nil {
@@ -70,14 +70,14 @@ func TestPropertyLastStageNotify(t *testing.T) {
 	})
 }
 
-func TestDeployWithApprovalIncludesImagePushAndK8sStages(t *testing.T) {
-	stages := ResolveStagesWithMode("java", "deploy_with_approval")
+func TestSourceImageBuildIncludesSeparateRolloutStages(t *testing.T) {
+	stages := ResolveStagesWithMode("java", "build_image")
 	expectedCodes := []string{"CLEAN_WORKSPACE", "GIT_CLONE", "GRADLE_BUILD", "BUILD_IMAGE", "PUSH_IMAGE", "K8S_DEPLOY", "NOTIFY"}
 	assertStageCodes(t, stages, expectedCodes)
 }
 
 func TestArtifactDeploySkipsSourceBuildAndDeploysImage(t *testing.T) {
-	stages := ResolveStagesWithMode("vue", "artifact_deploy")
+	stages := ResolveStagesWithMode("vue", "artifact_image")
 	expectedCodes := []string{"BUILD_IMAGE", "PUSH_IMAGE", "K8S_DEPLOY", "NOTIFY"}
 	assertStageCodes(t, stages, expectedCodes)
 }

@@ -5,13 +5,8 @@ import {
 } from './compiled/batch-deploy-flow.js'
 
 assert.deepEqual(
-  buildDeployFlow('immediate').map(step => step.title),
-  ['选择制品来源', '制品校验与匹配', '构建镜像', '更新 Deployment', '批次记录与回滚'],
-)
-
-assert.deepEqual(
-  buildDeployFlow('cutover').map(step => step.title),
-  ['选择制品来源', '制品校验与匹配', '构建镜像', '等待卡点部署', '批次记录与回滚'],
+  buildDeployFlow().map(step => step.title),
+  ['上传并制作镜像', '滚动更新'],
 )
 
 const grouped = groupImageReadyPipelines([
@@ -24,7 +19,7 @@ const grouped = groupImageReadyPipelines([
 assert.equal(grouped.length, 2)
 assert.deepEqual(grouped[0], {
   batchId: 'batch-a',
-  source: '卡点批量部署',
+  source: '批量滚动更新',
   appCount: 2,
   readyCount: 2,
   failedCount: 0,

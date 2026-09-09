@@ -145,6 +145,7 @@ func (h *BatchDeployHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/deploy-batches", h.ListArtifactDeployBatches)
 		g.GET("/deploy-batches/:batchNo", h.GetArtifactDeployBatch)
 		g.POST("/deploy-batches/:batchNo/rollback", h.RollbackArtifactDeployBatch)
+		g.POST("/deploy-batches/:batchNo/rollout", h.RolloutArtifactDeployBatch)
 		g.GET("/source-batches", h.ListSourceBatches)
 		g.POST("/download-remote-dir/cancel/*id", h.CancelDownloadJob)
 		g.GET("/download-remote-dir/progress/*id", h.GetDownloadProgress)
@@ -509,6 +510,9 @@ func (h *BatchDeployHandler) ListArtifactDeployBatches(c *gin.Context) {
 	}
 	batches := []model.ArtifactDeployBatch{}
 	query := repository.DB.Order("updated_at DESC")
+	if c.Query("readyForRollout") == "true" {
+		query = query.Where("deploy_batch_no IN (?)", repository.DB.Model(&model.Pipeline{}).Select("batch_id").Where("status = ?", "IMAGE_READY"))
+	}
 	if status := strings.TrimSpace(c.Query("status")); status != "" {
 		query = query.Where("status = ?", status)
 	}
@@ -554,6 +558,32 @@ func (h *BatchDeployHandler) GetArtifactDeployBatch(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"batch": batch, "records": records})
+}
+
+// RolloutArtifactDeployBatch submits only prepared targets. A preparation or
+// submission failure never prevents another target from being rolled out.
+func (h *BatchDeployHandler) RolloutArtifactDeployBatch(c *gin.Context) {
+	batchNo := safePathSegment(c.Param("batchNo"))
+	if batchNo == "" {
+		response.Fail(c, 13023, "部署批次号无效")
+		return
+	}
+	var ready []model.Pipeline
+	if err := repository.DB.Where("batch_id = ? AND status = ?", batchNo, "IMAGE_READY").Order("id ASC").Find(&ready).Error; err != nil {
+		response.Fail(c, 13023, "读取可滚动更新任务失败: "+err.Error())
+		return
+	}
+	submitted := []model.Pipeline{}
+	failures := []string{}
+	for _, target := range ready {
+		p, err := scheduler.DefaultScheduler.StartRollout(target.ID)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", target.AppName, err))
+			continue
+		}
+		submitted = append(submitted, *p)
+	}
+	response.OKWithMessage(c, fmt.Sprintf("已提交 %d 个滚动更新任务", len(submitted)), gin.H{"pipelines": submitted, "errors": failures})
 }
 
 func (h *BatchDeployHandler) RollbackArtifactDeployBatch(c *gin.Context) {
@@ -2028,11 +2058,10 @@ func (h *BatchDeployHandler) matchFile(fileName string, apps []model.Application
 // Execute creates pipelines for matched applications
 func (h *BatchDeployHandler) Execute(c *gin.Context) {
 	var req struct {
-		SourceDir  string `json:"sourceDir"` // Directory containing artifacts
-		BatchID    string `json:"batchId"`
-		Namespace  string `json:"namespace"`
-		DeployMode string `json:"deployMode"`
-		Items      []struct {
+		SourceDir string `json:"sourceDir"` // Directory containing artifacts
+		BatchID   string `json:"batchId"`
+		Namespace string `json:"namespace"`
+		Items     []struct {
 			FileName string `json:"fileName"`
 			AppID    uint   `json:"appId"`
 		} `json:"items" binding:"required"`
@@ -2072,10 +2101,7 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 	if batchID == "" {
 		batchID = newBatchID()
 	}
-	pipelineDeployMode := "artifact_deploy"
-	if strings.TrimSpace(req.DeployMode) == "cutover" {
-		pipelineDeployMode = "manual"
-	}
+	pipelineDeployMode := "artifact_image"
 	var pipelines []gin.H
 	var errors []string
 
@@ -2298,7 +2324,7 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 			errors = append(errors, fmt.Sprintf("%s: 创建 Pipeline 失败: %v", targetLabel, err))
 			continue
 		}
-		if err := createDeployRecordsForPipeline(batchID, namespace, req.DeployMode, username, *p, target.refs, appByID); err != nil {
+		if err := createDeployRecordsForPipeline(batchID, namespace, "two_step", username, *p, target.refs, appByID); err != nil {
 			preparationFailed(p, err)
 			errors = append(errors, fmt.Sprintf("%s: 创建部署记录失败: %v", targetLabel, err))
 			continue

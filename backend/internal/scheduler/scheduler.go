@@ -118,7 +118,7 @@ func (s *BuildScheduler) recoverPending() {
 
 func (s *BuildScheduler) Enqueue(pipelineID uint) { s.enqueue(pipelineID, false) }
 
-// Confirmation can arrive while the build worker is finishing IMAGE_READY.
+// Rollout can be submitted while the build worker is finishing IMAGE_READY.
 // Keep the resume queued until that worker has released its running slot.
 func (s *BuildScheduler) EnqueueDeployment(pipelineID uint) { s.enqueue(pipelineID, true) }
 
@@ -232,6 +232,7 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 	}
 	resumeDeployment := p.Status == "DEPLOYING"
 	p.Status = "RUNNING"
+	p.EndTime = nil
 	if p.StartTime == nil {
 		p.StartTime = &now
 	}
@@ -264,13 +265,10 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 
 	if execErr != nil {
 		if errors.Is(execErr, pipeline.ErrImageReady) {
-			// Manual mode: pause at IMAGE_READY, don't mark as failed
-			// Cancel any existing IMAGE_READY pipelines for the same app (keep only latest)
-			s.pipelineRepo.CancelOldImageReady(p.ApplicationID, p.ID, p.K8sNamespace)
+			// Step one completed. Other prepared images remain available.
 
 			p.Status = "IMAGE_READY"
-			p.EndTime = nil
-			p.DurationSeconds = nil
+
 			if !s.savePipelineResult(p) {
 				return
 			}
@@ -278,15 +276,15 @@ func (s *BuildScheduler) executePipeline(ctx context.Context, pipelineID uint) {
 				s.reportStateError(p, fmt.Errorf("保存镜像待部署记录失败: %w", err))
 				return
 			}
-			sse.DefaultHub.Publish(pipelineID, sse.Event{Type: "image_ready", Data: "镜像已就绪，等待确认部署"})
+			sse.DefaultHub.Publish(pipelineID, sse.Event{Type: "image_ready", Data: "第一步完成：镜像已制作并推送，可执行滚动更新"})
 			// Create notification
 			notifyRepo := repository.NewNotificationMsgRepo()
 			notifyRepo.Create(&model.NotificationMsg{
 				Type: "build_complete", Title: fmt.Sprintf("%s 镜像构建完成", p.AppName),
-				Content: fmt.Sprintf("应用 %s 镜像已推送到仓库，等待确认部署", p.AppName),
+				Content: fmt.Sprintf("应用 %s 镜像已推送到仓库，可执行第二步滚动更新", p.AppName),
 				Level:   "success", PipelineID: p.ID,
 			})
-			logger.Log.Infof("Pipeline %d paused at IMAGE_READY", pipelineID)
+			logger.Log.Infof("Pipeline %d image preparation completed", pipelineID)
 			return
 		}
 		latest, _ := s.pipelineRepo.FindByID(pipelineID)
@@ -501,8 +499,7 @@ func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext 
 }
 
 // CreateAndEnqueue creates a pipeline record and enqueues it
-// autoDeploy: true=镜像推送后自动部署, false=镜像推送后等待手动确认
-func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string, autoDeploy bool) (*model.Pipeline, error) {
+func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string) (*model.Pipeline, error) {
 	taskRepo := repository.NewTaskRepo()
 	pipelineRepo := repository.NewPipelineRepo()
 	appRepo := repository.NewApplicationRepo()
@@ -518,16 +515,14 @@ func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string, autoDeploy boo
 		return nil, fmt.Errorf("关联应用不存在")
 	}
 
-	// Determine deploy mode: task default, then global default, overridden by autoDeploy flag
-	deployMode, _ := settingsRepo.GetByKey("deploy_mode")
-	if task.DeployMode != "" {
-		deployMode = task.DeployMode
-	}
-	if deployMode == "" {
-		deployMode = "deploy"
-	}
-	if !autoDeploy {
-		deployMode = "deploy_with_approval"
+	// Existing source-build task settings retain upload-only/upload behavior.
+	deployMode := pipeline.NormalizeDeployMode(task.DeployMode)
+	if task.DeployMode == "" {
+		configured, err := settingsRepo.Read("deploy_mode", false)
+		if err != nil {
+			return nil, err
+		}
+		deployMode = pipeline.NormalizeDeployMode(configured)
 	}
 	namespace := task.K8sNamespace
 	if namespace == "" {

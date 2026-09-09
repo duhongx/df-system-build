@@ -59,10 +59,10 @@ export function deleteTask(id: number) {
   return request.delete<any, null>(`/tasks/${id}`)
 }
 
-export function executeTask(id: number, data: { gitBranch: string; autoDeploy?: boolean }) {
+export function executeTask(id: number, data: { gitBranch: string }) {
   return request.post<any, any>(`/tasks/${id}/execute`, data)
 }
 
-export function batchExecuteTasks(data: { taskIds: number[]; gitBranch: string; autoDeploy?: boolean }) {
+export function batchExecuteTasks(data: { taskIds: number[]; gitBranch: string }) {
   return request.post<any, any>('/tasks/batch-execute', data)
 }

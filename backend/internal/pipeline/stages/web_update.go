@@ -32,7 +32,7 @@ func frontendArtifacts(pCtx *types.PipelineContext) ([]model.FrontendArtifact, e
 		}
 		return artifacts, nil
 	}
-	if pCtx.DeployMode == "manual" || pCtx.DeployMode == "artifact_deploy" {
+	if pCtx.DeployMode == "artifact_image" || pCtx.DeployMode == "manual" || pCtx.DeployMode == "artifact_deploy" {
 		return nil, fmt.Errorf("前端任务缺少制品清单，请重新提交更新")
 	}
 	return []model.FrontendArtifact{{FileName: pCtx.ArtifactName, Role: pCtx.VueRole, AppCode: pCtx.AppCode}}, nil

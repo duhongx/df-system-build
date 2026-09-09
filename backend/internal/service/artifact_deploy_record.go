@@ -39,7 +39,7 @@ func CreateArtifactDeployRecords(input ArtifactDeployRecordInput) error {
 	}
 	deployMode := strings.TrimSpace(input.DeployMode)
 	if deployMode == "" {
-		deployMode = "immediate"
+		deployMode = "two_step"
 	}
 	deployBatchNo := versionNo
 	appByID := make(map[uint]model.Application, len(input.Applications))

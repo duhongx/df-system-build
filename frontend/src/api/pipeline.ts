@@ -34,6 +34,7 @@ export interface Pipeline {
   uploadPath?: string
   uploadTargets?: string
   batchId?: string
+  imageName?: string
   deploymentProgress?: string
   deployMode?: string
   startTime?: string | null
@@ -79,8 +80,8 @@ export function cancelQueued(id: number) {
   return request.delete<any, null>(`/build-queue/${id}`)
 }
 
-export function deployPipeline(id: number) {
-  return request.post<any, null>(`/pipelines/${id}/deploy`)
+export function rolloutPipeline(id: number) {
+  return request.post<any, null>(`/pipelines/${id}/rollout`)
 }
 
 export function streamLogsUrl(pipelineId: number): string {

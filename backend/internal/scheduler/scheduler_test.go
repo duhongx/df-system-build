@@ -123,7 +123,7 @@ func TestCreateAndEnqueueUsesDefaultK8sNamespaceWhenTaskNamespaceEmpty(t *testin
 		t.Fatalf("create task: %v", err)
 	}
 
-	p, err := CreateAndEnqueue(task.ID, task.GitBranch, "tester", true)
+	p, err := CreateAndEnqueue(task.ID, task.GitBranch, "tester")
 	if err != nil {
 		t.Fatalf("create pipeline: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestCreateAndEnqueueUsesDefaultK8sNamespaceWhenTaskNamespaceEmpty(t *testin
 	}
 }
 
-func TestSchedulerConfirmationKeepsExistingStages(t *testing.T) {
+func TestSchedulerRolloutKeepsExistingStages(t *testing.T) {
 	setupSchedulerTestDB(t)
 	app := model.Application{AppName: "resume-web-review", AppType: "vue", VueRole: "main", GitRepo: "test"}
 	if err := repository.DB.Create(&app).Error; err != nil {
@@ -148,10 +148,10 @@ func TestSchedulerConfirmationKeepsExistingStages(t *testing.T) {
 	if err := repository.DB.Create(&stages).Error; err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := repo.ConfirmDeploy(p.ID); err != nil || !ok {
+	if ok, err := repo.StartRollout(p.ID); err != nil || !ok {
 		t.Fatalf("first confirmation: %v %v", ok, err)
 	}
-	if ok, err := repo.ConfirmDeploy(p.ID); err != nil || ok {
+	if ok, err := repo.StartRollout(p.ID); err != nil || ok {
 		t.Fatalf("duplicate confirmation: %v %v", ok, err)
 	}
 	// Stop before any real Docker/Kubernetes stage, but exercise scheduler -> engine.

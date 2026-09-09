@@ -1,5 +1,3 @@
-export type DeployMode = 'immediate' | 'cutover'
-
 export interface DeployFlowStep {
   key: string
   title: string
@@ -29,45 +27,10 @@ export interface ImageReadyBatch {
   pipelines: ImageReadyPipelineLike[]
 }
 
-export function buildDeployFlow(mode: DeployMode): DeployFlowStep[] {
+export function buildDeployFlow(): DeployFlowStep[] {
   return [
-    {
-      key: 'source',
-      title: '选择制品来源',
-      description: '本地上传、服务器下载或从制品库选择 latest 制品，生成部署批次。',
-      state: 'source',
-    },
-    {
-      key: 'check',
-      title: '制品校验与匹配',
-      description: '校验 jar/zip 可读性，匹配微服务，异常和未匹配制品默认剔除。',
-      state: 'check',
-    },
-    {
-      key: 'build',
-      title: '构建镜像',
-      description: '按匹配结果构建并推送镜像，前端主应用会按 web-main 合并规则组装。',
-      state: 'build',
-    },
-    mode === 'cutover'
-      ? {
-          key: 'wait',
-          title: '等待卡点部署',
-          description: '只保留镜像已就绪批次，不更新 Deployment，等待维护窗口手动触发。',
-          state: 'deploy',
-        }
-      : {
-          key: 'deploy',
-          title: '更新 Deployment',
-          description: '镜像构建成功后立即按并发规则滚动更新 Kubernetes Deployment。',
-          state: 'deploy',
-        },
-    {
-      key: 'record',
-      title: '批次记录与回滚',
-      description: '部署成功后更新最新制品，并记录更新前镜像，支持按批次整体回滚。',
-      state: 'record',
-    },
+    { key: 'build', title: '上传并制作镜像', description: '上传、校验并匹配制品，组装镜像后推送仓库；本步骤完成后不更新服务。', state: 'build' },
+    { key: 'rollout', title: '滚动更新', description: '使用第一步已制作的镜像更新 Deployment，记录更新前镜像并等待滚动完成。', state: 'deploy' },
   ]
 }
 
@@ -89,7 +52,7 @@ export function groupImageReadyPipelines(pipelines: ImageReadyPipelineLike[]): I
       const sorted = [...group].sort((a, b) => a.id - b.id)
       return {
         batchId,
-        source: '卡点批量部署',
+        source: '批量滚动更新',
         appCount: sorted.length,
         readyCount: sorted.length,
         failedCount: 0,

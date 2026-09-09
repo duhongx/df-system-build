@@ -26,7 +26,7 @@ type Pipeline struct {
 	FrontendArtifactsJSON string          `gorm:"type:text" json:"-"`                // Exact uploaded inputs; never rediscover them from application settings.
 	DeploymentProgress    string          `gorm:"size:32" json:"deploymentProgress"` // preparing/submitting/submitted/completed
 	FrontendUpdateSummary string          `gorm:"type:text" json:"-"`                // Submitted frontend selection, for batch-level execution logs.
-	FrontendBaselineJSON  string          `gorm:"type:text" json:"-"`                // Build-time Deployment baseline, retained across manual confirmation.
+	FrontendBaselineJSON  string          `gorm:"type:text" json:"-"`                // Build-time Deployment baseline, retained between image preparation and rollout.
 	K8sNamespace          string          `gorm:"size:64" json:"k8sNamespace"`       // K8s namespace
 	StartTime             *time.Time      `json:"startTime"`
 	EndTime               *time.Time      `json:"endTime"`

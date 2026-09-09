@@ -17,21 +17,30 @@ func ResolveStages(appType string) []StageDefinition {
 	return ResolveStagesWithMode(appType, "deploy")
 }
 
-// ResolveStagesWithMode returns stages based on app type and deploy mode
-// Deploy modes:
-//   - "deploy" (default): 编译 → 构建镜像 → 推送 Nexus → K8s 部署
-//   - "deploy_with_approval": 编译 → 构建镜像 → 推送 Nexus → 等待确认 → K8s 部署
-//   - "artifact_deploy": 手动上传制品 → 构建镜像 → 推送 Nexus → K8s 部署
-func ResolveStagesWithMode(appType, deployMode string) []StageDefinition {
-	if deployMode == "" {
-		deployMode = "deploy"
+// NormalizeDeployMode keeps stored tasks compatible while all image workflows
+// now finish image preparation before a separate rollout operation.
+func NormalizeDeployMode(mode string) string {
+	switch mode {
+	case "artifact_image", "artifact_deploy", "manual":
+		return "artifact_image"
+	case "upload_only":
+		return "upload_only"
+	case "upload_and_build", "upload_and_deploy", "upload_deploy":
+		return "upload_and_build"
+	default:
+		return "build_image"
 	}
+}
 
-	if deployMode == "artifact_deploy" || deployMode == "manual" {
+// ResolveStagesWithMode describes both steps. The engine ends step one after
+// PUSH_IMAGE; K8S_DEPLOY and NOTIFY run only when rollout is submitted.
+func ResolveStagesWithMode(appType, deployMode string) []StageDefinition {
+	deployMode = NormalizeDeployMode(deployMode)
+	if deployMode == "artifact_image" {
 		defs := []StageDefinition{
 			{Code: "BUILD_IMAGE", Name: "构建镜像", Runner: &stages.BuildImageStage{}},
 			{Code: "PUSH_IMAGE", Name: "推送镜像", Runner: &stages.PushImageStage{}},
-			{Code: "K8S_DEPLOY", Name: "K8s 部署", Runner: &stages.K8sDeployStage{}},
+			{Code: "K8S_DEPLOY", Name: "滚动更新", Runner: &stages.K8sDeployStage{}},
 			{Code: "NOTIFY", Name: "发送通知", Runner: &stages.NotifyStage{}},
 		}
 		return defs
@@ -60,12 +69,12 @@ func ResolveStagesWithMode(appType, deployMode string) []StageDefinition {
 
 	// Append stages based on deploy mode
 	switch deployMode {
-	case "deploy", "deploy_with_approval":
+	case "build_image":
 		// DevOps mode: build image → push → K8s deploy
 		defs = append(defs,
 			StageDefinition{Code: "BUILD_IMAGE", Name: "构建镜像", Runner: &stages.BuildImageStage{}},
 			StageDefinition{Code: "PUSH_IMAGE", Name: "推送镜像", Runner: &stages.PushImageStage{}},
-			StageDefinition{Code: "K8S_DEPLOY", Name: "K8s 部署", Runner: &stages.K8sDeployStage{}},
+			StageDefinition{Code: "K8S_DEPLOY", Name: "滚动更新", Runner: &stages.K8sDeployStage{}},
 		)
 	case "upload_only":
 		// Master mode: upload to remote servers only
@@ -73,20 +82,20 @@ func ResolveStagesWithMode(appType, deployMode string) []StageDefinition {
 			StageDefinition{Code: "CHECK_REMOTE_DIR", Name: "检查远端目录", Runner: &stages.CheckRemoteDirStage{}},
 			StageDefinition{Code: "UPLOAD_ARTIFACT", Name: "上传制品", Runner: &stages.UploadArtifactStage{}},
 		)
-	case "upload_and_deploy":
+	case "upload_and_build":
 		// Both: upload + image + K8s
 		defs = append(defs,
 			StageDefinition{Code: "CHECK_REMOTE_DIR", Name: "检查远端目录", Runner: &stages.CheckRemoteDirStage{}},
 			StageDefinition{Code: "UPLOAD_ARTIFACT", Name: "上传制品", Runner: &stages.UploadArtifactStage{}},
 			StageDefinition{Code: "BUILD_IMAGE", Name: "构建镜像", Runner: &stages.BuildImageStage{}},
 			StageDefinition{Code: "PUSH_IMAGE", Name: "推送镜像", Runner: &stages.PushImageStage{}},
-			StageDefinition{Code: "K8S_DEPLOY", Name: "K8s 部署", Runner: &stages.K8sDeployStage{}},
+			StageDefinition{Code: "K8S_DEPLOY", Name: "滚动更新", Runner: &stages.K8sDeployStage{}},
 		)
 	default:
 		defs = append(defs,
 			StageDefinition{Code: "BUILD_IMAGE", Name: "构建镜像", Runner: &stages.BuildImageStage{}},
 			StageDefinition{Code: "PUSH_IMAGE", Name: "推送镜像", Runner: &stages.PushImageStage{}},
-			StageDefinition{Code: "K8S_DEPLOY", Name: "K8s 部署", Runner: &stages.K8sDeployStage{}},
+			StageDefinition{Code: "K8S_DEPLOY", Name: "滚动更新", Runner: &stages.K8sDeployStage{}},
 		)
 	}
 

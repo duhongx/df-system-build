@@ -17,7 +17,7 @@ import (
 	"df-build-server/pkg/sse"
 )
 
-// ErrImageReady is returned when pipeline pauses after image push (manual mode)
+// ErrImageReady signals successful completion of the image preparation step.
 var ErrImageReady = errors.New("IMAGE_READY")
 
 type Engine struct {
@@ -35,13 +35,16 @@ func NewEngine() *Engine {
 }
 
 func (e *Engine) Execute(ctx context.Context, p *model.Pipeline, pCtx *types.PipelineContext) error {
-	stageDefs := ResolveStagesWithMode(p.AppType, p.DeployMode)
+	return e.executeStages(ctx, p, pCtx, ResolveStagesWithMode(p.AppType, p.DeployMode))
+}
+
+func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *types.PipelineContext, stageDefs []StageDefinition) error {
 	if stageDefs == nil {
 		return fmt.Errorf("unsupported app type: %s", p.AppType)
 	}
 
 	// Keep the existing shared web-main target serial through build, push,
-	// deployment and verification. Manual approval releases the lock; its persisted
+	// each execution step. Image preparation releases the lock; its persisted
 	// baseline is checked again at deployment time.
 	if pCtx.AppType == "vue" && (pCtx.VueRole == "main" || pCtx.VueRole == "sub") {
 		if pCtx.K8sNamespace == "" {
@@ -65,7 +68,7 @@ func (e *Engine) Execute(ctx context.Context, p *model.Pipeline, pCtx *types.Pip
 	}
 	resume := pCtx.ResumeDeployment || p.Status == "DEPLOYING"
 	if resume {
-		if err := validateResumeStages(existingStages, stageDefs, p.ImageName); err != nil {
+		if err := ValidateRolloutStages(existingStages, stageDefs, p.ImageName); err != nil {
 			return err
 		}
 	} else if len(existingStages) > 0 {
@@ -139,7 +142,7 @@ func (e *Engine) Execute(ctx context.Context, p *model.Pipeline, pCtx *types.Pip
 		}
 
 		if !loggedScope {
-			pCtx.OnLog(p.ID, 0, fmt.Sprintf("[更新任务] 流水线=%s；应用=%s；角色=%s；appCode=%s；命名空间=%s；模式=%s；恢复部署=%t", p.PipelineNo, pCtx.AppName, pCtx.VueRole, pCtx.AppCode, pCtx.K8sNamespace, pCtx.DeployMode, resume), "stdout")
+			pCtx.OnLog(p.ID, 0, fmt.Sprintf("[更新任务] 流水线=%s；应用=%s；角色=%s；appCode=%s；命名空间=%s；模式=%s；滚动更新步骤=%t", p.PipelineNo, pCtx.AppName, pCtx.VueRole, pCtx.AppCode, pCtx.K8sNamespace, pCtx.DeployMode, resume), "stdout")
 			if p.FrontendUpdateSummary != "" {
 				pCtx.OnLog(p.ID, 0, "[批次选择] 以下是提交时选择的前端应用；各独立应用由各自流水线执行，执行结果分别查看", "stdout")
 				for _, line := range strings.Split(p.FrontendUpdateSummary, "\n") {
@@ -203,10 +206,10 @@ func (e *Engine) Execute(ctx context.Context, p *model.Pipeline, pCtx *types.Pip
 		e.sseHub.Publish(p.ID, sse.Event{Type: "stage_success", Data: fmt.Sprintf(`{"stageId":%d}`, stage.ID)})
 		logger.Log.Infof("Stage %s completed in %ds", def.Code, dur)
 
-		// Pause point: after PUSH_IMAGE in manual/deploy_with_approval mode, pause for user confirmation
-		if (p.DeployMode == "manual" || p.DeployMode == "deploy_with_approval") && def.Code == "PUSH_IMAGE" {
+		// Image preparation is complete; rollout is always a separate operation.
+		if !resume && def.Code == "PUSH_IMAGE" {
 			// Mark remaining stages as PENDING (they'll be executed later)
-			e.sseHub.Publish(p.ID, sse.Event{Type: "image_ready", Data: "镜像已就绪，等待确认部署"})
+			e.sseHub.Publish(p.ID, sse.Event{Type: "image_ready", Data: "第一步完成：镜像已制作并推送，可执行滚动更新"})
 			return ErrImageReady
 		}
 	}
@@ -229,9 +232,9 @@ func (e *Engine) skipRemaining(stages []*model.PipelineStage, fromIndex int) {
 	}
 }
 
-// Confirmation must resume the exact completed build, not create or guess stages.
-func validateResumeStages(existing []model.PipelineStage, defs []StageDefinition, image string) error {
-	if image == "" || len(existing) != len(defs) {
+// Rollout must use the exact completed build, not create or guess stages.
+func ValidateRolloutStages(existing []model.PipelineStage, defs []StageDefinition, image string) error {
+	if image == "" || len(defs) == 0 || len(existing) != len(defs) {
 		return fmt.Errorf("待部署流水线缺少完整阶段或镜像，请重新构建")
 	}
 	beforeDeploy := true
@@ -244,10 +247,10 @@ func validateResumeStages(existing []model.PipelineStage, defs []StageDefinition
 			beforeDeploy = false
 		}
 		if beforeDeploy && stage.Status != "SUCCESS" {
-			return fmt.Errorf("构建和推送尚未完成，不能确认部署")
+			return fmt.Errorf("构建和推送尚未完成，不能执行滚动更新")
 		}
 		if !beforeDeploy && stage.Status != "PENDING" {
-			return fmt.Errorf("部署阶段已执行，禁止重复确认")
+			return fmt.Errorf("滚动更新阶段已执行，不能重复提交")
 		}
 	}
 	return nil

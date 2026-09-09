@@ -23,9 +23,8 @@ export const executeBatchDeploy = (
   items: { fileName: string; appId: number }[],
   namespace?: string,
   batchId?: string,
-  deployMode?: 'immediate' | 'cutover',
 ) =>
-  request.post<any, { pipelines: any[]; errors: string[]; consumedFiles: string[] }>('/batch-deploy/execute', { sourceDir, items, namespace, batchId, deployMode })
+  request.post<any, { pipelines: any[]; errors: string[]; consumedFiles: string[] }>('/batch-deploy/execute', { sourceDir, items, namespace, batchId })
 
 export const listLocalDir = (path: string, batchId?: string) =>
   request.get<any, { path: string; files: string[]; count: number }>('/batch-deploy/local-dir', { params: { path, batchId } })
@@ -129,7 +128,7 @@ export interface ArtifactDeployBatch {
   deployBatchNo: string
   versionNo: string
   namespace: string
-  deployMode: 'immediate' | 'cutover' | string
+  deployMode: string
   status: string
   triggerUser: string
   totalCount: number
@@ -221,8 +220,8 @@ export const replaceArtifactVersionItem = (versionNo: string, itemId: number, fi
 export const redownloadArtifactVersionItem = (versionNo: string, itemId: number) =>
   request.post<any, { version: ArtifactVersion; items: ArtifactVersionItem[] }>(`/batch-deploy/artifact-versions/${encodeURIComponent(versionNo)}/items/${itemId}/redownload`)
 
-export const listArtifactDeployBatches = (status?: string) =>
-  request.get<any, { batches: ArtifactDeployBatch[] }>('/batch-deploy/deploy-batches', { params: status ? { status } : {} })
+export const listArtifactDeployBatches = (status?: string, readyForRollout = false) =>
+  request.get<any, { batches: ArtifactDeployBatch[] }>('/batch-deploy/deploy-batches', { params: { status, readyForRollout: readyForRollout || undefined } })
 
 export const getArtifactDeployBatch = (batchNo: string) =>
   request.get<any, { batch: ArtifactDeployBatch; records: ArtifactDeployRecord[] }>(`/batch-deploy/deploy-batches/${encodeURIComponent(batchNo)}`)
@@ -241,3 +240,6 @@ export const listPackageDownloadDir = (path?: string) =>
 
 export const listPackageDownloadLocalDir = (path?: string) =>
   request.get<any, { root: string; path: string; files: FileItem[] }>(`/batch-deploy/package-download/local-list`, { params: path ? { path } : {} })
+
+export const rolloutArtifactDeployBatch = (batchNo: string) =>
+  request.post<any, { pipelines: { id: number; appName: string }[]; errors: string[] }>(`/batch-deploy/deploy-batches/${encodeURIComponent(batchNo)}/rollout`)

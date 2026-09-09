@@ -9,6 +9,7 @@ import {
   redownloadArtifactVersionItem,
   replaceArtifactVersionItem,
   rollbackArtifactDeployBatch,
+  rolloutArtifactDeployBatch,
   type ArtifactDeployBatch,
   type ArtifactDeployRecord,
   type ArtifactVersion,
@@ -24,6 +25,7 @@ const version = ref<ArtifactVersion | null>(null)
 const items = ref<ArtifactVersionItem[]>([])
 const deployBatch = ref<ArtifactDeployBatch | null>(null)
 const deployRecords = ref<ArtifactDeployRecord[]>([])
+const rolloutSubmitting = ref(false)
 const rollbackSubmitting = ref(false)
 const rollbacking = computed(() => rollbackSubmitting.value || deployBatch.value?.status === 'rolling_back')
 let rollbackPoll: ReturnType<typeof setTimeout> | undefined
@@ -80,7 +82,7 @@ async function loadDeployBatch() {
     // Retain the last known progress after a transient request failure.
   } finally {
     deployLoading.value = false
-    if (!disposed && deployBatch.value?.status === 'rolling_back') {
+    if (!disposed && (deployBatch.value?.status === 'rolling_back' || deployRecords.value.some(record => ['building', 'deploying'].includes(record.status)))) {
       rollbackPoll = setTimeout(() => { void loadDeployBatch() }, 3000)
     }
   }
@@ -139,7 +141,7 @@ function deployRecordStatusType(status?: string) {
 
 function deployRecordStatusText(status?: string) {
   if (status === 'current') return '当前状态'
-  if (status === 'image_ready') return '等待卡点'
+  if (status === 'image_ready') return '镜像制作完成'
   if (status === 'deployed') return '已部署'
   if (status === 'rolled_back') return '已回滚'
   if (status === 'failed') return '失败'
@@ -374,6 +376,24 @@ async function handleRedownloadItem(item: ArtifactVersionItem) {
   }
 }
 
+async function handleRollout() {
+  if (!deployBatch.value || rolloutSubmitting.value) return
+  rolloutSubmitting.value = true
+  try {
+    const result = await rolloutArtifactDeployBatch(deployBatch.value.deployBatchNo)
+    if (result.errors.length) {
+      await ElMessageBox.alert(result.errors.join('\n'), `已提交 ${result.pipelines.length} 个滚动更新任务，部分目标未提交`, { type: 'warning' })
+    } else if (result.pipelines.length) {
+      ElMessage.success(`已提交 ${result.pipelines.length} 个滚动更新任务`)
+    } else {
+      ElMessage.info('没有新的镜像可执行滚动更新')
+    }
+    void loadDeployBatch()
+  } finally {
+    rolloutSubmitting.value = false
+  }
+}
+
 async function handleRollback() {
   if (!deployBatch.value || rollbacking.value) return
   await ElMessageBox.confirm(`确定整体回滚版本 "${deployBatch.value.versionNo}" 吗？会在后台把本版本涉及的 Deployment 恢复到记录的可回滚镜像；未提交部署的目标无需回滚。`, '整体回滚', { type: 'warning' })
@@ -506,6 +526,7 @@ async function handleRollback() {
           </div>
           <div class="header-actions">
             <el-button :loading="deployLoading" @click="loadDeployBatch">刷新</el-button>
+            <el-button v-if="deployBatch && deployRecords.some(record => record.status === 'image_ready')" type="primary" :loading="rolloutSubmitting" @click="handleRollout">第二步：滚动更新</el-button>
             <el-button
               v-if="deployBatch && deployRecords.length"
               type="warning"
