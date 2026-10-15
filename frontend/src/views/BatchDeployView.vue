@@ -78,7 +78,7 @@ const deployableResults = computed(() => {
   const selected = new Set(selectedFiles.value)
   return matchResults.value.filter(result => selected.has(result.fileName) && isDeployableMatch(result))
 })
-const matchedCount = computed(() => matchResults.value.filter(result => result.matched && result.valid && !result.skipped).length)
+const matchedCount = computed(() => matchResults.value.filter(isDeployableMatch).length)
 const invalidCount = computed(() => matchResults.value.filter(result => !result.valid).length)
 const unmatchedCount = computed(() => matchResults.value.filter(result => !result.matched && !result.skipped).length)
 const skippedCount = computed(() => matchResults.value.filter(result => result.skipped).length)
