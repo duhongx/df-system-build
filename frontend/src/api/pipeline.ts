@@ -29,7 +29,6 @@ export interface Pipeline {
   gitCommitMessage?: string
   status: string
   triggerUser: string
-  builderImage?: string
   artifactName?: string
   uploadPath?: string
   uploadTargets?: string
@@ -56,7 +55,7 @@ export interface StageLog {
   timestamp: string
 }
 
-export function listPipelines(params?: { page?: number; pageSize?: number; app?: string; status?: string }) {
+export function listPipelines(params?: { page?: number; pageSize?: number; app?: string; status?: string; search?: string; appType?: string }) {
   return request.get<any, PageResult<Pipeline>>('/pipelines', { params })
 }
 
@@ -123,7 +122,7 @@ export interface Artifact {
   createdAt: string
 }
 
-export function listArtifacts(params?: { page?: number; pageSize?: number; search?: string }) {
+export function listArtifacts(params?: { page?: number; pageSize?: number; search?: string; onlyLatest?: boolean }) {
   return request.get<any, PageResult<Artifact>>('/artifacts', { params })
 }
 

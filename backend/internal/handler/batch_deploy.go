@@ -2060,7 +2060,6 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 	var req struct {
 		SourceDir string `json:"sourceDir"` // Directory containing artifacts
 		BatchID   string `json:"batchId"`
-		Namespace string `json:"namespace"`
 		Items     []struct {
 			FileName string `json:"fileName"`
 			AppID    uint   `json:"appId"`
@@ -2083,14 +2082,10 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 	}
 
 	username := middleware.GetCurrentUsername(c)
-	namespace := strings.TrimSpace(req.Namespace)
-	if namespace == "" {
-		var nsErr error
-		namespace, nsErr = k8s.GetDefaultNamespace()
-		if nsErr != nil {
-			response.Fail(c, 13004, nsErr.Error())
-			return
-		}
+	namespace, nsErr := k8s.GetDefaultNamespace()
+	if nsErr != nil {
+		response.Fail(c, 13004, nsErr.Error())
+		return
 	}
 	batchID := strings.TrimSpace(req.BatchID)
 	if batchID == "" {

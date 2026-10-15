@@ -32,6 +32,7 @@ type PipelineContext struct {
 	AppType        string
 	AppName        string
 	ArtifactName   string
+	ArtifactDir    string
 	BuildCommand   string
 	InstallCommand string
 	ArtifactMD5    string
@@ -45,6 +46,7 @@ type PipelineContext struct {
 
 	// Deploy-related fields
 	ResumeDeployment bool
+	AutoRollout      bool // Captured from the environment when execution starts.
 	DeployMode       string
 	K8sNamespace     string
 	ImageName        string

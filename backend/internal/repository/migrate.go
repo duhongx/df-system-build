@@ -15,7 +15,6 @@ func AutoMigrate() error {
 		&model.Pipeline{},
 		&model.PipelineStage{},
 		&model.StageLog{},
-		&model.Executor{},
 		&model.BuildConfig{},
 		&model.RemoteServer{},
 		&model.Template{},
@@ -23,9 +22,12 @@ func AutoMigrate() error {
 		&model.NotificationWebhook{},
 		&model.Artifact{},
 		&model.Settings{},
+		&model.PostgreSQLAccountPassword{},
 		&model.ConfigItem{},
 		&model.Server{},
 		&model.ServerLog{},
+		&model.LogSource{},
+		&model.LogCollectionJob{},
 		&model.NotificationMsg{},
 		&model.ArtifactVersion{},
 		&model.ArtifactUpdateClaim{},
@@ -57,6 +59,17 @@ func AutoMigrate() error {
 		return err
 	}
 
+	// Identity applies to active release files; deleted revisions retain their audit history.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sql_change_files_active_identity ON sql_change_files (version, file_name, schema_name) WHERE is_deleted = false AND file_name <> ''`).Error; err != nil {
+		return err
+	}
+
+	if err := migrateLocalBuildConfigs(); err != nil {
+		return err
+	}
+	if err := migratePostgreSQLPasswords(); err != nil {
+		return err
+	}
 	dropLegacyDeployTables()
 
 	logger.Log.Info("Database migration completed")
@@ -95,12 +108,11 @@ func SeedCoreData() {
 	if DB.Where("username = ?", "admin").First(&adminUser).Error != nil {
 		hash, _ := bcrypt.GenerateFromPassword([]byte("123456"), bcrypt.DefaultCost)
 		admin := model.User{
-			Username:           "admin",
-			PasswordHash:       string(hash),
-			Email:              "admin@df-his.com",
-			Phone:              "13800138000",
-			Department:         "技术部",
-			MustChangePassword: true,
+			Username:     "admin",
+			PasswordHash: string(hash),
+			Email:        "admin@df-his.com",
+			Phone:        "13800138000",
+			Department:   "技术部",
 		}
 		DB.Create(&admin)
 		logger.Log.Info("Default admin user created (admin/123456)")
@@ -113,8 +125,7 @@ func SeedCoreData() {
 		{Key: "log_retention_days", Value: "30", Description: "日志保留天数"},
 		{Key: "default_upload_path", Value: "/root/DFHIS/his-release", Description: "默认上传路径"},
 		{Key: "clean_workspace_after_build", Value: "true", Description: "构建后清理工作区"},
-		{Key: "deploy_source", Value: "both", Description: "部署来源: source(源码编译) / artifact(制品上传) / both(两者都显示)"},
-		{Key: "build_mode", Value: "docker", Description: "编译模式: docker(容器编译) / local(本地编译)"},
+		{Key: "deploy_source", Value: "artifact", Description: "使用场景: artifact(客户现场仅制品) / both(机房源码及制品)"},
 		{Key: "deploy_mode", Value: "deploy", Description: "部署模式: deploy(编译+部署)"},
 		{Key: "customer_env", Value: "本地", Description: "客户环境"},
 		{Key: "docker_registry_url", Value: "192.168.199.102:8888", Description: "Docker 镜像仓库地址"},
@@ -136,8 +147,8 @@ func SeedCoreData() {
 		{Key: "package_download_path", Value: "/", Description: "软件包远程目录"},
 		{Key: "postgresql_host", Value: "", Description: "PostgreSQL 主机地址"},
 		{Key: "postgresql_port", Value: "5432", Description: "PostgreSQL 端口"},
-		{Key: "postgresql_user", Value: "", Description: "PostgreSQL 用户名"},
-		{Key: "postgresql_password", Value: "", Description: "PostgreSQL 密码"},
+		{Key: "postgresql_password", Value: "", Description: "PostgreSQL 统一业务密码"},
+		{Key: "postgresql_password_mode", Value: "shared", Description: "业务密码方式: shared(所有业务用户同一个密码) / individual(业务用户密码不同)"},
 		{Key: "postgresql_admin_password", Value: "", Description: "PostgreSQL 管理员密码"},
 		{Key: "postgresql_database", Value: "", Description: "PostgreSQL 数据库名"},
 	}
@@ -164,15 +175,10 @@ func SeedCoreData() {
 func SeedFirstTimeData() {
 	logger.Log.Info("First deployment detected, seeding default data...")
 
-	// Build configs (7 default entries)
+	// Compilation always uses tools installed on the server.
 	defaultBuildConfigs := []model.BuildConfig{
-		{Name: "Vue Yarn Docker", Category: "vue", BuildMode: "docker", DockerImage: "ops-builder-node:18-yarn1", CPULimit: "2", MemoryLimit: "4g", InstallCommand: "yarn install", BuildCommand: "npm run build:new", ArtifactDir: "dist", Status: "online", CacheMounts: `[{"hostPath":"/opt/build-cache/yarn","containerPath":"/usr/local/share/.cache/yarn"},{"hostPath":"/opt/build-cache/npm","containerPath":"/root/.npm"}]`},
-		{Name: "Vue NPM Docker", Category: "vue", BuildMode: "docker", DockerImage: "ops-builder-node:18-npm", CPULimit: "2", MemoryLimit: "4g", InstallCommand: "npm install", BuildCommand: "npm run build", ArtifactDir: "dist", Status: "online", CacheMounts: `[{"hostPath":"/opt/build-cache/npm","containerPath":"/root/.npm"}]`},
-		{Name: "Java Gradle Docker", Category: "java", BuildMode: "docker", DockerImage: "ops-builder-gradle:jdk8", CPULimit: "2", MemoryLimit: "4g", BuildCommand: "gradle clean build -x test", ArtifactDir: "build/libs", Status: "online", CacheMounts: `[{"hostPath":"/opt/build-cache/gradle","containerPath":"/root/.gradle/caches"},{"hostPath":"/opt/build-cache/maven","containerPath":"/root/.m2/repository"}]`},
-		{Name: "Java Gradle JDK17 Docker", Category: "java", BuildMode: "docker", DockerImage: "ops-builder-gradle:jdk17", CPULimit: "2", MemoryLimit: "4g", BuildCommand: "gradle clean build -x test", ArtifactDir: "build/libs", Status: "online", CacheMounts: `[{"hostPath":"/opt/build-cache/gradle","containerPath":"/root/.gradle/caches"},{"hostPath":"/opt/build-cache/maven","containerPath":"/root/.m2/repository"}]`},
-		{Name: "Java Maven Docker", Category: "java", BuildMode: "docker", DockerImage: "ops-builder-maven:jdk8", CPULimit: "2", MemoryLimit: "4g", BuildCommand: "mvn clean package -DskipTests", ArtifactDir: "target", Status: "online", CacheMounts: `[{"hostPath":"/opt/build-cache/maven","containerPath":"/root/.m2/repository"}]`},
-		{Name: "本地 Gradle", Category: "java", BuildMode: "local", BuildCommand: "gradle clean build -x test", ArtifactDir: "build/libs", Status: "online"},
-		{Name: "本地 Node", Category: "vue", BuildMode: "local", InstallCommand: "yarn install", BuildCommand: "npm run build:new", ArtifactDir: "dist", Status: "online"},
+		{Name: "本机 Gradle", Category: "java", BuildCommand: "gradle clean build -x test", ArtifactDir: "build/libs", Status: "online"},
+		{Name: "本机 Node", Category: "vue", InstallCommand: "yarn install", BuildCommand: "npm run build:new", ArtifactDir: "dist", Status: "online"},
 	}
 
 	for _, bc := range defaultBuildConfigs {

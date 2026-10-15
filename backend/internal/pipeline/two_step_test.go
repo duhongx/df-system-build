@@ -14,9 +14,10 @@ import (
 )
 
 type countingStage struct {
-	code       string
-	calls      *[]string
-	failedPush bool
+	code        string
+	calls       *[]string
+	failedPush  bool
+	failedStage string
 }
 
 func (s countingStage) Name() string { return s.code }
@@ -28,6 +29,9 @@ func (s countingStage) Run(_ context.Context, pc *types.PipelineContext) (*types
 	}
 	if s.code == "PUSH_IMAGE" && s.failedPush {
 		return nil, errors.New("push denied")
+	}
+	if s.failedStage != "" && s.code == s.failedStage {
+		return nil, errors.New("stage denied")
 	}
 	if s.code == "K8S_DEPLOY" && pc.ImageName != "registry/service:prepared" {
 		return nil, errors.New("rollout used a different image")
@@ -108,7 +112,7 @@ func TestFailedPushCannotEnterRollout(t *testing.T) {
 	for i := range defs {
 		defs[i].Runner = countingStage{code: defs[i].Code, calls: &calls, failedPush: true}
 	}
-	pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType}
+	pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType, AutoRollout: true}
 	if err := NewEngine().executeStages(context.Background(), p, pc, defs); err == nil || errors.Is(err, ErrImageReady) {
 		t.Fatalf("failed push treated as ready: %v", err)
 	}
@@ -121,5 +125,98 @@ func TestFailedPushCannotEnterRollout(t *testing.T) {
 	}
 	if !reflect.DeepEqual(calls, []string{"BUILD_IMAGE", "PUSH_IMAGE"}) {
 		t.Fatalf("failed push continued: %v", calls)
+	}
+}
+
+func TestLocalImageWorkflowsContinueThroughRollout(t *testing.T) {
+	logger.Init("error", "stdout", "")
+	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DB.AutoMigrate(&model.Pipeline{}, &model.PipelineStage{}, &model.StageLog{}, &model.ArtifactDeployRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ appType, mode string }{{"java", "build_image"}, {"java", "artifact_image"}, {"vue", "build_image"}, {"vue", "artifact_image"}} {
+		t.Run(tc.appType+"-"+tc.mode, func(t *testing.T) {
+			p := &model.Pipeline{PipelineNo: "local-" + tc.appType + "-" + tc.mode, AppName: "service", AppType: tc.appType, Status: "RUNNING", DeployMode: tc.mode}
+			if err := repository.NewPipelineRepo().Create(p); err != nil {
+				t.Fatal(err)
+			}
+			var calls []string
+			defs := ResolveStagesWithMode(tc.appType, tc.mode)
+			for i := range defs {
+				defs[i].Runner = countingStage{code: defs[i].Code, calls: &calls}
+			}
+			pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType, AutoRollout: AutoRolloutForEnvironment("本地")}
+			if err := NewEngine().executeStages(context.Background(), p, pc, defs); err != nil {
+				t.Fatal(err)
+			}
+			want := make([]string, len(defs))
+			for i := range defs {
+				want[i] = defs[i].Code
+			}
+			if !reflect.DeepEqual(calls, want) {
+				t.Fatalf("local flow paused or repeated stages: %v", calls)
+			}
+			if !reflect.DeepEqual(calls[len(calls)-2:], []string{"K8S_DEPLOY", "NOTIFY"}) {
+				t.Fatalf("rollout missing: %v", calls)
+			}
+			stages, err := repository.NewStageRepo().FindByPipelineID(p.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, stage := range stages {
+				if stage.Status != "SUCCESS" {
+					t.Fatalf("local stage unfinished: %s %s", stage.StageCode, stage.Status)
+				}
+			}
+			if err := NewEngine().executeStages(context.Background(), p, pc, defs); err == nil {
+				t.Fatal("local flow allowed duplicate execution")
+			}
+		})
+	}
+}
+
+func TestOnlyLocalEnvironmentAutoRollsOut(t *testing.T) {
+	for _, tc := range []struct {
+		environment string
+		want        bool
+	}{{"本地", true}, {" 本地 ", true}, {"", false}, {"浙江", false}, {"新疆", false}, {"本地客户", false}, {"local", false}} {
+		if got := AutoRolloutForEnvironment(tc.environment); got != tc.want {
+			t.Fatalf("environment %q auto rollout=%v", tc.environment, got)
+		}
+	}
+}
+
+func TestLocalRolloutFailureStopsAndRetainsPreparedImage(t *testing.T) {
+	logger.Init("error", "stdout", "")
+	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DB.AutoMigrate(&model.Pipeline{}, &model.PipelineStage{}, &model.StageLog{}, &model.ArtifactDeployRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	p := &model.Pipeline{PipelineNo: "local-rollout-failure", AppName: "service", AppType: "java", Status: "RUNNING", DeployMode: "artifact_image"}
+	if err := repository.NewPipelineRepo().Create(p); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	defs := ResolveStagesWithMode(p.AppType, p.DeployMode)
+	for i := range defs {
+		defs[i].Runner = countingStage{code: defs[i].Code, calls: &calls, failedStage: "K8S_DEPLOY"}
+	}
+	pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType, AutoRollout: true}
+	if err := NewEngine().executeStages(context.Background(), p, pc, defs); err == nil || errors.Is(err, ErrImageReady) {
+		t.Fatal("failed automatic rollout treated as ready or success")
+	}
+	if !reflect.DeepEqual(calls, []string{"BUILD_IMAGE", "PUSH_IMAGE", "K8S_DEPLOY"}) {
+		t.Fatalf("failure did not stop subsequent stages: %v", calls)
+	}
+	saved, err := repository.NewPipelineRepo().FindByID(p.ID)
+	if err != nil || saved.ImageName != "registry/service:prepared" {
+		t.Fatal("prepared image lost", err)
+	}
+	if saved.Stages[2].Status != "FAILED" || saved.Stages[3].Status != "SKIPPED" {
+		t.Fatal("failed automatic deployment stages not preserved")
 	}
 }

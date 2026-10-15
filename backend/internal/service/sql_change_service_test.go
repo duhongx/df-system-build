@@ -232,20 +232,6 @@ func TestSQLFileExecuteRouteStartsBackgroundJob(t *testing.T) {
 	}
 }
 
-func TestSQLBatchExecuteRouteStartsBackgroundJob(t *testing.T) {
-	source, err := os.ReadFile("../handler/postgresql.go")
-	if err != nil {
-		t.Fatalf("read postgresql handler source: %v", err)
-	}
-	content := string(source)
-	if !strings.Contains(content, "StartSQLBatchExecution") {
-		t.Fatalf("SQL batch execute route should start a background execution job")
-	}
-	if strings.Contains(content, "ExecuteSQLBatch(c.Request.Context()") {
-		t.Fatalf("SQL batch execute route must not run all files synchronously on the HTTP request context")
-	}
-}
-
 func TestParseCreateOrReplaceViewRef(t *testing.T) {
 	ref := parseCreateOrReplaceViewRef(`CREATE OR REPLACE VIEW "his"."v_patient" AS SELECT 1`, "public")
 
@@ -289,7 +275,7 @@ func TestParseTableRefForRiskOperations(t *testing.T) {
 	}
 }
 
-func TestLoadSQLExecutionConfigUsesPostgresAdminAndBusinessOwner(t *testing.T) {
+func TestLoadSQLExecutionConfigUsesPostgresAdmin(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	settings := repository.NewSettingsRepo()
 	for key, value := range map[string]string{
@@ -319,8 +305,8 @@ func TestLoadSQLExecutionConfigUsesPostgresAdminAndBusinessOwner(t *testing.T) {
 	if cfg.Password != "admin-password" {
 		t.Fatalf("SQL execution must use admin password, got %q", cfg.Password)
 	}
-	if ownerUser != "df_zhushuju" {
-		t.Fatalf("business owner user should come from postgresql_user, got %q", ownerUser)
+	if ownerUser != "" {
+		t.Fatalf("retired business username must not affect administrator operations, got %q", ownerUser)
 	}
 }
 
@@ -383,28 +369,14 @@ func TestBuildCreateTableOwnerSQL(t *testing.T) {
 	}
 }
 
-func TestParseSQLAllowsSameFileNameAcrossVersionAndSchema(t *testing.T) {
+func TestParseSQLUsesFileNameMetadata(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
-	svc := NewPostgreSQLService()
-	if err := repository.DB.Create(&model.SQLChangeFile{
-		Version:       "15.3_SP13_20260524",
-		SchemaName:    "public",
-		FileName:      "change.sql",
-		FileContent:   "SELECT 1",
-		ExecuteStatus: "PENDING",
-	}).Error; err != nil {
-		t.Fatalf("create existing file: %v", err)
-	}
-
-	_, _, err := svc.ParseSQL(ParseSQLRequest{
-		Version:    "15.3_SP13_20260525",
-		SchemaName: "public",
-		FileName:   "change.sql",
-		Content:    "SELECT 2",
-		Overwrite:  false,
-	})
+	file, _, err := NewPostgreSQLService().ParseSQL(ParseSQLRequest{FileName: "V1__2__his.sql", Version: "ignored", SchemaName: "ignored", Content: "SELECT 1"})
 	if err != nil {
-		t.Fatalf("same file name in a different version should be allowed: %v", err)
+		t.Fatal(err)
+	}
+	if file.Version != "V1" || file.GroupSortNo != 2 || file.SchemaName != "his" {
+		t.Fatalf("unexpected metadata: %+v", file)
 	}
 }
 
@@ -422,50 +394,27 @@ func TestParseSQLFileMetaDoesNotTreatDescriptionAsSchema(t *testing.T) {
 	}
 }
 
-func TestParseSQLInfersSchemaFromContentWhenFileNameHasChineseDescription(t *testing.T) {
+func TestParseSQLRejectsDescriptionInPlaceOfSchema(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
-
-	file, statements, err := NewPostgreSQLService().ParseSQL(ParseSQLRequest{
-		FileName:  "15.3_SP15_260507__18__有需要再执行小数位数相关-有视图依赖需手动执行.sql",
-		Content:   "ALTER TABLE df_bingangl.ba_bingrenfy ALTER COLUMN baidanblzp_xyzp TYPE numeric(18,7);",
-		Overwrite: true,
-	})
-	if err != nil {
-		t.Fatalf("parse sql should infer schema from SQL content, not file name: %v", err)
-	}
-	if file.Version != "15.3_SP15_260507" {
-		t.Fatalf("expected version from file name, got %q", file.Version)
-	}
-	if file.GroupSortNo != 18 {
-		t.Fatalf("expected group sort number from file name, got %d", file.GroupSortNo)
-	}
-	if file.SchemaName != "df_bingangl" {
-		t.Fatalf("expected schema from SQL content, got %q", file.SchemaName)
-	}
-	if len(statements) != 1 {
-		t.Fatalf("expected one statement, got %d", len(statements))
+	_, _, err := NewPostgreSQLService().ParseSQL(ParseSQLRequest{FileName: "V1__18__有需要再执行.sql", Content: "ALTER TABLE his.patient ADD COLUMN note text"})
+	if err == nil || !strings.Contains(err.Error(), "文件名格式") {
+		t.Fatalf("expected explicit filename validation, got %v", err)
 	}
 }
 
-func TestParseSQLPersistsExecutionStrategy(t *testing.T) {
+func TestParseSQLDoesNotAnalyzeOrRewriteStatements(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
-
-	_, statements, err := NewPostgreSQLService().ParseSQL(ParseSQLRequest{
-		FileName:  "strategy.sql",
-		Content:   "CREATE INDEX CONCURRENTLY idx_patient_name ON his.patient(name);",
-		Overwrite: true,
-	})
+	_, rows, err := NewPostgreSQLService().ParseSQL(ParseSQLRequest{FileName: "V1__1__his.sql", Content: "DELETE FROM patient; CREATE INDEX CONCURRENTLY idx_patient_name ON patient(name);"})
 	if err != nil {
-		t.Fatalf("parse sql: %v", err)
+		t.Fatal(err)
 	}
-	if len(statements) != 1 {
-		t.Fatalf("expected one statement, got %d", len(statements))
+	if len(rows) != 2 || rows[0].SQLContent != "DELETE FROM patient" {
+		t.Fatalf("SQL was changed: %+v", rows)
 	}
-	if statements[0].ExecutionStrategy != "DIRECT_NO_TRANSACTION" {
-		t.Fatalf("expected DIRECT_NO_TRANSACTION, got %#v", statements[0])
-	}
-	if statements[0].CanRunInTransaction {
-		t.Fatalf("concurrent index should not run in transaction")
+	for _, row := range rows {
+		if row.RiskLevel != "" || row.ExecutionStrategy != "" || row.ExecuteStatus != "PENDING" {
+			t.Fatalf("unexpected analysis: %+v", row)
+		}
 	}
 }
 
@@ -496,7 +445,7 @@ func TestUpdateSQLFileContentReparsesAndResetsFile(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	svc := NewPostgreSQLService()
 	file, statements, err := svc.ParseSQL(ParseSQLRequest{
-		FileName:   "editable.sql",
+		FileName:   "V1__1__public.sql",
 		SchemaName: "public",
 		Content:    "SELECT 1;",
 		Overwrite:  true,
@@ -859,8 +808,8 @@ func TestParseSQLBatchCreatesOrderedFiles(t *testing.T) {
 		BatchName: "2026-upgrade",
 		Overwrite: true,
 		Files: []ParseSQLBatchFile{
-			{FileName: "002-second.sql", Content: "CREATE TABLE second(id int);"},
-			{FileName: "001-first.sql", Content: "CREATE TABLE first(id int);"},
+			{FileName: "V1__2__his.sql", Content: "CREATE TABLE second(id int);"},
+			{FileName: "V1__1__his.sql", Content: "CREATE TABLE first(id int);"},
 		},
 	})
 	if err != nil {
@@ -872,38 +821,19 @@ func TestParseSQLBatchCreatesOrderedFiles(t *testing.T) {
 	if len(files) != 2 {
 		t.Fatalf("expected 2 files, got %d", len(files))
 	}
-	if files[0].FileName != "001-first.sql" || files[0].BatchSortNo != 1 {
+	if files[0].FileName != "V1__1__his.sql" || files[0].BatchSortNo != 1 {
 		t.Fatalf("expected first sorted file, got %+v", files[0])
 	}
-	if files[1].FileName != "002-second.sql" || files[1].BatchSortNo != 2 {
+	if files[1].FileName != "V1__2__his.sql" || files[1].BatchSortNo != 2 {
 		t.Fatalf("expected second sorted file, got %+v", files[1])
 	}
 }
 
-func TestParseSQLBatchInfersSchemaFromContentWhenFileNameHasChineseDescription(t *testing.T) {
+func TestParseSQLBatchRejectsInvalidFileName(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
-
-	_, files, err := NewPostgreSQLService().ParseSQLBatch(ParseSQLBatchRequest{
-		BatchName: "15.3_SP15_260507_18_有需要再执行小数位数相关-有视图依赖需手动执行",
-		Overwrite: true,
-		Files: []ParseSQLBatchFile{
-			{
-				FileName: "15.3_SP15_260507__18__有需要再执行小数位数相关-有视图依赖需手动执行.sql",
-				Content:  "ALTER TABLE df_bingangl.ba_bingrenfy ALTER COLUMN baidanblzp_xyzp TYPE numeric(18,7);",
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("parse sql batch should infer schema from SQL content, not file name: %v", err)
-	}
-	if len(files) != 1 {
-		t.Fatalf("expected one file, got %d", len(files))
-	}
-	if files[0].SchemaName != "df_bingangl" {
-		t.Fatalf("expected schema from SQL content, got %q", files[0].SchemaName)
-	}
-	if files[0].GroupSortNo != 18 {
-		t.Fatalf("expected group sort number from file name, got %d", files[0].GroupSortNo)
+	_, _, err := NewPostgreSQLService().ParseSQLBatch(ParseSQLBatchRequest{Files: []ParseSQLBatchFile{{FileName: "V1__1__说明.sql", Content: "SELECT 1"}}})
+	if err == nil {
+		t.Fatal("batch import accepted a filename without schema")
 	}
 }
 
@@ -911,7 +841,7 @@ func TestParseSQLBatchRollsBackWhenOneFileFails(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	svc := NewPostgreSQLService()
 	if _, _, err := svc.ParseSQL(ParseSQLRequest{
-		FileName:  "002-existing.sql",
+		FileName:  "V1__2__public.sql",
 		Content:   "SELECT 1;",
 		Overwrite: false,
 	}); err != nil {
@@ -922,8 +852,8 @@ func TestParseSQLBatchRollsBackWhenOneFileFails(t *testing.T) {
 		BatchName: "rollback-batch",
 		Overwrite: false,
 		Files: []ParseSQLBatchFile{
-			{FileName: "001-created-before-failure.sql", Content: "SELECT 1;"},
-			{FileName: "002-existing.sql", Content: "SELECT 2;"},
+			{FileName: "V1__1__public.sql", Content: "SELECT 1;"},
+			{FileName: "V1__2__public.sql", Content: "SELECT 2;"},
 		},
 	})
 	if err == nil {
@@ -938,7 +868,7 @@ func TestParseSQLBatchRollsBackWhenOneFileFails(t *testing.T) {
 		t.Fatalf("expected failed batch parse to roll back batch row, got %d", batchCount)
 	}
 	var createdCount int64
-	if err := repository.DB.Model(&model.SQLChangeFile{}).Where("file_name = ?", "001-created-before-failure.sql").Count(&createdCount).Error; err != nil {
+	if err := repository.DB.Model(&model.SQLChangeFile{}).Where("file_name = ?", "V1__1__public.sql").Count(&createdCount).Error; err != nil {
 		t.Fatalf("count files: %v", err)
 	}
 	if createdCount != 0 {
@@ -952,11 +882,11 @@ func TestExecuteSQLBatchPersistsFileLevelErrors(t *testing.T) {
 	if err := repository.DB.Create(&batch).Error; err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	file := model.SQLChangeFile{BatchID: batch.ID, BatchSortNo: 1, FileName: "missing-config.sql", ExecuteStatus: "PENDING"}
+	file := model.SQLChangeFile{BatchID: batch.ID, BatchSortNo: 1, FileName: "missing-config.sql", SchemaName: "his", ExecuteStatus: "PENDING"}
 	if err := repository.DB.Create(&file).Error; err != nil {
 		t.Fatalf("create file: %v", err)
 	}
-	nextFile := model.SQLChangeFile{BatchID: batch.ID, BatchSortNo: 2, FileName: "missing-config-next.sql", ExecuteStatus: "PENDING"}
+	nextFile := model.SQLChangeFile{BatchID: batch.ID, BatchSortNo: 2, FileName: "missing-config-next.sql", SchemaName: "his", ExecuteStatus: "PENDING"}
 	if err := repository.DB.Create(&nextFile).Error; err != nil {
 		t.Fatalf("create next file: %v", err)
 	}
@@ -975,14 +905,14 @@ func TestExecuteSQLBatchPersistsFileLevelErrors(t *testing.T) {
 	if err := repository.DB.First(&got, file.ID).Error; err != nil {
 		t.Fatalf("reload file: %v", err)
 	}
-	if got.ExecuteStatus != "FAILED" || !strings.Contains(got.ExecuteMessage, "PostgreSQL 主机地址未配置") {
+	if got.ExecuteStatus != "FAILED" || !strings.Contains(got.ExecuteMessage, "postgresql_host") {
 		t.Fatalf("expected file-level error to be persisted, got %+v", got)
 	}
 	var gotNext model.SQLChangeFile
 	if err := repository.DB.First(&gotNext, nextFile.ID).Error; err != nil {
 		t.Fatalf("reload next file: %v", err)
 	}
-	if gotNext.ExecuteStatus != "FAILED" || !strings.Contains(gotNext.ExecuteMessage, "PostgreSQL 主机地址未配置") {
+	if gotNext.ExecuteStatus != "FAILED" || !strings.Contains(gotNext.ExecuteMessage, "postgresql_host") {
 		t.Fatalf("expected batch execution to continue and persist next file-level error, got %+v", gotNext)
 	}
 }
@@ -1217,7 +1147,7 @@ func TestAutocompleteSQLStatementSchemaFillsUniqueRelation(t *testing.T) {
 	}
 }
 
-func TestCreateSQLStatementsForFileCompletesCommentSchemaFromFileContext(t *testing.T) {
+func TestCreateSQLStatementsForFilePreservesCommentSQL(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	content := `
 CREATE TABLE df_yaokufang.gy_mashangfxdjmx (id bigint);
@@ -1238,11 +1168,11 @@ SELECT 1;`
 	if len(items) != 4 {
 		t.Fatalf("expected 4 statements, got %d", len(items))
 	}
-	if !strings.Contains(items[1].SQLContent, "COMMENT ON TABLE df_yaokufang.gy_mashangfxdjmx") {
-		t.Fatalf("expected table comment schema completion, got %q", items[1].SQLContent)
+	if !strings.Contains(items[1].SQLContent, "COMMENT ON TABLE gy_mashangfxdjmx") {
+		t.Fatalf("expected original table comment, got %q", items[1].SQLContent)
 	}
-	if !strings.Contains(items[2].SQLContent, "COMMENT ON COLUMN df_yaokufang.gy_mashangfxdjmx.id") {
-		t.Fatalf("expected column comment schema completion, got %q", items[2].SQLContent)
+	if !strings.Contains(items[2].SQLContent, "COMMENT ON COLUMN gy_mashangfxdjmx.id") {
+		t.Fatalf("expected original column comment, got %q", items[2].SQLContent)
 	}
 	for _, item := range items[1:3] {
 		if item.SQLType == "MISSING_SCHEMA" || item.ExecuteStatus == "NOT_EXECUTABLE" {
@@ -1272,8 +1202,8 @@ COMMENT ON TABLE gy_same_name IS 'same table';`
 	if strings.Contains(items[2].SQLContent, "df_a.gy_same_name") || strings.Contains(items[2].SQLContent, "df_b.gy_same_name") {
 		t.Fatalf("ambiguous relation must not be auto-completed, got %q", items[2].SQLContent)
 	}
-	if items[2].SQLType != "MISSING_SCHEMA" || items[2].ExecuteStatus != "NOT_EXECUTABLE" {
-		t.Fatalf("expected ambiguous comment to require manual schema handling, got %+v", items[2])
+	if items[2].RiskLevel != "" || items[2].ExecuteStatus != "PENDING" {
+		t.Fatalf("expected original comment ready for database execution, got %+v", items[2])
 	}
 }
 
@@ -1294,8 +1224,8 @@ SELECT 1;`
 	if len(items) != 2 {
 		t.Fatalf("expected 2 statements, got %d", len(items))
 	}
-	if items[0].SQLType != "MISSING_SCHEMA" || items[0].ExecuteStatus != "NOT_EXECUTABLE" {
-		t.Fatalf("expected unresolved comment to require manual schema handling, got %+v", items[0])
+	if items[0].RiskLevel != "" || items[0].ExecuteStatus != "PENDING" {
+		t.Fatalf("expected original comment ready for database execution, got %+v", items[0])
 	}
 	if items[1].ExecuteStatus != "PENDING" {
 		t.Fatalf("expected following SQL to remain executable, got %+v", items[1])

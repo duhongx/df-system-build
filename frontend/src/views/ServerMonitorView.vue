@@ -79,7 +79,7 @@ function handleBack() {
         <el-button size="small" @click="handleBack"><el-icon><ArrowLeft /></el-icon>返回</el-button>
         <span class="server-info" v-if="server">
           {{ server.host }} ({{ server.remark || server.host }})
-          <el-tag type="success" size="small" style="margin-left: 8px;">监控中</el-tag>
+          <el-tag :type="error ? 'danger' : metrics ? 'success' : 'info'" size="small" style="margin-left: 8px;">{{ error ? '监控不可用' : metrics ? '监控中' : '正在连接' }}</el-tag>
         </span>
       </div>
       <div class="header-right">

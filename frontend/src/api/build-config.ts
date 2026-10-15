@@ -4,11 +4,6 @@ export interface BuildConfig {
   id: number
   name: string
   category: 'java' | 'vue'
-  buildMode: 'docker' | 'local'
-  dockerImage?: string
-  cpuLimit?: string
-  memoryLimit?: string
-  cacheMounts?: string
   installCommand?: string
   buildCommand: string
   artifactDir?: string
@@ -31,4 +26,8 @@ export function updateBuildConfig(id: number, data: Partial<BuildConfig>) {
 
 export function deleteBuildConfig(id: number) {
   return request.delete<any, null>(`/build-configs/${id}`)
+}
+
+export function getDefaultBuildConfigs() {
+  return request.get<any, Partial<Record<'java' | 'vue', BuildConfig>>>('/build-configs/defaults')
 }

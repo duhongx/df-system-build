@@ -115,7 +115,7 @@ async function deleteVersion(batch: ArtifactVersion) {
 </script>
 
 <template>
-  <div class="artifact-batches-page">
+  <div class="artifact-batches-page viewport-table-page">
     <div class="page-header">
       <div>
         <h4>更新版本</h4>
@@ -143,7 +143,7 @@ async function deleteVersion(batch: ArtifactVersion) {
     </div>
 
     <el-card shadow="never" class="table-card">
-      <el-table :data="batches" v-loading="loading" border stripe height="620">
+      <el-table height="100%" :data="batches" v-loading="loading" border stripe>
         <el-table-column prop="versionNo" label="版本号" min-width="220" show-overflow-tooltip />
         <el-table-column label="来源" width="120">
           <template #default="{ row }">{{ sourceTypeText(row.sourceType) }}</template>

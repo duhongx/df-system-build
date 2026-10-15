@@ -7,38 +7,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"df-build-server/pkg/logger"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/archive"
 )
 
-// CacheMount represents a host-to-container volume mapping
-type CacheMount struct {
-	HostPath      string `json:"hostPath"`
-	ContainerPath string `json:"containerPath"`
-}
-
 // AuthConfig is an alias for Docker registry auth config
 type AuthConfig = types.AuthConfig
-
-// ContainerOpts defines options for running a Docker container
-type ContainerOpts struct {
-	Image       string
-	Command     []string
-	WorkDir     string
-	SourceDir   string
-	CacheMounts []CacheMount
-	CPULimit    string
-	MemLimit    string
-}
 
 // Client wraps Docker SDK interactions
 type Client struct {
@@ -72,9 +53,7 @@ func NewClient(ctx context.Context, host string) (*Client, error) {
 type CmdReader struct {
 	reader     io.ReadCloser
 	ExitCode   int
-	done       bool
 	hasError   atomic.Bool
-	waitFn     func() int64
 	streamDone <-chan struct{}
 	streamErr  error
 	stopStream func()
@@ -96,122 +75,10 @@ func (r *CmdReader) Close() error {
 			return r.streamErr
 		}
 	}
-	if !r.done && r.waitFn != nil {
-		r.ExitCode = int(r.waitFn())
-		r.done = true
-	}
 	// If stream reported an error but exit code is 0, override
 	if r.hasError.Load() && r.ExitCode == 0 {
 		r.ExitCode = 1
 	}
-	return nil
-}
-
-// RunContainer starts a container and returns a CmdReader for streaming output
-func (c *Client) RunContainer(ctx context.Context, opts ContainerOpts) (*CmdReader, error) {
-	var binds []string
-	if opts.SourceDir != "" && opts.WorkDir != "" {
-		binds = append(binds, fmt.Sprintf("%s:%s", opts.SourceDir, opts.WorkDir))
-	}
-	for _, cm := range opts.CacheMounts {
-		if cm.HostPath != "" && cm.ContainerPath != "" {
-			binds = append(binds, fmt.Sprintf("%s:%s", cm.HostPath, cm.ContainerPath))
-		}
-	}
-
-	var memLimit int64
-	if opts.MemLimit != "" {
-		memLimit = parseMemory(opts.MemLimit)
-	}
-	var cpuQuota int64
-	if opts.CPULimit != "" {
-		cpuQuota = parseCPU(opts.CPULimit)
-	}
-
-	cfg := &container.Config{
-		Image: opts.Image, Cmd: opts.Command, WorkingDir: opts.WorkDir,
-	}
-	hostCfg := &container.HostConfig{
-		Binds:     binds,
-		Resources: container.Resources{Memory: memLimit, CPUQuota: cpuQuota},
-	}
-
-	logger.Log.Infof("Docker SDK: run %s %v", opts.Image, opts.Command)
-
-	resp, err := c.cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, "")
-	if err != nil {
-		return nil, fmt.Errorf("容器创建失败: %w", err)
-	}
-	containerID := resp.ID
-
-	if err := c.cli.ContainerStart(ctx, containerID, types.ContainerStartOptions{}); err != nil {
-		c.cli.ContainerRemove(ctx, containerID, types.ContainerRemoveOptions{Force: true})
-		return nil, fmt.Errorf("容器启动失败: %w", err)
-	}
-
-	logReader, err := c.cli.ContainerLogs(ctx, containerID, types.ContainerLogsOptions{
-		ShowStdout: true, ShowStderr: true, Follow: true,
-	})
-	if err != nil {
-		c.cli.ContainerRemove(ctx, containerID, types.ContainerRemoveOptions{Force: true})
-		return nil, fmt.Errorf("获取容器日志失败: %w", err)
-	}
-
-	pr, pw := io.Pipe()
-	go func() {
-		defer pw.Close()
-		defer logReader.Close()
-		done := ctx.Done()
-		buf := make([]byte, 32*1024)
-		for {
-			select {
-			case <-done:
-				return
-			default:
-			}
-			n, err := logReader.Read(buf)
-			if n > 0 {
-				pw.Write(buf[:n])
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	cliRef := c.cli
-	waitFn := func() int64 {
-		statusCh, errCh := cliRef.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
-		select {
-		case err := <-errCh:
-			if err != nil {
-				return -1
-			}
-			return -1
-		case status := <-statusCh:
-			cliRef.ContainerRemove(context.Background(), containerID, types.ContainerRemoveOptions{Force: true})
-			return status.StatusCode
-		}
-	}
-
-	return &CmdReader{reader: pr, ExitCode: 0, waitFn: waitFn}, nil
-}
-
-// PullImage pulls a Docker image if not present locally
-func (c *Client) PullImage(ctx context.Context, imageName string) error {
-	_, _, err := c.cli.ImageInspectWithRaw(ctx, imageName)
-	if err == nil {
-		return nil
-	}
-
-	logger.Log.Infof("Pulling image: %s", imageName)
-	reader, err := c.cli.ImagePull(ctx, imageName, types.ImagePullOptions{})
-	if err != nil {
-		return fmt.Errorf("拉取镜像失败: %w", err)
-	}
-	defer reader.Close()
-	io.Copy(io.Discard, reader)
-	logger.Log.Infof("Image pulled: %s", imageName)
 	return nil
 }
 
@@ -311,19 +178,6 @@ func GetAuthStr(username, password string) string {
 	return base64.URLEncoding.EncodeToString(encodedJSON)
 }
 
-// ParseCacheMounts parses JSON string into CacheMount slice
-func ParseCacheMounts(jsonStr string) []CacheMount {
-	if jsonStr == "" || jsonStr == "[]" {
-		return nil
-	}
-	var mounts []CacheMount
-	if err := json.Unmarshal([]byte(jsonStr), &mounts); err != nil {
-		logger.Log.Warnf("Failed to parse cacheMounts: %v", err)
-		return nil
-	}
-	return mounts
-}
-
 // ReadLines reads from a reader line by line
 func ReadLines(reader io.Reader, callback func(line string)) error {
 	scanner := bufio.NewScanner(reader)
@@ -333,18 +187,3 @@ func ReadLines(reader io.Reader, callback func(line string)) error {
 	}
 	return scanner.Err()
 }
-
-func parseMemory(s string) int64 {
-	s = strings.TrimSpace(strings.ToLower(s))
-	if strings.HasSuffix(s, "g") {
-		return parseInt64(strings.TrimSuffix(s, "g")) * 1024 * 1024 * 1024
-	}
-	if strings.HasSuffix(s, "m") {
-		return parseInt64(strings.TrimSuffix(s, "m")) * 1024 * 1024
-	}
-	return parseInt64(s)
-}
-
-func parseCPU(s string) int64 { return parseInt64(strings.TrimSpace(s)) * 100000 }
-
-func parseInt64(s string) int64 { var v int64; fmt.Sscanf(s, "%d", &v); return v }

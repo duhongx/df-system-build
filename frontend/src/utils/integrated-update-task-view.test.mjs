@@ -9,7 +9,7 @@ assert.match(view, /制品来源/, 'batch deploy page should expose artifact sou
 assert.match(view, /本地上传/, 'batch deploy page should support local upload in the same workflow')
 assert.match(view, /服务器下载/, 'batch deploy page should support server download in the same workflow')
 assert.match(view, /应用匹配/, 'batch deploy page should keep application matching in the same workflow')
-assert.match(view, /构建与部署/, 'batch deploy page should expose build and deploy actions in the same workflow')
+assert.match(view, /构建与滚动更新/, 'batch deploy page should expose build and deploy actions in the same workflow')
 assert.match(view, /startDownloadRemoteDir/, 'batch deploy page should start server download without leaving the page')
 assert.match(view, /executeBatchDeploy/, 'batch deploy page should create deploy pipelines from the same page')
 assert.doesNotMatch(view, /制品上传和服务器下载在制品管理中处理/, 'batch deploy page should no longer tell users to switch pages for import')

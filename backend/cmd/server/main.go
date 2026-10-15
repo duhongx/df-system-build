@@ -17,6 +17,7 @@ import (
 	"df-build-server/internal/middleware"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/scheduler"
+	"df-build-server/internal/service"
 	"df-build-server/internal/web"
 	"df-build-server/pkg/config"
 	"df-build-server/pkg/logger"
@@ -65,6 +66,13 @@ func main() {
 	}
 	repository.RunMigrations()
 	repository.SeedCoreData()
+	if err := service.RecoverInterruptedSQLFiles(); err != nil {
+		logger.Log.Fatalf("恢复 SQL 执行状态失败: %v", err)
+	}
+	logCollection := service.NewLogCollectionService(repository.DB, cfg.Workspace.BaseDir)
+	if err := logCollection.RecoverInterrupted(); err != nil {
+		logger.Log.Fatalf("恢复日志收集状态失败: %v", err)
+	}
 
 	// Finalize any deployment runs left "in flight" by a previous crash.
 	if n, err := deployrepo.FinalizeOrphanedRuns(repository.DB); err != nil {
@@ -114,7 +122,6 @@ func main() {
 	handler.NewAuthHandler().RegisterRoutes(api)
 	handler.NewApplicationHandler().RegisterRoutes(api)
 	handler.NewTemplateHandler().RegisterRoutes(api)
-	handler.NewExecutorHandler().RegisterRoutes(api)
 	handler.NewBuildConfigHandler().RegisterRoutes(api)
 	handler.NewServerHandler().RegisterRoutes(api)
 	handler.NewNotificationHandler().RegisterRoutes(api)
@@ -130,6 +137,7 @@ func main() {
 	handler.NewWebSSHHandler().RegisterRoutes(api)
 	handler.NewWebSFTPHandler().RegisterRoutes(api)
 	handler.NewServerMonitorHandler().RegisterRoutes(api)
+	handler.NewLogCollectionHandler(logCollection).RegisterRoutes(api)
 	handler.NewKubernetesHandler().RegisterRoutes(api)
 	handler.NewK8sWatchHandler().RegisterRoutes(api)
 	handler.NewBatchDeployHandler().RegisterRoutes(api)

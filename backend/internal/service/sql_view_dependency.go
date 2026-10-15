@@ -3,6 +3,7 @@ package service
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -305,10 +306,13 @@ func BuildSQLViewDependencyTransactionalSteps(task model.SQLViewDependencyTask, 
 	return steps
 }
 
+type SQLViewDependencyRestoreGroup struct{ DropIndex, Start, End int }
 type SQLViewDependencyStepExecutionPlan struct {
-	DropSteps    []string
-	AlterSteps   []string
-	RestoreSteps []string
+	LockTimeout, StatementTimeout string
+	RestoreGroups                 []SQLViewDependencyRestoreGroup
+	DropSteps                     []string
+	AlterSteps                    []string
+	RestoreSteps                  []string
 }
 
 func (p SQLViewDependencyStepExecutionPlan) AllSteps() []string {
@@ -320,14 +324,25 @@ func (p SQLViewDependencyStepExecutionPlan) AllSteps() []string {
 }
 
 func BuildSQLViewDependencyStepExecutionPlan(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) SQLViewDependencyStepExecutionPlan {
-	plan := SQLViewDependencyStepExecutionPlan{}
+	plan := SQLViewDependencyStepExecutionPlan{LockTimeout: task.LockTimeout, StatementTimeout: task.StatementTimeout}
+	dropIndices := map[string]int{}
 	for _, item := range orderedViewDependencyDropItems(items) {
+		if strings.TrimSpace(item.DropSQL) == "" {
+			continue
+		}
+		dropIndices[item.DropSQL] = len(plan.DropSteps)
 		appendSQLStep(&plan.DropSteps, item.DropSQL)
 	}
 	for _, alterSQL := range alterSQLStatementsForTask(task) {
 		appendSQLStep(&plan.AlterSteps, alterSQL)
 	}
-	appendSQLViewDependencyRestoreSteps(&plan.RestoreSteps, items)
+	for _, item := range orderedViewDependencyRestoreItems(items) {
+		start := len(plan.RestoreSteps)
+		plan.RestoreSteps = append(plan.RestoreSteps, BuildSQLViewDependencyItemRestoreSteps(item)...)
+		if idx, ok := dropIndices[item.DropSQL]; ok {
+			plan.RestoreGroups = append(plan.RestoreGroups, SQLViewDependencyRestoreGroup{DropIndex: idx, Start: start, End: len(plan.RestoreSteps)})
+		}
+	}
 	return plan
 }
 
@@ -462,31 +477,86 @@ func (e SQLViewDependencyStepExecutionError) Error() string {
 }
 
 func (e SQLViewDependencyStepExecutionError) Unwrap() error {
-	return e.Err
+	return errors.Join(e.Err, e.RestoreErr)
 }
 
-func runSQLViewDependencyStepExecution(executor sqlViewDependencyExecutor, plan SQLViewDependencyStepExecutionPlan) error {
-	for _, step := range plan.DropSteps {
-		if err := executor.Exec(step); err != nil {
-			return SQLViewDependencyStepExecutionError{Stage: "删除依赖视图", Err: err}
-		}
+func partialViewRestoreIndices(plan SQLViewDependencyStepExecutionPlan, dropped int) ([]int, error) {
+	if dropped == 0 {
+		return nil, nil
 	}
-	for _, step := range plan.AlterSteps {
-		if err := executor.Exec(step); err != nil {
-			restoreErr := runSQLViewDependencySteps(executor, plan.RestoreSteps)
-			return SQLViewDependencyStepExecutionError{
-				Stage:            "字段变更",
-				Err:              err,
-				RestoreAttempted: true,
-				RestoreSucceeded: restoreErr == nil,
-				RestoreErr:       restoreErr,
+	if len(plan.RestoreGroups) == 0 {
+		return nil, fmt.Errorf("缺少已删除对象与恢复步骤的对应关系，请使用备份恢复")
+	}
+	var indices []int
+	for _, group := range plan.RestoreGroups {
+		if group.DropIndex < dropped {
+			for i := group.Start; i < group.End; i++ {
+				indices = append(indices, i)
 			}
 		}
 	}
-	for _, step := range plan.RestoreSteps {
-		if err := executor.Exec(step); err != nil {
-			return SQLViewDependencyStepExecutionError{Stage: "恢复依赖视图", Err: err, RestoreAttempted: true, RestoreSucceeded: false, RestoreErr: err}
+	return indices, nil
+}
+func runSQLViewDependencyStepExecution(executor sqlViewDependencyExecutor, plan SQLViewDependencyStepExecutionPlan) error {
+	return runViewStepPlan(plan, func(index int, stage, text string, recovering bool) error { return executor.Exec(text) }, func(index int) error { return nil })
+}
+
+// Fixed plan indices survive early failures; skipped ALTERs never receive restore results.
+func runViewStepPlan(plan SQLViewDependencyStepExecutionPlan, run func(int, string, string, bool) error, skip func(int) error) error {
+	dropEnd, alterEnd := len(plan.DropSteps), len(plan.DropSteps)+len(plan.AlterSteps)
+	restore := func(cause error, stage string, indices []int, mappingErr error) error {
+		restoreErr := mappingErr
+		for _, idx := range indices {
+			if err := run(alterEnd+idx, "恢复依赖视图", plan.RestoreSteps[idx], true); err != nil {
+				restoreErr = errors.Join(restoreErr, err)
+			}
 		}
+		for idx := range plan.RestoreSteps {
+			selected := false
+			for _, used := range indices {
+				if idx == used {
+					selected = true
+					break
+				}
+			}
+			if !selected {
+				restoreErr = errors.Join(restoreErr, skip(alterEnd+idx))
+			}
+		}
+		return SQLViewDependencyStepExecutionError{Stage: stage, Err: cause, RestoreAttempted: len(indices) > 0 || mappingErr != nil, RestoreSucceeded: restoreErr == nil, RestoreErr: restoreErr}
+	}
+	for idx, step := range plan.DropSteps {
+		if err := run(idx, "删除依赖视图", step, false); err != nil {
+			for pending := idx + 1; pending < alterEnd; pending++ {
+				err = errors.Join(err, skip(pending))
+			}
+			dropped := idx
+			var committed sqlViewStepCommittedError
+			if errors.As(err, &committed) {
+				dropped++
+			}
+			indices, mappingErr := partialViewRestoreIndices(plan, dropped)
+			return restore(err, "删除依赖视图", indices, mappingErr)
+		}
+	}
+	for idx, step := range plan.AlterSteps {
+		if err := run(dropEnd+idx, "字段变更", step, false); err != nil {
+			for pending := dropEnd + idx + 1; pending < alterEnd; pending++ {
+				err = errors.Join(err, skip(pending))
+			}
+			indices := make([]int, len(plan.RestoreSteps))
+			for i := range indices {
+				indices[i] = i
+			}
+			return restore(err, "字段变更", indices, nil)
+		}
+	}
+	var restoreErr error
+	for idx, step := range plan.RestoreSteps {
+		restoreErr = errors.Join(restoreErr, run(alterEnd+idx, "恢复依赖视图", step, false))
+	}
+	if restoreErr != nil {
+		return SQLViewDependencyStepExecutionError{Stage: "恢复依赖视图", Err: restoreErr, RestoreAttempted: true, RestoreSucceeded: false, RestoreErr: restoreErr}
 	}
 	return nil
 }

@@ -18,7 +18,7 @@ func ResolveStages(appType string) []StageDefinition {
 }
 
 // NormalizeDeployMode keeps stored tasks compatible while all image workflows
-// now finish image preparation before a separate rollout operation.
+// use the environment to choose automatic or separate rollout.
 func NormalizeDeployMode(mode string) string {
 	switch mode {
 	case "artifact_image", "artifact_deploy", "manual":
@@ -32,8 +32,8 @@ func NormalizeDeployMode(mode string) string {
 	}
 }
 
-// ResolveStagesWithMode describes both steps. The engine ends step one after
-// PUSH_IMAGE; K8S_DEPLOY and NOTIFY run only when rollout is submitted.
+// ResolveStagesWithMode describes both steps. Outside local environments the engine ends step one after
+// PUSH_IMAGE; local execution continues directly through K8S_DEPLOY and NOTIFY.
 func ResolveStagesWithMode(appType, deployMode string) []StageDefinition {
 	deployMode = NormalizeDeployMode(deployMode)
 	if deployMode == "artifact_image" {
@@ -54,13 +54,13 @@ func ResolveStagesWithMode(appType, deployMode string) []StageDefinition {
 		defs = []StageDefinition{
 			{Code: "CLEAN_WORKSPACE", Name: "清理工作区", Runner: &stages.CleanWorkspaceStage{}},
 			{Code: "GIT_CLONE", Name: "拉取代码", Runner: &stages.GitCloneStage{}},
-			{Code: "GRADLE_BUILD", Name: "Gradle 编译", Runner: &stages.DockerBuildStage{}},
+			{Code: "GRADLE_BUILD", Name: "本机编译", Runner: &stages.LocalBuildStage{}},
 		}
 	case "vue":
 		defs = []StageDefinition{
 			{Code: "CLEAN_WORKSPACE", Name: "清理工作区", Runner: &stages.CleanWorkspaceStage{}},
 			{Code: "GIT_CLONE", Name: "拉取代码", Runner: &stages.GitCloneStage{}},
-			{Code: "YARN_BUILD", Name: "安装依赖并编译", Runner: &stages.DockerBuildStage{}},
+			{Code: "YARN_BUILD", Name: "安装依赖并编译", Runner: &stages.LocalBuildStage{}},
 			{Code: "ZIP_PACKAGE", Name: "打包制品", Runner: &stages.ZipPackageStage{}},
 		}
 	default:

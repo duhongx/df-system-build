@@ -146,7 +146,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="page">
+  <div class="page viewport-table-page">
     <div class="page-head">
       <h4 class="page-title">部署运行</h4>
       <div>
@@ -158,7 +158,7 @@ onMounted(load)
     <el-alert v-if="running.length" type="info" :closable="false" :title="`当前有 ${running.length} 个任务正在执行`" style="margin-bottom: 12px;" />
 
     <div class="content-card">
-      <el-table :data="runs" v-loading="loading" size="small" border stripe
+      <el-table height="100%" :data="runs" v-loading="loading" size="small" border stripe
         @row-click="(row: DeploymentRun) => router.push(`/deployment/runs/${row.id}`)" style="cursor: pointer;">
         <el-table-column prop="id" label="#" width="70" />
         <el-table-column label="时间" width="170">

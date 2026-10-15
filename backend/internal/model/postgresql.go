@@ -51,6 +51,7 @@ type SQLChangeStatement struct {
 	ExecutionStrategy   string     `gorm:"size:32" json:"executionStrategy"`
 	ExecuteStatus       string     `gorm:"size:24;index" json:"executeStatus"`
 	ExecuteMessage      string     `gorm:"type:text" json:"executeMessage"`
+	ExecuteUser         string     `gorm:"size:64" json:"executeUser"`
 	SQLState            string     `gorm:"size:16" json:"sqlState"`
 	AffectedRows        int64      `json:"affectedRows"`
 	DurationMs          int64      `json:"durationMs"`
@@ -73,6 +74,7 @@ type SQLViewBackup struct {
 }
 
 type SQLViewDependencyTask struct {
+	OutcomeUncertain bool       `json:"outcomeUncertain"`
 	ID               uint       `gorm:"primaryKey" json:"id"`
 	SchemaName       string     `gorm:"size:64;index" json:"schemaName"`
 	TableName        string     `gorm:"size:128;index" json:"tableName"`

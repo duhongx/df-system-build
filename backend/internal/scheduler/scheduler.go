@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -405,12 +406,10 @@ func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext 
 		}
 	}
 
-	// BuildMode is determined by the BuildConfig itself (no global override)
-	// User selects the BuildConfig in the task, which already specifies docker/local mode.
-
 	// Get build/install command from application config (falling back to BuildConfig, then sensible defaults)
 	buildCmd := ""
 	installCmd := ""
+	artifactDir := ""
 	vueRole := ""
 	appCode := ""
 	nodePort := 0
@@ -421,6 +420,9 @@ func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext 
 	if app, err := s.appRepo.FindByID(p.ApplicationID); err == nil && app != nil {
 		buildCmd = app.BuildCommand
 		installCmd = app.InstallCommand
+		if p.TaskID > 0 {
+			artifactDir = app.ArtifactDir
+		}
 		vueRole = app.VueRole
 		appCode = app.AppCode
 		nodePort = app.NodePort
@@ -450,6 +452,9 @@ func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext 
 	}
 	if installCmd == "" && buildConfig != nil {
 		installCmd = buildConfig.InstallCommand
+	}
+	if artifactDir == "" && buildConfig != nil {
+		artifactDir = buildConfig.ArtifactDir
 	}
 	// Final fallback to defaults
 	if buildCmd == "" {
@@ -483,6 +488,7 @@ func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext 
 		AppType:          p.AppType,
 		AppName:          p.AppName,
 		ArtifactName:     p.ArtifactName,
+		ArtifactDir:      artifactDir,
 		BuildCommand:     buildCmd,
 		InstallCommand:   installCmd,
 		VueRole:          vueRole,
@@ -500,6 +506,9 @@ func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext 
 
 // CreateAndEnqueue creates a pipeline record and enqueues it
 func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string) (*model.Pipeline, error) {
+	if err := repository.RequireSourceBuild(); err != nil {
+		return nil, err
+	}
 	taskRepo := repository.NewTaskRepo()
 	pipelineRepo := repository.NewPipelineRepo()
 	appRepo := repository.NewApplicationRepo()
@@ -515,6 +524,14 @@ func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string) (*model.Pipeli
 		return nil, fmt.Errorf("关联应用不存在")
 	}
 
+	if strings.TrimSpace(app.GitRepo) == "" {
+		return nil, fmt.Errorf("源码任务需要配置应用的 Git 仓库")
+	}
+	bc, err := repository.NewBuildConfigRepo().FindByID(task.BuildConfigID)
+	if err != nil || bc.Status != "online" {
+		return nil, fmt.Errorf("编译配置不可用，请配置本机编译工具和命令后启用")
+	}
+
 	// Existing source-build task settings retain upload-only/upload behavior.
 	deployMode := pipeline.NormalizeDeployMode(task.DeployMode)
 	if task.DeployMode == "" {
@@ -524,12 +541,11 @@ func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string) (*model.Pipeli
 		}
 		deployMode = pipeline.NormalizeDeployMode(configured)
 	}
-	namespace := task.K8sNamespace
-	if namespace == "" {
-		namespace, err = k8s.GetDefaultNamespace()
-		if err != nil {
-			return nil, err
-		}
+	// New pipelines always use the environment namespace; historical pipelines
+	// retain the namespace captured when they were submitted.
+	namespace, err := k8s.GetDefaultNamespace()
+	if err != nil {
+		return nil, err
 	}
 
 	p := &model.Pipeline{
@@ -542,15 +558,9 @@ func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string) (*model.Pipeli
 		GitBranch:     gitBranch,
 		Status:        "PENDING",
 		TriggerUser:   triggerUser,
-		BuilderImage: func() string {
-			if task.BuildConfigID > 0 && task.BuildConfig.ID > 0 {
-				return task.BuildConfig.DockerImage
-			}
-			return ""
-		}(),
-		ArtifactName: app.DeriveArtifactName(),
-		DeployMode:   deployMode,
-		K8sNamespace: namespace,
+		ArtifactName:  app.DeriveArtifactName(),
+		DeployMode:    deployMode,
+		K8sNamespace:  namespace,
 	}
 
 	if err := pipelineRepo.Create(p); err != nil {

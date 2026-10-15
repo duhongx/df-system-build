@@ -23,7 +23,6 @@ export interface Application {
   artifactName?: string
   buildCommand?: string
   installCommand?: string
-  builderImage?: string
   enabled?: boolean
   lastBuildStatus?: string | null
   lastBuildTime?: string | null

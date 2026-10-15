@@ -52,7 +52,7 @@ func (h *PipelineHandler) List(c *gin.Context) {
 	status := c.Query("status")
 
 	params := repository.PipelineListParams{
-		Page: page, PageSize: pageSize, AppName: appName, Status: status,
+		Page: page, PageSize: pageSize, AppName: appName, Status: status, Search: c.Query("search"), AppType: c.Query("appType"),
 	}
 
 	list, total, err := h.pipelineRepo.List(params)
@@ -74,11 +74,26 @@ func (h *PipelineHandler) Get(c *gin.Context) {
 }
 
 func (h *PipelineHandler) Cancel(c *gin.Context) {
-	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	scheduler.DefaultScheduler.Cancel(uint(id))
-	if err := h.pipelineRepo.UpdateStatus(uint(id), "CANCELED"); err != nil {
-		response.Fail(c, 10303, "取消失败")
+	h.cancelActive(c, 10303)
+}
+
+func (h *PipelineHandler) cancelActive(c *gin.Context, errorCode int) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		response.Fail(c, errorCode, "无效的任务编号")
 		return
+	}
+	changed, err := h.pipelineRepo.CancelActive(uint(id))
+	if err != nil {
+		response.Fail(c, errorCode, "取消失败")
+		return
+	}
+	if !changed {
+		response.Fail(c, errorCode, "任务已结束或状态已改变，请刷新后查看")
+		return
+	}
+	if scheduler.DefaultScheduler != nil {
+		scheduler.DefaultScheduler.Cancel(uint(id))
 	}
 	response.OKWithMessage(c, "已取消", nil)
 }
@@ -104,13 +119,7 @@ func (h *PipelineHandler) GetQueue(c *gin.Context) {
 }
 
 func (h *PipelineHandler) CancelQueued(c *gin.Context) {
-	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-	scheduler.DefaultScheduler.Cancel(uint(id))
-	if err := h.pipelineRepo.UpdateStatus(uint(id), "CANCELED"); err != nil {
-		response.Fail(c, 10305, "取消失败")
-		return
-	}
-	response.OKWithMessage(c, "已取消", nil)
+	h.cancelActive(c, 10305)
 }
 
 // Rollout submits the second step without rebuilding or pushing an image.

@@ -14,7 +14,6 @@ export interface Task {
   uploadPath: string
   targetServers?: RemoteServer[]
   deployMode?: string
-  k8sNamespace?: string
   lastStatus?: string
   lastRunTime?: string | null
   lastDurationSeconds?: number | null
@@ -42,9 +41,8 @@ export interface CreateTaskRequest {
   taskName: string
   applicationId: number
   gitBranch: string
-  buildConfigId: number
+  buildConfigId?: number
   deployMode?: string
-  k8sNamespace?: string
 }
 
 export function createTask(data: CreateTaskRequest) {

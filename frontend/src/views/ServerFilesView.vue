@@ -139,7 +139,7 @@ const pathParts = computed(() => currentPath.value.split('/').filter(Boolean))
 </script>
 
 <template>
-  <div class="files-page">
+  <div class="files-page viewport-table-page">
     <div class="files-header">
       <div class="header-left">
         <el-button size="small" @click="handleBack"><el-icon><ArrowLeft /></el-icon>返回</el-button>
@@ -166,7 +166,7 @@ const pathParts = computed(() => currentPath.value.split('/').filter(Boolean))
 
     <!-- File Table -->
     <div class="table-wrapper">
-      <el-table :data="sortedFiles" v-loading="loading" stripe size="small" @row-dblclick="handleNavigate">
+      <el-table height="100%" :data="sortedFiles" v-loading="loading" stripe size="small" @row-dblclick="handleNavigate">
         <el-table-column label="名称" min-width="300">
           <template #default="{ row }">
             <div class="file-name" @click="handleNavigate(row)">

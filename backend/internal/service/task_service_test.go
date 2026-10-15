@@ -20,13 +20,13 @@ func setupTaskServiceTestDB(t *testing.T) {
 	}
 }
 
-func TestUpdateTaskCanClearK8sNamespaceToUseGlobalDefault(t *testing.T) {
+func TestUpdateTaskPreservesLegacyNamespaceWithoutAcceptingOverrides(t *testing.T) {
 	setupTaskServiceTestDB(t)
 	app := model.Application{AppName: "his-gateway", AppType: "java", GitRepo: "ssh://git/repo.git"}
 	if err := repository.DB.Create(&app).Error; err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	buildConfig := model.BuildConfig{Name: "java-docker", BuildMode: "docker", DockerImage: "gradle:8"}
+	buildConfig := model.BuildConfig{Name: "java-local", Category: "java", BuildCommand: "gradle clean build -x test"}
 	if err := repository.DB.Create(&buildConfig).Error; err != nil {
 		t.Fatalf("create build config: %v", err)
 	}
@@ -43,19 +43,17 @@ func TestUpdateTaskCanClearK8sNamespaceToUseGlobalDefault(t *testing.T) {
 		t.Fatalf("create task: %v", err)
 	}
 
-	emptyNamespace := ""
 	updated, err := NewTaskService().Update(task.ID, &UpdateTaskRequest{
 		TaskName:      task.TaskName,
 		ApplicationID: app.ID,
 		GitBranch:     task.GitBranch,
 		BuildConfigID: buildConfig.ID,
 		DeployMode:    "deploy",
-		K8sNamespace:  &emptyNamespace,
 	})
 	if err != nil {
 		t.Fatalf("update task: %v", err)
 	}
-	if updated.K8sNamespace != "" {
-		t.Fatalf("expected namespace to be cleared, got %q", updated.K8sNamespace)
+	if updated.K8sNamespace != "old-namespace" {
+		t.Fatalf("expected legacy namespace to be preserved, got %q", updated.K8sNamespace)
 	}
 }

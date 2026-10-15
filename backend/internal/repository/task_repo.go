@@ -60,7 +60,7 @@ func (r *TaskRepo) Create(task *model.Task) error {
 }
 
 func (r *TaskRepo) Update(task *model.Task) error {
-	return DB.Save(task).Error
+	return DB.Omit("Application", "BuildConfig").Save(task).Error
 }
 
 func (r *TaskRepo) Delete(id uint) error {

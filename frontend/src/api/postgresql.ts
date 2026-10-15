@@ -77,6 +77,7 @@ export interface SQLChangeStatement {
   affectedRows: number
   durationMs: number
   executeTime?: string
+  executeUser?: string
 }
 
 export interface ParseSQLRequest {
@@ -94,22 +95,9 @@ export interface SQLExecuteOptions {
   skipExistsColumn: boolean
   skipExistsTable: boolean
   skipUniqueConstraint: boolean
-  requireRiskConfirmation: boolean
-  confirmWarnRisk: boolean
-  forceBlockedSql: boolean
-  lockTimeout?: string
-  statementTimeout?: string
 }
 
-export interface SQLForceWhitelistOption {
-  sqlType: string
-  label: string
-}
 
-export interface SQLForceWhitelistConfig {
-  available: SQLForceWhitelistOption[]
-  enabled: string[]
-}
 
 export interface ParseSQLBatchFile {
   fileName: string
@@ -117,6 +105,7 @@ export interface ParseSQLBatchFile {
 }
 
 export interface SQLViewDependencyTask {
+  outcomeUncertain?: boolean
   id: number
   schemaName: string
   tableName: string
@@ -216,12 +205,6 @@ export interface SQLViewDependencyTaskRequest {
 export const getPostgreSQLInstance = () =>
   request.get<any, PostgreSQLInstanceInfo>('/postgresql/instance')
 
-export const getSQLForceWhitelist = () =>
-  request.get<any, SQLForceWhitelistConfig>('/postgresql/sql-force-whitelist')
-
-export const saveSQLForceWhitelist = (enabled: string[]) =>
-  request.put<any, SQLForceWhitelistConfig>('/postgresql/sql-force-whitelist', { enabled })
-
 export const listSQLViewDependencyTasks = (page = 1, pageSize = 20) =>
   request.get<any, PageResult<SQLViewDependencyTask>>('/postgresql/view-dependency-tasks', { params: { page, pageSize } })
 
@@ -252,38 +235,17 @@ export const verifySQLViewDependencyItem = (taskId: number, itemId: number) =>
 export const parseSQLFile = (data: ParseSQLRequest) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/parse', data)
 
-export const updateSQLFileContent = (id: number, data: ParseSQLRequest) =>
-  request.put<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/content`, data)
-
-export const updateSQLStatementContent = (id: number, data: { content: string }) =>
-  request.put<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-statements/${id}/content`, data)
-
-export const autocompleteSQLStatementSchema = (id: number) =>
-  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-statements/${id}/schema-autocomplete`)
-
 export const executeSQLFile = (id: number) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/execute`)
 
 export const executeSQLFileWithOptions = (id: number, options: SQLExecuteOptions) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/execute`, { options })
 
-export const executeSQLStatementWithOptions = (id: number, options: SQLExecuteOptions) =>
-  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-statements/${id}/execute`, { options })
-
-export const executeSQLContent = (data: ParseSQLRequest & { options: SQLExecuteOptions }) =>
-  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/execute-content', data)
-
 export const cancelSQLFile = (id: number) =>
   request.post<any, SQLChangeFile>(`/postgresql/sql-files/${id}/cancel`)
 
 export const parseSQLBatch = (data: { batchName?: string; overwrite?: boolean; files: ParseSQLBatchFile[] }) =>
   request.post<any, { batch: SQLChangeBatch; files: SQLChangeFile[] }>('/postgresql/sql-batches/parse', data)
-
-export const executeSQLBatch = (id: number, options: SQLExecuteOptions) =>
-  request.post<any, { batch: SQLChangeBatch; files: SQLChangeFile[] }>(`/postgresql/sql-batches/${id}/execute`, { options })
-
-export const cancelSQLBatch = (id: number) =>
-  request.post<any, SQLChangeBatch>(`/postgresql/sql-batches/${id}/cancel`)
 
 export const listSQLBatches = (page = 1, pageSize = 20) =>
   request.get<any, PageResult<SQLChangeBatch>>('/postgresql/sql-batches', { params: { page, pageSize } })
@@ -294,11 +256,11 @@ export const getSQLBatch = (id: number) =>
 export const listSQLFiles = (page = 1, pageSize = 20) =>
   request.get<any, PageResult<SQLChangeFile>>('/postgresql/sql-files', { params: { page, pageSize } })
 
-export const listTodoSQLFiles = (page = 1, pageSize = 20) =>
-  request.get<any, PageResult<SQLChangeFile>>('/postgresql/sql-files/todo', { params: { page, pageSize } })
+export const listTodoSQLFiles = (page = 1, pageSize = 20, filters: { version?: string; schemaName?: string; fileName?: string } = {}) =>
+  request.get<any, PageResult<SQLChangeFile>>('/postgresql/sql-files/todo', { params: { page, pageSize, ...filters } })
 
-export const listDoneSQLFiles = (page = 1, pageSize = 20) =>
-  request.get<any, PageResult<SQLChangeFile>>('/postgresql/sql-files/done', { params: { page, pageSize } })
+export const listDoneSQLFiles = (page = 1, pageSize = 20, filters: { version?: string; schemaName?: string; fileName?: string } = {}) =>
+  request.get<any, PageResult<SQLChangeFile>>('/postgresql/sql-files/done', { params: { page, pageSize, ...filters } })
 
 export const getSQLFile = (id: number) =>
   request.get<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}`)

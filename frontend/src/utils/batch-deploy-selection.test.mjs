@@ -27,15 +27,22 @@ const { buildDeployConfirmation } = await import('./compiled/batch-deploy-select
 const standalone = buildDeployConfirmation([
   { fileName: 'web-cdr.zip', appName: 'web-cdr', appType: 'vue', vueRole: 'standalone' },
   { fileName: 'web-opm.zip', appName: 'web-opm', appType: 'vue', vueRole: 'standalone' },
-], 'test')
+])
 assert.match(standalone, /独立更新/)
 assert.doesNotMatch(standalone, /web-main|apps\/\{appCode\}/)
 const shared = buildDeployConfirmation([
   { fileName: 'web-main.zip', appName: 'web-main', appType: 'vue', vueRole: 'main' },
   { fileName: '04.zip', appName: 'web-alpha', appType: 'vue', vueRole: 'sub', appCode: '04' },
   { fileName: 'service.jar', appName: 'service', appType: 'java' },
-], 'test')
+])
 assert.match(shared, /独立更新.*\nservice：service.jar/)
 assert.match(shared, /合并更新 web-main/)
 assert.match(shared, /子应用 04：04.zip/)
 assert.match(shared, /同一个子应用不能同时来自主应用包和独立 ZIP/)
+
+const automatic = buildDeployConfirmation([
+  { fileName: 'service.jar', appName: 'service', appType: 'java' },
+], true)
+assert.match(automatic, /自动滚动更新/)
+assert.doesNotMatch(automatic, /仅制作并推送镜像/)
+assert.match(standalone, /滚动更新需在第二步执行/)

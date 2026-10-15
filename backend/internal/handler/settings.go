@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"df-build-server/internal/k8s"
 	"df-build-server/internal/middleware"
 	"df-build-server/internal/repository"
+	"df-build-server/internal/service"
 	"df-build-server/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -42,6 +42,12 @@ func (h *SettingsHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/k8s-namespaces", h.GetK8sNamespaces)
 		g.POST("/k8s-namespaces", h.GetK8sNamespacesWithConfig)
 		g.GET("/read-kubeconfig", h.ReadKubeconfig)
+		g.GET("/postgresql-accounts", h.ListPostgreSQLPasswordOverrides)
+		g.POST("/postgresql-accounts/discover", h.DiscoverPostgreSQLAccounts)
+		g.POST("/postgresql-accounts/passwords/batch", h.SavePostgreSQLAccountPasswords)
+		g.PUT("/postgresql-accounts/:username/password", h.SetPostgreSQLAccountPassword)
+		g.DELETE("/postgresql-accounts/:username/password", h.DeletePostgreSQLAccountPassword)
+		g.POST("/postgresql-accounts/:username/test", h.TestPostgreSQLAccount)
 	}
 }
 
@@ -54,6 +60,9 @@ func (h *SettingsHandler) GetAll(c *gin.Context) {
 	// Convert to map for easier frontend consumption
 	result := make(map[string]string)
 	for _, s := range list {
+		if s.Key == "postgresql_user" {
+			continue
+		} // retired single business account
 		result[s.Key] = s.Value
 	}
 	response.OK(c, result)
@@ -63,6 +72,15 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 	var req map[string]string
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Fail(c, 10902, "参数错误")
+		return
+	}
+	if mode, ok := req["deploy_source"]; ok && mode != "both" && mode != "artifact" && mode != "source" {
+		response.Fail(c, 10902, "使用场景必须为机房或客户现场")
+		return
+	}
+	delete(req, "postgresql_user")
+	if mode, ok := req["postgresql_password_mode"]; ok && mode != "shared" && mode != "individual" {
+		response.Fail(c, 10902, "请选择有效的业务密码方式")
 		return
 	}
 	if err := h.repo.BatchUpdate(req); err != nil {
@@ -188,7 +206,8 @@ func (h *SettingsHandler) TestConnection(c *gin.Context) {
 	case "skywalking":
 		success, message = h.testSkyWalking(req.Config)
 	case "postgresql":
-		success, message = h.testPostgreSQL(req.Config)
+		response.OK(c, service.TestPostgreSQLConnections(c.Request.Context(), req.Config))
+		return
 	case "package-download":
 		success, message = h.testPackageDownload(req.Config)
 	default:
@@ -386,39 +405,4 @@ func (h *SettingsHandler) testSkyWalking(config map[string]string) (bool, string
 	}
 	conn.Close()
 	return true, "SkyWalking OAP 端口可达"
-}
-
-func (h *SettingsHandler) testPostgreSQL(config map[string]string) (bool, string) {
-	host := config["postgresql_host"]
-	port := config["postgresql_port"]
-	user := "postgres"
-	password := config["postgresql_admin_password"]
-	database := config["postgresql_database"]
-
-	if host == "" {
-		return false, "PostgreSQL 主机地址未填写"
-	}
-	if password == "" {
-		return false, "PostgreSQL 管理员密码未填写"
-	}
-	if port == "" {
-		port = "5432"
-	}
-	if database == "" {
-		database = "postgres"
-	}
-
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable connect_timeout=5",
-		host, port, user, password, database)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return false, fmt.Sprintf("PostgreSQL 连接失败: %v", err)
-	}
-	defer db.Close()
-
-	if err := db.Ping(); err != nil {
-		return false, fmt.Sprintf("PostgreSQL 连接失败: %v", err)
-	}
-	return true, "PostgreSQL 连接成功"
 }

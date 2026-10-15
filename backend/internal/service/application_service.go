@@ -20,7 +20,7 @@ func NewApplicationService() *ApplicationService {
 type CreateAppRequest struct {
 	AppName          string `json:"appName" binding:"required"`
 	AppType          string `json:"appType" binding:"required"`
-	GitRepo          string `json:"gitRepo" binding:"required"`
+	GitRepo          string `json:"gitRepo"`
 	VueRole          string `json:"vueRole"`
 	IsGateway        bool   `json:"isGateway"`
 	AppCode          string `json:"appCode"`

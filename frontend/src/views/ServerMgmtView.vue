@@ -133,7 +133,7 @@ onMounted(loadServers)
 </script>
 
 <template>
-  <div class="page">
+  <div class="page viewport-table-page">
     <div class="toolbar-row">
       <div class="toolbar-left">
         <el-input
@@ -154,14 +154,14 @@ onMounted(loadServers)
     </div>
 
     <div class="table-wrapper">
-      <el-table :data="servers" v-loading="loading" stripe border>
+      <el-table height="100%" :data="servers" v-loading="loading" stripe border>
         <el-table-column type="index" label="序号" width="60" />
         <el-table-column prop="host" label="主机" min-width="150" />
         <el-table-column prop="remark" label="主机名" width="100" />
         <el-table-column prop="port" label="端口" width="70" />
         <el-table-column prop="username" label="用户名" width="90" />
         <el-table-column label="认证方式" width="90">
-          <template #default="{ row }">{{ row.authType === 'password' ? '密码' : '证书' }}</template>
+          <template #default="{ row }">{{ row.authType === 'password' ? '密码' : 'SSH 密钥' }}</template>
         </el-table-column>
         <el-table-column label="最近连接时间" min-width="160">
           <template #default="{ row }">
@@ -227,7 +227,7 @@ onMounted(loadServers)
           />
         </el-form-item>
         <template v-if="form.authType === 'certificate'">
-          <el-form-item label="证书内容">
+          <el-form-item label="SSH 私钥">
             <div style="width: 100%;">
               <div style="margin-bottom: 8px;">
                 <el-button size="small" @click="handleReadKey">从服务器读取</el-button>
@@ -241,8 +241,8 @@ onMounted(loadServers)
               />
             </div>
           </el-form-item>
-          <el-form-item label="证书密码">
-            <el-input v-model="form.certPassphrase" type="password" show-password placeholder="请输入 证书密码（无密码可留空）" />
+          <el-form-item label="私钥口令">
+            <el-input v-model="form.certPassphrase" type="password" show-password placeholder="私钥加密口令（未加密可留空）" />
           </el-form-item>
         </template>
         <el-form-item label="连接超时(秒)">
@@ -280,5 +280,6 @@ onMounted(loadServers)
   overflow: hidden;
 }
 .time-text { font-size: 12px; color: #606266; }
-.action-btns { display: flex; align-items: center; gap: 4px; }
+.action-btns { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px 8px; }
+.action-btns :deep(.el-button + .el-button) { margin-left: 0; }
 </style>

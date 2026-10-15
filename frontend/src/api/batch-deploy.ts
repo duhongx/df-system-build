@@ -21,10 +21,9 @@ export const matchArtifacts = (files: string[], sourceDir?: string, batchId?: st
 export const executeBatchDeploy = (
   sourceDir: string,
   items: { fileName: string; appId: number }[],
-  namespace?: string,
   batchId?: string,
 ) =>
-  request.post<any, { pipelines: any[]; errors: string[]; consumedFiles: string[] }>('/batch-deploy/execute', { sourceDir, items, namespace, batchId })
+  request.post<any, { pipelines: any[]; errors: string[]; consumedFiles: string[] }>('/batch-deploy/execute', { sourceDir, items, batchId })
 
 export const listLocalDir = (path: string, batchId?: string) =>
   request.get<any, { path: string; files: string[]; count: number }>('/batch-deploy/local-dir', { params: { path, batchId } })

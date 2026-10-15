@@ -42,7 +42,7 @@ make run
 
 `make run` 会创建 data、workspaces、logs 目录。启动时连接数据库、自动迁移和写入种子数据，恢复构建状态并将遗留的基础设施运行记录标记为失败。`GET /health` 检查服务和数据库连通性。
 
-初始管理员为 `admin / 123456`。邮件发送、页面改密及首次强制改密仍有缺口，见 [已知限制](../PROGRESS.md#已知缺口与实现边界)。
+初始管理员为 `admin / 123456`。平台使用单一管理员账号，不提供在线改密、邮件验证码或首次登录强制改密流程。
 
 ### 配置加载与覆盖
 
@@ -95,3 +95,11 @@ go test ./...
 业务接口统一在 `/api` 下，以 [入口注册](cmd/server/main.go) 和各 Handler 的 `RegisterRoutes` 为准。基础设施接口为 `/api/deployment/*`，SQL 为 `/api/postgresql/*`，制品批量更新为 `/api/batch-deploy/*`。
 
 [部署管理说明](../docs/deployment-management.md)包含资源目录、组件与 CLI 用法；[PostgreSQL 说明](../docs/postgresql.md)描述 SQL 和视图变更边界。
+
+## 本机编译与客户现场
+
+业务源码编译只调用当前服务器的本机工具，编译配置包含安装/编译命令、环境变量、产物目录和启用状态；无 Docker 编译执行器 API。Docker SDK 继续承担部署镜像制作和推送。
+
+`deploy_source=both` 为机房模式，`artifact` 为客户现场模式；新安装默认 `artifact`。客户现场的源码任务/编译配置写接口返回 403，Git 拉取和本机编译阶段也检查场景。制品导入及镜像更新不依赖编译工具。
+
+旧容器编译配置迁移为停用状态，需要核对本机工具及命令后手工启用；旧列和执行器表保留数据，不参与运行和 API 响应，已有本机配置及已制作镜像保留。详见 [使用场景](../docs/usage-scenarios.md)。

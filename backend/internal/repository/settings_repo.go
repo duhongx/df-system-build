@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"df-build-server/internal/model"
+	"df-build-server/pkg/crypto"
 	"gorm.io/gorm"
 )
 
@@ -16,6 +17,15 @@ func NewSettingsRepo() *SettingsRepo { return &SettingsRepo{} }
 func (r *SettingsRepo) GetAll() ([]model.Settings, error) {
 	var list []model.Settings
 	err := DB.Find(&list).Error
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		list[i].Value, err = decodePostgreSQLSetting(list[i].Key, list[i].Value)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return list, err
 }
 
@@ -27,18 +37,32 @@ func (r *SettingsRepo) GetByKey(key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return s.Value, nil
+	return decodePostgreSQLSetting(key, s.Value)
 }
 
 func (r *SettingsRepo) Set(key, value string) error {
+	return setSetting(DB, key, value)
+}
+
+func setSetting(db *gorm.DB, key, value string) error {
+	if isPostgreSQLPasswordSetting(key) && value != "" {
+		encrypted, err := crypto.Encrypt(value)
+		if err != nil {
+			return fmt.Errorf("加密配置项 %s 失败", key)
+		}
+		value = postgresSettingCipherPrefix + encrypted
+	}
 	// Upsert-like behavior: update if exists, otherwise create
 	var existing model.Settings
-	result := DB.Where(&model.Settings{Key: key}).First(&existing)
+	result := db.Where(&model.Settings{Key: key}).First(&existing)
 	if result.Error == nil {
 		existing.Value = value
-		return DB.Save(&existing).Error
+		return db.Save(&existing).Error
 	}
-	return DB.Create(&model.Settings{Key: key, Value: value}).Error
+	if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return result.Error
+	}
+	return db.Create(&model.Settings{Key: key, Value: value}).Error
 }
 
 func (r *SettingsRepo) BatchUpdate(settings map[string]string) error {

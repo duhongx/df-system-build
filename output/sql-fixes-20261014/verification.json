@@ -1,0 +1,49 @@
+{
+  "date": "2026-10-14",
+  "fixed": [
+    "P1-1",
+    "P1-2",
+    "P1-3",
+    "P1-4",
+    "P1-5",
+    "P1-6",
+    "P2-1",
+    "P2-2",
+    "P2-3"
+  ],
+  "database": "isolated PostgreSQL 18 at 127.0.0.1:55442",
+  "regressions": [
+    "transaction_import_and_legacy_execution_rejected",
+    "unknown_cannot_be_deleted_or_overwritten",
+    "deleted_partial_success_inherited",
+    "execution_claim_serializes_overwrite",
+    "database_claim_blocks_second_process",
+    "concurrent_first_imports_have_one_active_identity",
+    "view_phases_and_backup_are_exclusive",
+    "step_timeouts_applied_without_pool_pollution",
+    "partial_drop_restores_only_deleted_objects",
+    "early_alter_failure_keeps_restore_record_indices",
+    "full_view_execution_cannot_be_replayed",
+    "drop_result_save_failure_restores_known_committed_drop",
+    "transaction_view_failure_records_rollback",
+    "password_rotation_invalidates_cached_pool",
+    "connection_failure_releases_task_and_startup_marks_steps_unknown"
+  ],
+  "transaction_control_unit_test": "passed",
+  "existing_sql_integrations": 9,
+  "go_all": "passed (other DB integrations without DSN skipped)",
+  "frontend_build": "passed",
+  "sql_page_test": "passed",
+  "deployed_to_150": false,
+  "not_verified": [
+    "PostgreSQL 14 repeat verification",
+    "browser interaction tests",
+    "production SQL"
+  ],
+  "migration": [
+    "sql_view_dependency_tasks.outcome_uncertain",
+    "idx_sql_change_files_active_identity (partial unique index)"
+  ],
+  "server_build": "passed",
+  "server_binary_sha256": "5a4b5a3b0e13ae33635e0f3fbd7de9e99d652524d5a7e6fcd5f894b0338584f6"
+}

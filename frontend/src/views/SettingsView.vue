@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useSettingsStore } from '../stores/settings'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   listNotifications, createNotification, updateNotification, deleteNotification, testNotification, type NotificationWebhook,
@@ -8,6 +9,7 @@ import {
 } from '../api/settings'
 
 const route = useRoute()
+const settingsStore = useSettingsStore()
 const activeTab = computed(() => (route.meta?.settingsTab as string) || 'general')
 
 // General
@@ -16,10 +18,8 @@ const generalForm = ref({
   build_timeout_seconds: '1800',
   log_retention_days: '30',
   default_upload_path: '/root/DFHIS/his-release',
-  clean_workspace_after_build: 'true',
-  build_mode: 'docker',
-  deploy_mode: 'deploy',
   customer_env: '本地',
+  deploy_source: 'artifact',
 })
 
 
@@ -32,10 +32,8 @@ async function loadGeneral() {
       build_timeout_seconds: s.build_timeout_seconds || '1800',
       log_retention_days: s.log_retention_days || '30',
       default_upload_path: s.default_upload_path || '/root/DFHIS/his-release',
-      clean_workspace_after_build: s.clean_workspace_after_build || 'true',
-      build_mode: s.build_mode || 'docker',
-      deploy_mode: s.deploy_mode || 'deploy',
       customer_env: s.customer_env || '本地',
+      deploy_source: s.deploy_source === 'both' || s.deploy_source === 'source' ? 'both' : 'artifact',
     }
   } catch (e) { /* ignore */ }
 }
@@ -45,6 +43,7 @@ async function loadGeneral() {
 async function handleSaveGeneral() {
   try {
     await updateSettings(generalForm.value)
+    await settingsStore.fetchSettings()
     ElMessage.success('设置已保存')
   } catch (e) { /* handled */ }
 }
@@ -130,7 +129,7 @@ onMounted(() => {
       <h4 class="page-title">全局参数</h4>
       <div class="content-card">
         <el-form label-width="130px" style="max-width: 580px;">
-          <el-form-item label="客户环境">
+          <el-form-item label="部署环境">
             <el-select v-model="generalForm.customer_env" style="width: 200px;">
               <el-option label="本地" value="本地" />
               <el-option label="浙江" value="浙江" />
@@ -144,18 +143,15 @@ onMounted(() => {
               <el-option label="甘肃" value="甘肃" />
               <el-option label="陕西" value="陕西" />
             </el-select>
-            <span class="form-hint">当前部署环境，影响应用过滤</span>
+            <span class="form-hint">本地环境自动完成镜像制作与滚动更新，其他环境分两步执行；同时影响应用过滤；源码编译仅在本地开放</span>
           </el-form-item>
-          <el-form-item label="镜像准备方式">
-            <el-radio-group v-model="generalForm.deploy_mode">
-              <el-radio value="deploy">编译并制作镜像</el-radio>
-              <el-radio value="upload_deploy">上传制品并制作镜像</el-radio>
+          <el-form-item label="使用场景">
+            <el-radio-group v-model="generalForm.deploy_source">
+              <el-radio value="both">机房：源码编译与制品更新</el-radio>
+              <el-radio value="artifact">客户现场：仅制品更新</el-radio>
             </el-radio-group>
-            <div class="form-hint-block">镜像制作与滚动更新分为两步；制作并推送镜像完成后，单独执行滚动更新。</div>
-          </el-form-item>
-          <el-form-item label="制品上传路径" v-if="generalForm.deploy_mode === 'upload_deploy'">
-            <el-input v-model="generalForm.default_upload_path" placeholder="/root/DFHIS/his-release" />
-            <div class="form-hint-block">制品上传到服务器上的目录</div>
+            <div class="form-hint-block">本地机房使用服务器已安装的编译工具，任务按应用类型自动带出 Gradle / Node 默认配置；客户现场直接上传 JAR / ZIP，无需 Git、JDK、Node 或编译配置。</div>
+            <div class="form-hint-block">部署环境为“本地”时自动滚动更新；其他环境镜像制作完成后手动滚动更新。</div>
           </el-form-item>
           <el-divider />
           <el-form-item label="全局并发上限">
@@ -164,7 +160,7 @@ onMounted(() => {
               @update:model-value="(v: any) => generalForm.concurrency_limit = String(v)"
               :min="1" :max="20"
             />
-            <span class="form-hint">同时运行的最大构建数</span>
+            <span class="form-hint">同时运行的最大构建数，修改后重启平台生效</span>
           </el-form-item>
           <el-form-item label="构建超时(秒)">
             <el-input-number
@@ -173,20 +169,13 @@ onMounted(() => {
               :min="60" :max="7200" :step="60"
             />
           </el-form-item>
-          <el-form-item label="日志保留天数">
+          <el-form-item label="构建日志保留天数">
             <el-input-number
               :model-value="Number(generalForm.log_retention_days)"
               @update:model-value="(v: any) => generalForm.log_retention_days = String(v)"
               :min="1" :max="365"
             />
-            <span class="form-hint">超过此天数的日志自动清理</span>
-          </el-form-item>
-          <el-form-item label="构建后清理">
-            <el-switch
-              :model-value="generalForm.clean_workspace_after_build === 'true'"
-              @update:model-value="(v: any) => generalForm.clean_workspace_after_build = String(v)"
-            />
-            <span class="form-hint">构建完成后自动清理源码和中间产物</span>
+            <span class="form-hint">每日清理超过保留天数的构建阶段日志</span>
           </el-form-item>
           <el-form-item>
             <el-button type="primary" @click="handleSaveGeneral">保存设置</el-button>
@@ -247,7 +236,7 @@ onMounted(() => {
           </el-radio-group>
         </el-form-item>
         <el-form-item label="Webhook URL" required><el-input v-model="notifyForm.webhookUrl" /></el-form-item>
-        <el-form-item label="Secret"><el-input v-model="notifyForm.secret" placeholder="可选" /></el-form-item>
+        <el-form-item label="Secret"><el-input v-model="notifyForm.secret" type="password" show-password placeholder="可选" /></el-form-item>
         <el-form-item label="通知规则">
           <el-checkbox v-model="notifyForm.notifyOnSuccess">成功时通知</el-checkbox>
           <el-checkbox v-model="notifyForm.notifyOnFailure">失败时通知</el-checkbox>

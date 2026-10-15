@@ -115,7 +115,7 @@ function batchStatusText(status: string) {
   if (status === 'image_ready') return '镜像制作完成'
   if (status === 'deployed') return '已部署'
   if (status === 'failed') return '失败'
-  return status || '-'
+  return ({ pending: '排队中', running: '运行中', deploying: '滚动更新中', partial_failed: '部分失败', canceled: '已取消' } as Record<string, string>)[status] || status || '-'
 }
 </script>
 
@@ -148,7 +148,7 @@ function batchStatusText(status: string) {
           <template #default="{ row }">{{ formatTime(row.startTime) }}</template>
         </el-table-column>
       </el-table>
-      <el-empty v-else description="当前没有运行中的任务" :image-size="60" />
+      <el-empty v-else style="padding: 16px 0;" description="当前没有运行中的任务" :image-size="60" />
     </el-card>
 
     <el-card class="section-card" shadow="never">
@@ -176,7 +176,7 @@ function batchStatusText(status: string) {
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-else description="队列为空" :image-size="60" />
+      <el-empty v-else style="padding: 16px 0;" description="队列为空" :image-size="60" />
     </el-card>
 
     <el-card class="section-card" shadow="never">
@@ -184,7 +184,7 @@ function batchStatusText(status: string) {
         <div class="section-header">
           <span class="section-title">
             <el-icon color="#e6a23c"><WarningFilled /></el-icon>
-            第二步：滚动更新 ({{ imageReadyBatches.length }})
+            待手动滚动更新 ({{ imageReadyBatches.length }})
           </span>
         </div>
       </template>
@@ -210,10 +210,10 @@ function batchStatusText(status: string) {
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-else description="暂无已制作镜像可执行滚动更新的批次" :image-size="60" />
+      <el-empty v-else style="padding: 16px 0;" description="暂无待手动更新的批次；本地新任务自动完成滚动更新" :image-size="60" />
     </el-card>
 
-    <el-drawer v-model="batchDrawerVisible" size="56%" title="第二步：滚动更新详情">
+    <el-drawer v-model="batchDrawerVisible" size="56%" title="待手动滚动更新详情">
       <template v-if="selectedBatch">
         <div class="batch-summary">
           <div><span>版本号</span>{{ selectedBatch.versionNo }}</div>

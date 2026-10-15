@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   cancelRun, getRun, getRunLogs, createRun, runEventSource,
   type DeploymentRun, type DeploymentLog,
@@ -10,6 +10,7 @@ import { formatTime } from '../utils/time'
 
 const route = useRoute()
 const router = useRouter()
+const loadError = ref('')
 const runId = Number(route.params.id)
 const run = ref<DeploymentRun | null>(null)
 const logs = ref<DeploymentLog[]>([])
@@ -71,15 +72,20 @@ async function handleRollback() {
   const body = run.value.scope_kind === 'all'
     ? { mode: 'cleanup' }
     : { mode: 'rollback', component: run.value.target_component }
+  try {
+    await ElMessageBox.confirm(run.value.scope_kind === 'all' ? '将清理全部已启用组件的部署资源，请确认目标及影响范围后继续。' : `将回滚组件 ${run.value.target_component}，请确认目标及影响范围后继续。`, '确认回滚', { type: 'warning', confirmButtonText: '确认回滚', cancelButtonText: '取消' })
+  } catch { return }
   const res = await createRun(body)
   ElMessage.success(`已发起回滚，运行 #${res.id}`)
   router.push(`/deployment/runs/${res.id}`)
 }
 
 onMounted(async () => {
-  await loadRun()
-  await loadHistory()
-  subscribe()
+  try {
+    await loadRun()
+    await loadHistory()
+    subscribe()
+  } catch { loadError.value = '运行不存在或加载失败，请返回部署运行列表重试。' }
 })
 onBeforeUnmount(() => es?.close())
 </script>
@@ -88,6 +94,7 @@ onBeforeUnmount(() => es?.close())
   <div class="page">
     <h4 class="page-title">运行 #{{ runId }} {{ run ? `(${run.target_component})` : '' }}</h4>
 
+    <el-alert v-if="loadError" :title="loadError" type="error" :closable="false" />
     <div class="content-card" v-if="run">
       <div class="overview">
         <span>状态 <el-tag :type="statusTag(run.status)" size="small">{{ run.status }}</el-tag></span>

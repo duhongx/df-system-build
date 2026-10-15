@@ -2,6 +2,9 @@
 import { ref, computed, onMounted } from 'vue'
 import { listApps, createApp as apiCreateApp, updateApp, deleteApp, type Application } from '../api/application'
 import { ElMessageBox, ElMessage } from 'element-plus'
+import { useSettingsStore } from '../stores/settings'
+
+const settingsStore = useSettingsStore()
 
 const apps = ref<Application[]>([])
 const loading = ref(true)
@@ -58,7 +61,7 @@ function removeIngressRow(idx: number) {
 }
 
 onMounted(async () => {
-  await loadApps()
+  await Promise.all([loadApps(), settingsStore.fetchSettings()])
 })
 
 async function loadApps() {
@@ -164,7 +167,7 @@ async function handleSave() {
     ElMessage.warning('请输入应用名称')
     return
   }
-  if (!form.value.gitRepo.trim()) {
+  if (settingsStore.showTaskList && !form.value.gitRepo.trim()) {
     ElMessage.warning('请输入 Git 仓库地址')
     return
   }
@@ -247,13 +250,13 @@ function handleSizeChange(newSize: number) {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page viewport-table-page">
     <!-- Toolbar -->
     <div class="toolbar-row">
       <div class="toolbar-left">
         <el-input
           v-model="searchText"
-          placeholder="搜索应用名称 / 仓库地址"
+          :placeholder="settingsStore.showTaskList ? '搜索应用名称 / 仓库地址' : '搜索应用名称'"
           clearable
           style="width: 280px;"
           @keyup.enter="handleSearch"
@@ -275,7 +278,7 @@ function handleSizeChange(newSize: number) {
 
     <!-- Table -->
     <div class="table-wrapper">
-      <el-table :data="apps" v-loading="loading" stripe size="default">
+      <el-table height="100%" :data="apps" v-loading="loading" stripe size="default">
         <el-table-column prop="appName" label="应用名称" width="200">
           <template #default="{ row }">
             <span class="link-text" @click="handleEdit(row)">{{ row.appName }}</span>
@@ -296,7 +299,7 @@ function handleSizeChange(newSize: number) {
             <span v-else style="color: #c0c4cc;">-</span>
           </template>
         </el-table-column>
-        <el-table-column prop="gitRepo" label="Git 仓库地址" min-width="400" show-overflow-tooltip />
+        <el-table-column v-if="settingsStore.showTaskList" prop="gitRepo" label="Git 仓库地址" min-width="400" show-overflow-tooltip />
         <el-table-column label="操作" width="140" fixed="right" align="center">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="handleEdit(row)">编辑</el-button>
@@ -334,7 +337,7 @@ function handleSizeChange(newSize: number) {
             <el-radio value="vue">Vue</el-radio>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="Git 仓库" required>
+        <el-form-item v-if="settingsStore.showTaskList" label="Git 仓库" required>
           <el-input v-model="form.gitRepo" placeholder="ssh://git@192.168.1.206/df-his-backend/..." />
         </el-form-item>
         <el-form-item label="网关服务" v-if="form.appType === 'java'">
@@ -381,7 +384,7 @@ function handleSizeChange(newSize: number) {
         </el-form-item>
         <el-form-item label="环境标签">
           <el-input v-model="form.envTags" placeholder="如 四川 或 四川,重庆（逗号分隔）" />
-          <div class="field-hint">留空表示所有环境都部署，填写后仅在对应客户环境下显示</div>
+          <div class="field-hint">用于更新任务的应用匹配与环境过滤；留空适用于所有环境。</div>
         </el-form-item>
       </el-form>
       <template #footer>

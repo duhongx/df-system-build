@@ -41,6 +41,9 @@ const form = ref({
 const dependencyCount = computed(() => dependencyItems.value.length)
 const changeCount = computed(() => dependencyChanges.value.length)
 const materializedCount = computed(() => dependencyItems.value.filter(item => item.objectKind === 'm').length)
+const taskBusy = computed(() => analyzing.value || executing.value || restoring.value || backupActionLoading.value || ['ANALYZING', 'PRECHECKING', 'EXECUTING', 'RESTORING', 'VERIFYING'].includes(currentTask.value?.status || ''))
+const sameTaskBlocked = computed(() => lastTaskSQL.value === form.value.alterSql.trim() && (taskUncertain.value || currentTask.value?.status === 'SUCCESS' || executionSteps.value.some(s => s.stepName === 'ALTER_TABLE' && ['SUCCESS', 'UNKNOWN', 'RUNNING'].includes(s.status))))
+const taskUncertain = computed(() => currentTask.value?.outcomeUncertain || currentTask.value?.status === 'UNKNOWN')
 const canRestore = computed(() => Boolean(currentTask.value?.id && dependencyItems.value.length > 0))
 const hasAnalysisResult = computed(() => {
   const status = currentTask.value?.status || ''
@@ -73,8 +76,8 @@ function stageStatusType(status: ProcessStageStatus) {
 
 function stageFromStepNames(names: string[]): { status: ProcessStageStatus; count: number; error: string } {
   const matched = executionSteps.value.filter(step => names.includes(step.stepName))
-  if (matched.some(step => step.status === 'FAILED')) {
-    return { status: 'failed', count: matched.length, error: matched.find(step => step.status === 'FAILED')?.errorMessage || '' }
+  if (matched.some(step => ['FAILED', 'UNKNOWN', 'ROLLED_BACK'].includes(step.status))) {
+    return { status: 'failed', count: matched.length, error: matched.find(step => ['FAILED', 'UNKNOWN', 'ROLLED_BACK'].includes(step.status))?.errorMessage || '' }
   }
   if (matched.some(step => step.status === 'RUNNING')) {
     return { status: 'running', count: matched.length, error: '' }
@@ -145,6 +148,12 @@ function taskStatusText(status?: string) {
     EXECUTING: '执行中',
     SUCCESS: '成功',
     FAILED: '失败',
+    UNKNOWN: '结果待核实',
+    ANALYZING: '分析中',
+    PRECHECKING: '预检中',
+    VERIFYING: '校验中',
+    SKIPPED: '未执行',
+    ROLLED_BACK: '已回滚',
     RESTORING: '恢复中',
     RESTORE_FAILED: '恢复失败',
     RESTORED: '已恢复',
@@ -153,7 +162,7 @@ function taskStatusText(status?: string) {
 
 function taskStatusType(status?: string) {
   if (status === 'SUCCESS' || status === 'RESTORED') return 'success'
-  if (status === 'FAILED' || status === 'PRECHECK_FAILED' || status === 'RESTORE_FAILED') return 'danger'
+  if (status === 'UNKNOWN' || status === 'ROLLED_BACK' || status === 'FAILED' || status === 'PRECHECK_FAILED' || status === 'RESTORE_FAILED') return 'danger'
   if (status === 'EXECUTING' || status === 'RESTORING' || status === 'PRECHECK_PASSED') return 'warning'
   return 'info'
 }
@@ -412,9 +421,9 @@ onMounted(loadSQLExecutionSettings)
           <p>可粘贴多条 ALTER TABLE ... ALTER COLUMN ... TYPE ... SQL；系统会统一分析依赖、备份、执行和恢复。</p>
         </div>
         <div class="actions">
-          <el-button :loading="analyzing" @click="handleAnalyze">分析</el-button>
-          <el-button type="primary" :loading="executing" @click="handleExecute">执行</el-button>
-          <el-button type="warning" :disabled="!canRestore" :loading="restoring" @click="handleRestore">恢复</el-button>
+          <el-button :disabled="taskBusy || sameTaskBlocked" :loading="analyzing" @click="handleAnalyze">分析</el-button>
+          <el-button type="primary" :disabled="taskBusy || sameTaskBlocked" :loading="executing" @click="handleExecute">执行</el-button>
+          <el-button type="warning" :disabled="!canRestore || taskBusy" :loading="restoring" @click="handleRestore">恢复</el-button>
         </div>
       </div>
       <el-input
@@ -423,10 +432,11 @@ onMounted(loadSQLExecutionSettings)
         :rows="8"
         resize="vertical"
         class="sql-input"
-        placeholder="ALTER TABLE his.patient ALTER COLUMN code TYPE varchar(64);"
+        placeholder="ALTER TABLE df_zhushuju.patient ALTER COLUMN code TYPE varchar(64);"
       />
     </section>
 
+    <el-alert v-if="taskUncertain" title="字段变更结果待核实，禁止重放变更。可按备份恢复并校验视图；恢复视图不会确认字段变更结果。" type="warning" :closable="false" />
     <section v-if="hasAnalysisResult" class="process-card">
       <div class="table-header">
         <div>
@@ -514,7 +524,7 @@ onMounted(loadSQLExecutionSettings)
           <p>执行时会按删除顺序处理依赖对象，变更后再按恢复顺序重建。</p>
         </div>
       </div>
-      <el-table :data="dependencyItems" size="small" border stripe height="420">
+      <el-table :data="dependencyItems" size="small" border stripe max-height="50vh">
         <el-table-column type="index" width="58" align="center" label="序号" />
         <el-table-column label="对象" min-width="260">
           <template #default="{ row }">
@@ -533,8 +543,8 @@ onMounted(loadSQLExecutionSettings)
         <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openBackupDrawer(row)">查看备份</el-button>
-            <el-button link type="warning" size="small" :loading="backupActionLoading" @click="handleRestoreBackupItem(row)">恢复</el-button>
-            <el-button link type="success" size="small" :loading="backupActionLoading" @click="handleVerifyBackupItem(row)">校验</el-button>
+            <el-button link type="warning" size="small" :disabled="taskBusy" :loading="backupActionLoading" @click="handleRestoreBackupItem(row)">恢复</el-button>
+            <el-button link type="success" size="small" :disabled="taskBusy" :loading="backupActionLoading" @click="handleVerifyBackupItem(row)">校验</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -612,8 +622,8 @@ onMounted(loadSQLExecutionSettings)
         </el-tabs>
 
         <div class="backup-footer">
-          <el-button :loading="backupActionLoading" @click="handleVerifyBackupItem()">校验当前视图</el-button>
-          <el-button type="warning" :loading="backupActionLoading" @click="handleRestoreBackupItem()">恢复当前视图</el-button>
+          <el-button :disabled="taskBusy" :loading="backupActionLoading" @click="handleVerifyBackupItem()">校验当前视图</el-button>
+          <el-button type="warning" :disabled="taskBusy" :loading="backupActionLoading" @click="handleRestoreBackupItem()">恢复当前视图</el-button>
         </div>
       </div>
     </el-drawer>

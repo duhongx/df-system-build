@@ -40,7 +40,6 @@ const executing = ref(false)
 const batchId = ref('')
 const sourceType = ref('')
 const sourceDir = ref('')
-const namespace = ref('')
 const matchResults = ref<MatchResult[]>([])
 const selectedFiles = ref<string[]>([])
 const matchTableRef = ref<TableInstance>()
@@ -108,7 +107,6 @@ onMounted(async () => {
   if (!settingsStore.loaded) {
     await settingsStore.fetchSettings()
   }
-  namespace.value = settingsStore.k8sNamespace
   batchId.value = String(route.query.batchId || '')
   sourceType.value = String(route.query.sourceType || '')
   sourceDir.value = String(route.query.sourceDir || '')
@@ -253,15 +251,16 @@ async function executeDeploy() {
   const items = deployableResults.value.map(result => ({ fileName: result.fileName, appId: result.appId }))
   executing.value = true
   try {
+    await settingsStore.fetchSettings()
     if (deployableResults.value.some(item => item.appType === 'vue')) {
       try {
         await ElMessageBox.confirm(
-          buildDeployConfirmation(deployableResults.value, namespace.value.trim()),
-          '确认镜像制作范围', { customClass: 'deploy-scope-confirm', type: 'warning', confirmButtonText: '制作镜像', cancelButtonText: '取消' },
+          buildDeployConfirmation(deployableResults.value, settingsStore.autoRollout),
+          settingsStore.autoRollout ? '确认构建与滚动更新范围' : '确认镜像制作范围', { customClass: 'deploy-scope-confirm', type: 'warning', confirmButtonText: settingsStore.autoRollout ? '构建并滚动更新' : '制作镜像', cancelButtonText: '取消' },
         )
       } catch { return }
     }
-    const result = await executeBatchDeploy(sourceDir.value, items, namespace.value.trim(), batchId.value)
+    const result = await executeBatchDeploy(sourceDir.value, items, batchId.value)
     // Once accepted, inputs stay disabled even if execution fails or is rolled back.
     const submittedFiles = new Set(result.consumedFiles || [])
     matchResults.value.forEach(item => { if (submittedFiles.has(item.fileName)) item.updateUsed = true })
@@ -569,18 +568,18 @@ function formatDownloadSize(size?: number) {
     <div class="page-header">
       <div>
         <h4>新增更新任务</h4>
-        <p>第一步上传制品并制作、推送镜像；完成后执行第二步滚动更新。</p>
+        <p>{{ settingsStore.autoRollout ? '本地环境：上传制品并制作、推送镜像后自动滚动更新。' : '第一步上传制品并制作、推送镜像；完成后执行第二步滚动更新。' }}</p>
       </div>
       <div class="header-actions">
         <el-button @click="router.push('/artifacts/versions')">更新版本库</el-button>
-        <el-button @click="router.push('/build-queue')">滚动更新</el-button>
+        <el-button @click="router.push('/build-queue')">查看任务队列</el-button>
       </div>
     </div>
 
     <section class="step-strip">
       <div class="step-item active"><strong>1</strong><span>上传并制作镜像</span></div>
       <div class="step-line"></div>
-      <div class="step-item"><strong>2</strong><span>滚动更新</span></div>
+      <div class="step-item"><strong>2</strong><span>{{ settingsStore.autoRollout ? '自动滚动更新' : '滚动更新' }}</span></div>
     </section>
 
     <section class="workflow-section">
@@ -809,13 +808,12 @@ function formatDownloadSize(size?: number) {
 
     <section class="action-bar">
       <div class="deploy-options">
-        <strong>第一步：上传并制作镜像</strong>
-        <el-input v-model="namespace" placeholder="Namespace" class="namespace-input" />
+        <strong>{{ settingsStore.autoRollout ? '构建与滚动更新' : '第一步：上传并制作镜像' }}</strong>
         <span>每份制品仅允许更新一次；再次更新请重新上传。</span>
-        <span>镜像制作并推送完成后，前往第二步执行滚动更新。</span>
+        <span>{{ settingsStore.autoRollout ? '本地环境：镜像推送成功后自动滚动更新。' : '镜像制作并推送完成后，前往第二步执行滚动更新。' }}</span>
       </div>
       <el-button type="primary" :disabled="deployableResults.length === 0" :loading="executing" @click="executeDeploy">
-        {{ matchResults.length > 0 && matchResults.every(item => item.updateUsed || !item.matched || !item.valid || item.skipped) ? '无可用制品' : `制作镜像（${deployableResults.length} 个制品）` }}
+        {{ matchResults.length > 0 && matchResults.every(item => item.updateUsed || !item.matched || !item.valid || item.skipped) ? '无可用制品' : `${settingsStore.autoRollout ? '构建并滚动更新' : '制作镜像'}（${deployableResults.length} 个制品）` }}
       </el-button>
     </section>
   </div>
@@ -946,7 +944,6 @@ function formatDownloadSize(size?: number) {
   color: #606266;
 }
 .deploy-options > strong { color: #1f2937; }
-.namespace-input { width: 180px; }
 @media (max-width: 1280px) {
   .step-strip { grid-template-columns: 1fr; gap: 8px; }
   .step-line { display: none; }
@@ -955,6 +952,5 @@ function formatDownloadSize(size?: number) {
   .path-cell { grid-column: 1 / -1; }
   .action-bar,
   .deploy-options { align-items: stretch; flex-direction: column; }
-  .namespace-input { width: 100%; }
 }
 </style>

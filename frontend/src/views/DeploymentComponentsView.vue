@@ -170,11 +170,11 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="page">
+  <div class="page viewport-table-page">
     <h4 class="page-title">组件</h4>
     <div class="content-card">
-      <p class="hint">启用/禁用组件、关联目标主机（部分组件由系统自动管理主机）、配置参数、查看 Pipeline 任务。部署请到「部署运行」页。</p>
-      <el-table :data="components" v-loading="loading" size="small" border stripe>
+      <p class="hint">启用/禁用组件、关联目标主机（部分组件由系统自动管理主机）、配置参数、查看 部署任务。部署请到「部署运行」页。</p>
+      <el-table height="100%" :data="components" v-loading="loading" size="small" border stripe>
         <el-table-column label="启用" width="70" align="center">
           <template #default="{ row }">
             <el-switch v-model="row.enabled" @change="toggleEnabled(row)" />
@@ -208,7 +208,7 @@ onMounted(load)
           <template #default="{ row }">
             <el-button size="small" link type="primary" :disabled="!row.requireHostSelection" @click="openHosts(row)">目标主机</el-button>
             <el-button size="small" link @click="openOverride(row)">参数</el-button>
-            <el-button size="small" link @click="openTasks(row)">Pipeline 任务</el-button>
+            <el-button size="small" link @click="openTasks(row)">部署任务</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -244,7 +244,7 @@ onMounted(load)
       <div class="kv-head"><span class="kv-k">参数键</span><span class="kv-v">参数值</span><span class="kv-op"></span></div>
       <div v-for="(r, i) in overrideRows" :key="i" class="kv-row">
         <el-input v-model="r.key" placeholder="如 password" class="kv-k" size="small" />
-        <el-input v-model="r.value" placeholder="如 cloudhis@2123" class="kv-v" size="small" />
+        <el-input v-model="r.value" placeholder="输入参数值" class="kv-v" size="small" />
         <el-button class="kv-op" link type="danger" size="small" @click="removeRow(i)">删除</el-button>
       </div>
       <el-button size="small" @click="addRow" style="margin-top: 8px;">+ 添加参数</el-button>
@@ -255,8 +255,8 @@ onMounted(load)
       </template>
     </el-dialog>
 
-    <!-- Pipeline 任务 -->
-    <el-dialog v-model="tasksVisible" :title="`Pipeline 任务 · ${tasksComponent}`" width="900px" top="6vh">
+    <!-- 部署任务 -->
+    <el-dialog v-model="tasksVisible" :title="`部署任务 · ${tasksComponent}`" width="900px" top="6vh">
       <div v-loading="tasksLoading" class="tasks-box">
         <div v-for="(t, i) in tasksItems" :key="i" class="task-item">
           <div class="task-head">

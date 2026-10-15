@@ -1,0 +1,49 @@
+{
+  "date": "2026-10-14",
+  "scope": "当前工作区 SQL 执行代码审核；未修改执行逻辑或线上环境",
+  "database": "isolated PostgreSQL 18 at 127.0.0.1:55442",
+  "defect_probes": {
+    "test": "TestSQLAuditProof20261014",
+    "confirmed": [
+      "rollback_reported_success",
+      "delete_bypasses_unknown",
+      "overwrite_races_execution_start",
+      "step_timeouts_ignored",
+      "precheck_overwrites_execution_guard",
+      "partial_view_drop_not_restored"
+    ],
+    "note": "PASS means defect was reproduced, not fixed"
+  },
+  "existing_integration_tests": [
+    {
+      "test": "TestReleaseSQLStopsAndResumesUsingSchemaAccount",
+      "status": "passed",
+      "database": "df_sql_audit_baseline_20261014_0"
+    },
+    {
+      "test": "TestReleaseSQLSkipOptionsAndStopByDefault",
+      "status": "passed",
+      "database": "df_sql_audit_baseline_20261014_1"
+    },
+    {
+      "test": "TestReleaseSQLResultWriteFailureDoesNotReplay",
+      "status": "passed",
+      "database": "df_sql_audit_baseline_20261014_2"
+    },
+    {
+      "test": "TestReleaseSQLStopWaitsForCurrentStatement",
+      "status": "passed",
+      "database": "df_sql_audit_baseline_20261014_3"
+    }
+  ],
+  "existing_unit_tests": {
+    "command": "go test ./internal/service -run 'Test(ReleaseSQLSplitAndNaming|BuildSQLViewDependency|RunSQLViewDependency|ValidateViewDependency|EnsureSQLViewDependency)' -count=1",
+    "status": "passed"
+  },
+  "not_verified": [
+    "PostgreSQL 14 repeat verification",
+    "production business SQL",
+    "browser end-to-end tests",
+    "P2 dynamic reproductions"
+  ]
+}

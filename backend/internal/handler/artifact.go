@@ -35,13 +35,25 @@ func (h *ArtifactHandler) List(c *gin.Context) {
 	if search != "" {
 		query = query.Where("app_name LIKE ? OR artifact_name LIKE ?", "%"+search+"%", "%"+search+"%")
 	}
-	query.Count(&total)
+	if c.Query("onlyLatest") == "true" {
+		query = query.Where("is_latest = ?", true)
+	}
+	if err := query.Count(&total).Error; err != nil {
+		response.Fail(c, 10701, "获取制品列表失败")
+		return
+	}
 
 	if pageSize <= 0 {
 		pageSize = 20
 	}
+	if page <= 0 {
+		page = 1
+	}
 	offset := (page - 1) * pageSize
-	query.Order("id DESC").Offset(offset).Limit(pageSize).Find(&artifacts)
+	if err := query.Order("id DESC").Offset(offset).Limit(pageSize).Find(&artifacts).Error; err != nil {
+		response.Fail(c, 10701, "获取制品列表失败")
+		return
+	}
 
 	response.OKWithPage(c, artifacts, total, page, pageSize)
 }

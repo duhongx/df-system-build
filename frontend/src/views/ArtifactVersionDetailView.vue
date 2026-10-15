@@ -454,7 +454,7 @@ async function handleRollback() {
         :data="versionRows"
         border
         stripe
-        height="620"
+        max-height="60vh"
         table-layout="auto"
         row-key="rowKey"
         :span-method="artifactSpanMethod"
@@ -544,7 +544,7 @@ async function handleRollback() {
         :data="deployRecordRows"
         border
         stripe
-        height="420"
+        max-height="50vh"
         table-layout="auto"
         row-key="rowKey"
         :span-method="deployRecordSpanMethod"

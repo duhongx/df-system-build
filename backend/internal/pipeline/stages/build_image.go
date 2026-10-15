@@ -69,9 +69,12 @@ func (s *BuildImageStage) buildStandardImage(ctx context.Context, pCtx *types.Pi
 	}
 
 	// Build image tag
-	timestamp := time.Now().Format("20060102150405")
-	imageName := fmt.Sprintf("%s/%s:%s-%s-p%d",
-		strings.TrimRight(registryURL, "/"), pCtx.AppName, pCtx.GitBranch, timestamp, pCtx.PipelineID)
+	now := time.Now()
+	timestamp := now.In(time.FixedZone("Asia/Shanghai", 8*60*60)).Format("20060102150405")
+	imageName, err := buildImageName(pCtx, registryURL, pCtx.AppName, now)
+	if err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
 
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("目标镜像: %s", imageName), "stdout")
 
@@ -110,7 +113,11 @@ func (s *BuildImageStage) buildStandardImage(ctx context.Context, pCtx *types.Pi
 		logWebTree(webLogger(pCtx), "独立应用制品解压完成", distDir)
 	} else {
 		// For Java apps: copy jar file
-		artifactSrc = filepath.Join(sourceDir, "build", "libs", pCtx.ArtifactName)
+		artifactDir, err := sourceArtifactDirectory(pCtx)
+		if err != nil {
+			return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+		}
+		artifactSrc = filepath.Join(artifactDir, pCtx.ArtifactName)
 		if err := copyFile(artifactSrc, filepath.Join(dockerDir, pCtx.ArtifactName)); err != nil {
 			errMsg := fmt.Sprintf("复制制品失败: %v", err)
 			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
@@ -177,8 +184,10 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 	}
 	pCtx.OnLog(pCtx.PipelineID, 0, "本次替换: "+strings.Join(updated, "、"), "stdout")
 	pCtx.OnLog(pCtx.PipelineID, 0, "保持不变: "+strings.Join(preserved, "、"), "stdout")
-	timestamp := time.Now().Format("20060102150405")
-	imageName := fmt.Sprintf("%s/web-main:%s-%s-p%d", strings.TrimRight(registryURL, "/"), pCtx.GitBranch, timestamp, pCtx.PipelineID)
+	imageName, err := buildImageName(pCtx, registryURL, "web-main", time.Now())
+	if err != nil {
+		return fail(err)
+	}
 	baseline.NewImage = imageName
 	encoded, err := json.Marshal(baseline)
 	if err != nil {

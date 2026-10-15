@@ -2058,7 +2058,10 @@ func TestExecuteRejectsPartialFrontendSelectionBeforeCreatingPipelines(t *testin
 	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.DB.AutoMigrate(&model.Application{}, &model.Pipeline{}, &model.PipelineStage{}); err != nil {
+	if err := repository.DB.AutoMigrate(&model.Application{}, &model.Pipeline{}, &model.PipelineStage{}, &model.Settings{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.NewSettingsRepo().Set("k8s_namespace", "test"); err != nil {
 		t.Fatal(err)
 	}
 	app := model.Application{AppName: "web-main", AppType: "vue", VueRole: "main", GitRepo: "test"}
@@ -2089,7 +2092,7 @@ func TestExecuteRejectsPartialFrontendSelectionBeforeCreatingPipelines(t *testin
 		[]map[string]any{{"fileName": "web-main.zip", "appId": app.ID}, {"fileName": "04.zip", "appId": sub.ID}},
 		[]map[string]any{{"fileName": "web-main.zip", "appId": app.ID}, {"fileName": "web-main.zip", "appId": app.ID}},
 	} {
-		body, _ := json.Marshal(map[string]any{"sourceDir": dir, "namespace": "test", "items": items})
+		body, _ := json.Marshal(map[string]any{"sourceDir": dir, "namespace": "ignored-task-override", "items": items})
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = httptest.NewRequest(http.MethodPost, "/execute", bytes.NewReader(body))

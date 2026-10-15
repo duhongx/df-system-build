@@ -26,11 +26,11 @@ func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
 	{
 		g.GET("", h.List)
 		g.GET("/:id", h.Get)
-		g.POST("", h.Create)
-		g.PUT("/:id", h.Update)
-		g.DELETE("/:id", h.Delete)
-		g.POST("/:id/execute", h.Execute)
-		g.POST("/batch-execute", h.BatchExecute)
+		g.POST("", middleware.SourceBuildRequired(), h.Create)
+		g.PUT("/:id", middleware.SourceBuildRequired(), h.Update)
+		g.DELETE("/:id", middleware.SourceBuildRequired(), h.Delete)
+		g.POST("/:id/execute", middleware.SourceBuildRequired(), h.Execute)
+		g.POST("/batch-execute", middleware.SourceBuildRequired(), h.BatchExecute)
 	}
 }
 

@@ -47,7 +47,6 @@ UPDATE config_items SET code = 'configmap-web-opm', name = 'ConfigMap (web-opm)'
 		Version:     4,
 		Description: "Add new settings keys for environment config",
 		SQL: `
-INSERT INTO settings (key, value, description) VALUES ('build_mode', 'docker', '编译模式') ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value, description) VALUES ('deploy_mode', 'deploy', '部署模式') ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value, description) VALUES ('customer_env', '本地', '客户环境') ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value, description) VALUES ('nacos_url', '', 'Nacos 地址') ON CONFLICT (key) DO NOTHING;
@@ -57,7 +56,6 @@ INSERT INTO settings (key, value, description) VALUES ('skywalking_oap_url', '',
 INSERT INTO settings (key, value, description) VALUES ('skywalking_graphql_url', '', 'SkyWalking GraphQL 地址') ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value, description) VALUES ('postgresql_host', '', 'PostgreSQL 主机') ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value, description) VALUES ('postgresql_port', '5432', 'PostgreSQL 端口') ON CONFLICT (key) DO NOTHING;
-INSERT INTO settings (key, value, description) VALUES ('postgresql_user', '', 'PostgreSQL 用户名') ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value, description) VALUES ('postgresql_password', '', 'PostgreSQL 密码') ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value, description) VALUES ('postgresql_admin_password', '', 'PostgreSQL 管理员密码') ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value, description) VALUES ('postgresql_database', '', 'PostgreSQL 数据库') ON CONFLICT (key) DO NOTHING;

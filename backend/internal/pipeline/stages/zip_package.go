@@ -3,6 +3,7 @@ package stages
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"df-build-server/internal/pipeline/types"
 )
@@ -16,10 +17,18 @@ func (s *ZipPackageStage) Run(ctx context.Context, pCtx *types.PipelineContext) 
 	sourceDir := pCtx.Workspace.SourceDir()
 	zipName := pCtx.ArtifactName
 	zipPath := fmt.Sprintf("%s/%s", sourceDir, zipName)
+	artifactDir, err := sourceArtifactDirectory(pCtx)
+	if err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
+	if filepath.Clean(artifactDir) == filepath.Clean(sourceDir) {
+		err := fmt.Errorf("前端产物目录不能为源码根目录，请指定 dist 等编译输出目录")
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
 
-	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("打包 dist → %s", zipName), "stdout")
+	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("打包 %s → %s", artifactDir, zipName), "stdout")
 
-	if err := ZipDirectory(sourceDir, "dist", zipPath); err != nil {
+	if err := ZipDirectory(artifactDir, ".", zipPath); err != nil {
 		errMsg := fmt.Sprintf("打包失败: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return &types.StageResult{ExitCode: 1, Error: errMsg}, err

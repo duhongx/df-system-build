@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"df-build-server/internal/pipeline/types"
+	"df-build-server/internal/repository"
 	"df-build-server/pkg/logger"
 
 	"github.com/go-git/go-git/v5"
@@ -21,6 +22,9 @@ func (s *GitCloneStage) Name() string { return "拉取代码" }
 func (s *GitCloneStage) Code() string { return "GIT_CLONE" }
 
 func (s *GitCloneStage) Run(ctx context.Context, pCtx *types.PipelineContext) (*types.StageResult, error) {
+	if err := repository.RequireSourceBuild(); err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
 	sourceDir := pCtx.Workspace.SourceDir()
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("$ git clone -b %s %s %s", pCtx.GitBranch, pCtx.GitRepo, sourceDir), "stdout")
 
@@ -116,7 +120,9 @@ func (w *logWriter) Write(p []byte) (n int, err error) {
 		idx := strings.IndexByte(w.buf, '\n')
 		if idx < 0 {
 			idx = strings.IndexByte(w.buf, '\r')
-			if idx < 0 { break }
+			if idx < 0 {
+				break
+			}
 		}
 		line := strings.TrimSpace(w.buf[:idx])
 		w.buf = w.buf[idx+1:]

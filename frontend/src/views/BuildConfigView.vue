@@ -1,21 +1,17 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { listBuildConfigs, createBuildConfig, updateBuildConfig, deleteBuildConfig, type BuildConfig } from '../api/build-config'
+import { listBuildConfigs, createBuildConfig, updateBuildConfig, deleteBuildConfig, getDefaultBuildConfigs, type BuildConfig } from '../api/build-config'
 
 const loading = ref(true)
 const buildConfigs = ref<BuildConfig[]>([])
+const defaults = ref<Partial<Record<'java' | 'vue', BuildConfig>>>({})
 
 const dialogVisible = ref(false)
 const editMode = ref(false)
 const form = ref<any>({
   name: '',
   category: 'java',
-  buildMode: 'docker',
-  dockerImage: '',
-  cpuLimit: '2',
-  memoryLimit: '4g',
-  cacheMounts: [] as { hostPath: string; containerPath: string }[],
   installCommand: '',
   buildCommand: '',
   artifactDir: '',
@@ -31,7 +27,9 @@ onMounted(async () => {
 async function loadData() {
   loading.value = true
   try {
-    buildConfigs.value = await listBuildConfigs()
+    const [configs, automatic] = await Promise.all([listBuildConfigs(), getDefaultBuildConfigs()])
+    buildConfigs.value = configs
+    defaults.value = automatic
   } catch (e) {
     buildConfigs.value = []
   } finally {
@@ -44,11 +42,6 @@ function handleAdd() {
   form.value = {
     name: '',
     category: 'java',
-    buildMode: 'docker',
-    dockerImage: '',
-    cpuLimit: '2',
-    memoryLimit: '4g',
-    cacheMounts: [],
     installCommand: '',
     buildCommand: '',
     artifactDir: '',
@@ -61,17 +54,10 @@ function handleAdd() {
 
 function handleEdit(row: BuildConfig) {
   editMode.value = true
-  let mounts: any[] = []
-  try { mounts = JSON.parse(row.cacheMounts || '[]') } catch (_) { mounts = [] }
   form.value = {
     id: row.id,
     name: row.name,
     category: row.category,
-    buildMode: row.buildMode,
-    dockerImage: row.dockerImage || '',
-    cpuLimit: row.cpuLimit || '2',
-    memoryLimit: row.memoryLimit || '4g',
-    cacheMounts: mounts,
     installCommand: row.installCommand || '',
     buildCommand: row.buildCommand,
     artifactDir: row.artifactDir || '',
@@ -85,14 +71,7 @@ function handleEdit(row: BuildConfig) {
 async function handleSave() {
   if (!form.value.name?.trim()) { ElMessage.warning('请输入名称'); return }
   if (!form.value.buildCommand?.trim()) { ElMessage.warning('请输入构建命令'); return }
-  if (form.value.buildMode === 'docker' && !form.value.dockerImage?.trim()) {
-    ElMessage.warning('Docker 模式需要填写镜像'); return
-  }
-
-  const payload = {
-    ...form.value,
-    cacheMounts: JSON.stringify(form.value.cacheMounts || []),
-  }
+  const payload = { ...form.value }
   delete payload.id
 
   try {
@@ -121,38 +100,28 @@ function categoryColor(cat: string) {
   return cat === 'java' ? 'danger' : cat === 'vue' ? 'success' : 'info'
 }
 
-function buildModeColor(mode: string) {
-  return mode === 'docker' ? '' : 'warning'
-}
 </script>
 
 <template>
-  <div class="page">
+  <div class="page viewport-table-page">
     <div class="toolbar-row">
       <h4 class="page-title">编译配置</h4>
       <el-button type="primary" size="small" @click="handleAdd"><el-icon><Plus /></el-icon>新增</el-button>
     </div>
 
+    <el-alert title="本地任务按应用类型自动使用 Gradle / Node 默认配置，无需逐任务选择。此处集中维护工具路径和命令。" type="info" :closable="false" style="margin-bottom: 12px;" />
     <div class="content-card">
-      <el-table :data="buildConfigs" v-loading="loading" stripe border>
-        <el-table-column prop="name" label="名称" min-width="160" />
+      <el-table height="100%" :data="buildConfigs" v-loading="loading" stripe border>
+        <el-table-column label="名称" min-width="180"><template #default="{ row }">{{ row.name }}<el-tag v-if="defaults[row.category as 'java' | 'vue']?.id === row.id" size="small" style="margin-left: 8px;">默认</el-tag></template></el-table-column>
         <el-table-column label="分类" width="80" align="center">
           <template #default="{ row }">
             <el-tag :type="categoryColor(row.category)" size="small">{{ row.category }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="编译模式" width="100" align="center">
-          <template #default="{ row }">
-            <el-tag :type="buildModeColor(row.buildMode)" size="small">{{ row.buildMode }}</el-tag>
-          </template>
-        </el-table-column>
         <el-table-column prop="buildCommand" label="构建命令" min-width="200" show-overflow-tooltip />
-        <el-table-column prop="dockerImage" label="Docker 镜像" min-width="200" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.dockerImage || '-' }}</template>
-        </el-table-column>
         <el-table-column label="状态" width="80" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'online' ? 'success' : 'danger'" size="small">{{ row.status || 'online' }}</el-tag>
+            <el-tag :type="row.status === 'online' ? 'success' : 'danger'" size="small">{{ row.status === 'offline' ? '停用' : '启用' }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="150" align="center">
@@ -168,7 +137,7 @@ function buildModeColor(mode: string) {
     <el-dialog v-model="dialogVisible" :title="editMode ? '编辑编译配置' : '新增编译配置'" width="620px" :close-on-click-modal="false">
       <el-form :model="form" label-width="100px">
         <el-form-item label="名称" required>
-          <el-input v-model="form.name" placeholder="如 Java Gradle Docker" />
+          <el-input v-model="form.name" placeholder="如 Java 8 Gradle、本机 Node 18" />
         </el-form-item>
         <el-form-item label="分类" required>
           <el-radio-group v-model="form.category">
@@ -176,47 +145,9 @@ function buildModeColor(mode: string) {
             <el-radio value="vue">Vue</el-radio>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="编译模式" required>
-          <el-radio-group v-model="form.buildMode">
-            <el-radio value="docker">Docker 容器</el-radio>
-            <el-radio value="local">本地编译</el-radio>
-          </el-radio-group>
+        <el-form-item label="环境变量">
+          <el-input v-model="form.envVars" type="textarea" :rows="3" placeholder="如 JAVA_HOME=/usr/local/jdk，每行一个 KEY=VALUE" />
         </el-form-item>
-
-        <!-- Docker mode fields -->
-        <template v-if="form.buildMode === 'docker'">
-          <el-form-item label="Docker 镜像" required>
-            <el-input v-model="form.dockerImage" placeholder="ops-builder-gradle:jdk8" />
-          </el-form-item>
-          <el-form-item label="CPU 限制">
-            <el-input v-model="form.cpuLimit" style="width: 100px;" placeholder="2" />
-          </el-form-item>
-          <el-form-item label="内存限制">
-            <el-input v-model="form.memoryLimit" style="width: 100px;" placeholder="4g" />
-          </el-form-item>
-          <el-form-item label="缓存挂载">
-            <div class="cache-mounts">
-              <div v-for="(mount, idx) in form.cacheMounts" :key="idx" class="cache-mount-row">
-                <el-input v-model="mount.hostPath" placeholder="宿主机路径" style="width: 190px;" />
-                <span style="margin: 0 6px; color: #909399;">→</span>
-                <el-input v-model="mount.containerPath" placeholder="容器内路径" style="width: 190px;" />
-                <el-button type="danger" link @click="form.cacheMounts.splice(idx, 1)">
-                  <el-icon><Delete /></el-icon>
-                </el-button>
-              </div>
-              <el-button size="small" @click="form.cacheMounts.push({ hostPath: '', containerPath: '' })">
-                <el-icon><Plus /></el-icon>添加挂载
-              </el-button>
-            </div>
-          </el-form-item>
-        </template>
-
-        <!-- Local mode fields -->
-        <template v-if="form.buildMode === 'local'">
-          <el-form-item label="环境变量">
-            <el-input v-model="form.envVars" type="textarea" :rows="3" placeholder="KEY=VALUE 格式，每行一个（可选）" />
-          </el-form-item>
-        </template>
 
         <!-- Common fields -->
         <el-form-item label="安装命令">
@@ -272,13 +203,4 @@ function buildModeColor(mode: string) {
   padding: 16px;
 }
 
-.cache-mounts {
-  width: 100%;
-}
-
-.cache-mount-row {
-  display: flex;
-  align-items: center;
-  margin-bottom: 8px;
-}
 </style>

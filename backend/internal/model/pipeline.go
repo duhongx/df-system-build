@@ -16,7 +16,6 @@ type Pipeline struct {
 	GitCommitMessage      string          `gorm:"type:text" json:"gitCommitMessage"`
 	Status                string          `gorm:"size:20;not null;default:PENDING" json:"status"` // PENDING/RUNNING/IMAGE_READY/DEPLOYING/SUCCESS/FAILED/CANCELED
 	TriggerUser           string          `gorm:"size:64;not null" json:"triggerUser"`
-	BuilderImage          string          `gorm:"size:256" json:"builderImage"`
 	ArtifactName          string          `gorm:"size:128" json:"artifactName"`
 	UploadPath            string          `gorm:"size:512" json:"uploadPath"`
 	UploadTargets         string          `gorm:"size:512" json:"uploadTargets"`

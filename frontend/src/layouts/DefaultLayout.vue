@@ -13,7 +13,14 @@ settingsStore.fetchSettings()
 
 const route = useRoute()
 const router = useRouter()
-const isCollapsed = ref(false)
+const isCollapsed = ref(window.innerWidth < 1200)
+const pageSection = computed(() => {
+  if (/^\/(servers|log-collection|kubernetes)/.test(route.path)) return '运维管理'
+  if (route.path.startsWith('/postgresql')) return '数据库管理'
+  if (route.path.startsWith('/settings')) return '平台配置'
+  if (route.path.startsWith('/deployment')) return '基础设施'
+  return '构建与交付'
+})
 
 const activeMenu = computed(() => {
   if (route.path.startsWith('/artifacts/versions/')) return '/artifacts/versions'
@@ -24,7 +31,7 @@ const toggleCollapse = () => {
   isCollapsed.value = !isCollapsed.value
 }
 
-const sidebarWidth = computed(() => isCollapsed.value ? '54px' : '210px')
+const sidebarWidth = computed(() => isCollapsed.value ? '72px' : '224px')
 
 // Notifications
 const unreadCount = ref(0)
@@ -70,9 +77,10 @@ interface TabItem {
 }
 
 const tabs = ref<TabItem[]>([{ path: '/dashboard', title: '工作台' }])
+if (route.path !== '/dashboard') tabs.value.push({ path: route.path, title: String(route.meta.title || '页面') })
 const activeTab = computed(() => route.path)
 
-router.afterEach((to) => {
+const removeTabHook = router.afterEach((to) => {
   const title = (to.meta?.title as string) || '页面'
   const exists = tabs.value.find(t => t.path === to.path)
   if (!exists) {
@@ -139,11 +147,11 @@ onMountedHook(() => {
 })
 onUnmounted(() => {
   document.removeEventListener('click', closeContextMenu)
+  removeTabHook()
 })
 
 // User center
 const profileDialogVisible = ref(false)
-const passwordDialogVisible = ref(false)
 
 // Theme
 const currentTheme = ref<'light' | 'dark' | 'system'>(
@@ -168,27 +176,20 @@ function applyTheme(theme: 'light' | 'dark' | 'system') {
 
 // Apply on mount
 applyTheme(currentTheme.value)
-const passwordForm = ref({ email: '', code: '', newPassword: '', confirmPassword: '' })
+const profileLoading = ref(false)
+const profileLoaded = ref(false)
 const profileForm = ref({
-  username: '测试工程师',
-  account: 'admin',
-  email: 'test@df-his.com',
-  phone: '13800138000',
-  department: '测试部',
+  username: '',
+  email: '',
+  phone: '',
+  department: '',
 })
-const codeSending = ref(false)
-const codeCountdown = ref(0)
-let countdownTimer: any = null
 
 function handleUserCommand(command: string) {
   switch (command) {
     case 'profile':
       profileDialogVisible.value = true
       loadProfile()
-      break
-    case 'password':
-      passwordForm.value = { email: '', code: '', newPassword: '', confirmPassword: '' }
-      passwordDialogVisible.value = true
       break
     case 'logout':
       ElMessageBox.confirm('确定退出登录？', '提示', { type: 'warning' }).then(async () => {
@@ -203,24 +204,26 @@ function handleUserCommand(command: string) {
 }
 
 async function loadProfile() {
+  profileLoading.value = true
+  profileLoaded.value = false
   try {
     const data: any = await request.get('/auth/profile')
     profileForm.value = {
       username: data.username || '',
-      account: data.account || '',
       email: data.email || '',
       phone: data.phone || '',
       department: data.department || '',
     }
+    profileLoaded.value = true
   } catch (_) {}
+  finally { profileLoading.value = false }
 }
 
 async function handleSaveProfile() {
+  if (!profileLoaded.value || profileLoading.value) return
   if (!profileForm.value.username.trim()) { ElMessage.warning('用户名不能为空'); return }
-  if (!profileForm.value.email.trim()) { ElMessage.warning('邮箱不能为空'); return }
   try {
     await request.put('/auth/profile', {
-      username: profileForm.value.username,
       email: profileForm.value.email,
       phone: profileForm.value.phone,
       department: profileForm.value.department,
@@ -230,52 +233,15 @@ async function handleSaveProfile() {
   } catch (_) {}
 }
 
-async function handleSendCode() {
-  if (!passwordForm.value.email.trim()) { ElMessage.warning('请输入邮箱'); return }
-  try {
-    await request.post('/auth/send-code', { email: passwordForm.value.email })
-    codeSending.value = true
-    codeCountdown.value = 60
-    countdownTimer = setInterval(() => {
-      codeCountdown.value--
-      if (codeCountdown.value <= 0) {
-        clearInterval(countdownTimer)
-        codeSending.value = false
-      }
-    }, 1000)
-  } catch (_) {}
-}
-
-async function handleSavePassword() {
-  if (!passwordForm.value.email) { ElMessage.warning('请输入邮箱'); return }
-  if (!passwordForm.value.code) { ElMessage.warning('请输入验证码'); return }
-  if (!passwordForm.value.newPassword) { ElMessage.warning('请输入新密码'); return }
-  if (passwordForm.value.newPassword.length < 6) { ElMessage.warning('密码长度不能少于6位'); return }
-  if (passwordForm.value.newPassword !== passwordForm.value.confirmPassword) { ElMessage.warning('两次密码不一致'); return }
-  try {
-    await request.post('/auth/change-password', {
-      email: passwordForm.value.email,
-      code: passwordForm.value.code,
-      newPassword: passwordForm.value.newPassword,
-    })
-    ElMessage.success('密码修改成功')
-    passwordDialogVisible.value = false
-    if (countdownTimer) clearInterval(countdownTimer)
-    codeSending.value = false
-    codeCountdown.value = 0
-    clearToken()
-    window.location.href = '/login'
-  } catch (_) {}
-}
 </script>
 
 <template>
-  <div class="layout-wrapper">
+  <div class="layout-wrapper" :class="{ 'nav-collapsed': isCollapsed }">
     <!-- Sidebar -->
     <aside class="sidebar" :style="{ width: sidebarWidth }">
       <div class="sidebar-logo" :class="{ collapsed: isCollapsed }">
-        <img v-if="isCollapsed" src="/logo.svg" alt="CloudHIS" class="logo-icon" />
-        <img v-else src="/brand-logo.svg" alt="CloudHIS智能管理平台" class="brand-logo-img" />
+        <img src="/logo.svg" alt="" class="logo-icon" />
+        <div v-if="!isCollapsed" class="brand-wordmark"><strong>CloudHIS</strong><small>智能管理平台</small></div>
       </div>
 
       <el-menu
@@ -285,6 +251,7 @@ async function handleSavePassword() {
         class="sidebar-menu"
         router
       >
+        <li v-if="!isCollapsed" class="nav-section" role="presentation">工作空间</li>
         <el-menu-item index="/dashboard">
           <el-icon><Monitor /></el-icon>
           <template #title>工作台</template>
@@ -293,6 +260,11 @@ async function handleSavePassword() {
         <el-menu-item index="/servers">
           <el-icon><Platform /></el-icon>
           <template #title>服务器管理</template>
+        </el-menu-item>
+
+        <el-menu-item index="/log-collection">
+          <el-icon><Files /></el-icon>
+          <template #title>日志收集</template>
         </el-menu-item>
 
         <el-sub-menu index="k8s-center">
@@ -309,6 +281,7 @@ async function handleSavePassword() {
           <el-menu-item index="/kubernetes/ingresses">Ingress</el-menu-item>
         </el-sub-menu>
 
+        <li v-if="!isCollapsed" class="nav-section" role="presentation">构建与数据</li>
         <el-sub-menu index="task-center">
           <template #title>
             <el-icon><VideoPlay /></el-icon>
@@ -340,6 +313,7 @@ async function handleSavePassword() {
           <el-menu-item index="/postgresql/view-dependency-change">视图依赖变更</el-menu-item>
         </el-sub-menu>
 
+        <li v-if="!isCollapsed" class="nav-section" role="presentation">平台管理</li>
         <el-sub-menu index="settings-center">
           <template #title>
             <el-icon><Setting /></el-icon>
@@ -349,7 +323,7 @@ async function handleSavePassword() {
           <el-menu-item index="/settings/apps">应用管理</el-menu-item>
           <el-menu-item index="/settings/environment">环境配置</el-menu-item>
           <el-menu-item index="/settings/config-items">配置项管理</el-menu-item>
-          <el-menu-item index="/settings/build-configs">编译配置</el-menu-item>
+          <el-menu-item v-if="settingsStore.showTaskList" index="/settings/build-configs">编译配置</el-menu-item>
           <el-menu-item index="/settings/sql-execution">SQL执行配置</el-menu-item>
           <el-menu-item index="/settings/notifications">通知配置</el-menu-item>
         </el-sub-menu>
@@ -364,6 +338,7 @@ async function handleSavePassword() {
           <el-menu-item index="/deployment/runs">部署运行</el-menu-item>
         </el-sub-menu>
       </el-menu>
+      <div v-if="!isCollapsed" class="sidebar-footer"><span class="footer-mark">C / H</span><div><strong>CloudHIS Console</strong><small>构建 · 发布 · 运维</small></div></div>
     </aside>
 
     <!-- Main Area -->
@@ -371,23 +346,24 @@ async function handleSavePassword() {
       <!-- Header -->
       <header class="main-header">
         <div class="header-left">
-          <div class="collapse-btn" @click="toggleCollapse">
+          <button class="collapse-btn" type="button" :aria-label="isCollapsed ? '展开导航' : '收起导航'" @click="toggleCollapse">
             <el-icon :size="18">
               <Fold v-if="!isCollapsed" />
               <Expand v-else />
             </el-icon>
-          </div>
+          </button>
+          <div class="header-breadcrumb"><span>{{ pageSection }}</span><span class="breadcrumb-slash">/</span><strong>{{ route.meta.title }}</strong></div>
         </div>
         <div class="header-right">
           <el-badge :value="unreadCount" :hidden="unreadCount === 0" :max="99" style="margin-right: 16px;">
-            <div class="theme-btn" @click="notifyDrawerVisible = true">
+            <button class="theme-btn" type="button" aria-label="通知中心" @click="notifyDrawerVisible = true">
               <el-icon :size="18"><Bell /></el-icon>
-            </div>
+            </button>
           </el-badge>
           <el-dropdown trigger="click" @command="handleThemeCommand" style="margin-right: 16px;">
-            <div class="theme-btn">
+            <button class="theme-btn" type="button" aria-label="切换主题">
               <el-icon :size="18"><Sunny v-if="currentTheme === 'light'" /><Moon v-else-if="currentTheme === 'dark'" /><Monitor v-else /></el-icon>
-            </div>
+            </button>
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item command="light" :class="{ 'is-active-item': currentTheme === 'light' }">
@@ -404,7 +380,7 @@ async function handleSavePassword() {
           </el-dropdown>
           <el-dropdown trigger="click" @command="handleUserCommand">
             <div class="user-info">
-              <el-avatar :size="28" style="background: #409eff; font-size: 11px;">Admin</el-avatar>
+              <el-avatar :size="32" class="admin-avatar">A</el-avatar>
               <span class="user-name">系统管理员</span>
               <el-icon :size="12" style="margin-left: 4px;"><ArrowDown /></el-icon>
             </div>
@@ -412,9 +388,6 @@ async function handleSavePassword() {
               <el-dropdown-menu>
                 <el-dropdown-item command="profile">
                   <el-icon><User /></el-icon>个人信息
-                </el-dropdown-item>
-                <el-dropdown-item command="password">
-                  <el-icon><Lock /></el-icon>修改密码
                 </el-dropdown-item>
                 <el-dropdown-item command="logout">
                   <el-icon><SwitchButton /></el-icon>退出登录
@@ -431,8 +404,12 @@ async function handleSavePassword() {
           v-for="tab in tabs"
           :key="tab.path"
           class="tab-item"
+          role="tab"
+          tabindex="0"
+          :aria-selected="activeTab === tab.path"
           :class="{ active: activeTab === tab.path }"
           @click="handleTabClick(tab.path)"
+          @keydown.enter="handleTabClick(tab.path)"
           @contextmenu.prevent="handleTabContextMenu($event, tab)"
         >
           <span class="tab-label">{{ tab.title }}</span>
@@ -459,22 +436,18 @@ async function handleSavePassword() {
       </div>
 
       <!-- Content -->
-      <main class="main-content">
-        <router-view />
+      <main class="main-content" :class="{ 'main-content--fill': route.meta.fillViewport }">
+        <router-view :key="route.fullPath" />
       </main>
     </div>
 
     <!-- Profile Dialog -->
     <el-dialog v-model="profileDialogVisible" title="个人信息" width="480px" :close-on-click-modal="false">
-      <el-form :model="profileForm" label-width="80px">
-        <el-form-item label="用户名" required>
-          <el-input v-model="profileForm.username" placeholder="请输入用户名" />
+      <el-form :model="profileForm" label-width="80px" v-loading="profileLoading">
+        <el-form-item label="用户名">
+          <el-input v-model="profileForm.username" readonly />
         </el-form-item>
-        <el-form-item label="账号">
-          <el-input v-model="profileForm.account" disabled />
-          <div class="form-hint">账号不可修改</div>
-        </el-form-item>
-        <el-form-item label="邮箱" required>
+        <el-form-item label="邮箱">
           <el-input v-model="profileForm.email" placeholder="请输入邮箱" />
         </el-form-item>
         <el-form-item label="手机号">
@@ -486,38 +459,7 @@ async function handleSavePassword() {
       </el-form>
       <template #footer>
         <el-button @click="profileDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="handleSaveProfile">保存修改</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- Password Dialog -->
-    <el-dialog v-model="passwordDialogVisible" title="修改密码" width="460px" :close-on-click-modal="false">
-      <el-form :model="passwordForm" label-width="80px">
-        <el-form-item label="邮箱" required>
-          <el-input v-model="passwordForm.email" placeholder="接收验证码的邮箱" />
-        </el-form-item>
-        <el-form-item label="验证码" required>
-          <div style="display: flex; gap: 8px; width: 100%;">
-            <el-input v-model="passwordForm.code" placeholder="请输入验证码" style="flex: 1;" />
-            <el-button
-              :disabled="codeSending"
-              @click="handleSendCode"
-              style="width: 120px;"
-            >
-              {{ codeSending ? `${codeCountdown}s 后重发` : '发送验证码' }}
-            </el-button>
-          </div>
-        </el-form-item>
-        <el-form-item label="新密码" required>
-          <el-input v-model="passwordForm.newPassword" type="password" show-password placeholder="请输入新密码（至少6位）" />
-        </el-form-item>
-        <el-form-item label="确认密码" required>
-          <el-input v-model="passwordForm.confirmPassword" type="password" show-password placeholder="再次输入新密码" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="passwordDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="handleSavePassword">确认修改</el-button>
+        <el-button type="primary" :disabled="!profileLoaded || profileLoading" @click="handleSaveProfile">保存修改</el-button>
       </template>
     </el-dialog>
 
@@ -545,306 +487,48 @@ async function handleSavePassword() {
 </template>
 
 <style scoped>
-.layout-wrapper {
-  display: flex;
-  height: 100vh;
-  overflow: hidden;
-}
-
-/* Sidebar */
-.sidebar {
-  background: #fff;
-  border-right: 1px solid #f0f0f0;
-  display: flex;
-  flex-direction: column;
-  transition: width 0.28s ease;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-.sidebar-logo {
-  height: 48px;
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  border-bottom: 1px solid #f0f0f0;
-  overflow: hidden;
-}
-
-.sidebar-logo.collapsed {
-  justify-content: center;
-  padding: 0;
-}
-
-.logo-icon {
-  width: 28px;
-  height: 28px;
-  flex-shrink: 0;
-}
-
-.brand-logo-img {
-  width: 144px;
-  height: 40px;
-  display: block;
-  flex-shrink: 0;
-}
-
-.sidebar-menu {
-  flex: 1;
-  border-right: none !important;
-  overflow-y: auto;
-  overflow-x: hidden;
-}
-
-:deep(.el-menu) {
-  border-right: none;
-}
-
-:deep(.el-menu-item),
-:deep(.el-sub-menu__title) {
-  height: 44px;
-  line-height: 44px;
-  font-size: 13px;
-  color: #606266;
-}
-
-:deep(.el-menu-item.is-active) {
-  color: #409eff;
-  background: #ecf5ff;
-  border-right: 3px solid #409eff;
-}
-
-:deep(.el-menu-item:hover),
-:deep(.el-sub-menu__title:hover) {
-  background: #f5f7fa;
-}
-
-:deep(.el-sub-menu .el-menu-item) {
-  padding-left: 52px !important;
-  height: 40px;
-  line-height: 40px;
-}
-
-/* Main Area */
-.main-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: #f0f2f5;
-}
-
-/* Header */
-.main-header {
-  height: 48px;
-  background: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 20px;
-  border-bottom: 1px solid #f0f0f0;
-  flex-shrink: 0;
-}
-
-.header-left {
-  display: flex;
-  align-items: center;
-}
-
-.collapse-btn {
-  cursor: pointer;
-  padding: 6px;
-  border-radius: 4px;
-  color: #606266;
-  transition: all 0.2s;
-}
-
-.collapse-btn:hover {
-  background: #f5f7fa;
-  color: #409eff;
-}
-
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 0;
-}
-
-.theme-btn {
-  cursor: pointer;
-  padding: 6px;
-  border-radius: 4px;
-  color: #606266;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-}
-
-.theme-btn:hover {
-  background: #f5f7fa;
-  color: #409eff;
-}
-
-.header-badge {
-  cursor: pointer;
-}
-
-.user-info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-}
-
-.user-name {
-  font-size: 13px;
-  color: #606266;
-}
-
-/* Tab Bar */
-.tab-bar {
-  height: 34px;
-  background: #fff;
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  gap: 4px;
-  border-bottom: 1px solid #f0f0f0;
-  overflow-x: auto;
-  flex-shrink: 0;
-}
-
-.tab-bar::-webkit-scrollbar {
-  height: 0;
-}
-
-.tab-item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 12px;
-  border-radius: 4px;
-  font-size: 12px;
-  color: #606266;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.2s;
-  border: 1px solid transparent;
-}
-
-.tab-item:hover {
-  color: #409eff;
-  background: #ecf5ff;
-}
-
-.tab-item.active {
-  color: #409eff;
-  background: #ecf5ff;
-  border-color: #d9ecff;
-}
-
-.tab-close {
-  border-radius: 50%;
-  padding: 1px;
-  transition: all 0.2s;
-}
-
-.tab-close:hover {
-  background: #409eff;
-  color: #fff;
-}
-
-/* Content */
-.main-content {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px;
-}
-
-/* Transitions */
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s;
-}
-
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
-
-.form-hint {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 2px;
-}
-
-/* Context Menu */
-.context-menu {
-  position: fixed;
-  z-index: 9999;
-  background: #fff;
-  border: 1px solid #ebeef5;
-  border-radius: 4px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
-  padding: 4px 0;
-  min-width: 120px;
-}
-
-.context-menu-item {
-  padding: 8px 16px;
-  font-size: 13px;
-  color: #606266;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.context-menu-item:hover {
-  background: #ecf5ff;
-  color: #409eff;
-}
-
-html.dark .context-menu {
-  background: #242424;
-  border-color: #3a3a3a;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
-}
-
-html.dark .context-menu-item {
-  color: #ffffffb3;
-}
-
-html.dark .context-menu-item:hover {
-  background: #1a2c42;
-  color: #409eff;
-}
-
-.notify-item {
-  padding: 12px 0;
-  border-bottom: 1px solid #f0f0f0;
-}
-.notify-item.unread {
-  background: #f0f9ff;
-  margin: 0 -20px;
-  padding: 12px 20px;
-}
-.notify-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  color: #303133;
-}
-.notify-content {
-  font-size: 12px;
-  color: #606266;
-  margin-top: 4px;
-  padding-left: 22px;
-}
-.notify-time {
-  font-size: 11px;
-  color: #c0c4cc;
-  margin-top: 4px;
-  padding-left: 22px;
-}
+.layout-wrapper { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
+.sidebar { background: var(--ui-panel); border-right: 1px solid var(--ui-border); display: flex; flex-direction: column; transition: width .22s ease; overflow: hidden; flex-shrink: 0; }
+.sidebar-logo { height: 84px; display: flex; align-items: center; gap: 10px; padding: 0 24px; overflow: hidden; flex-shrink: 0; }
+.sidebar-logo.collapsed { padding: 0; justify-content: center; }
+.logo-icon { width: 33px; height: 33px; flex-shrink: 0; }
+.brand-wordmark { white-space: nowrap; }.brand-wordmark strong { display: block; font-size: 22px; letter-spacing: -.9px; color: var(--ui-heading); font-weight: 700; line-height: 1.2; }
+.brand-wordmark strong span { color: var(--ui-cyan); margin-left: 2px; }.brand-wordmark small { display: block; font-size: 10px; color: var(--ui-muted); letter-spacing: 2px; margin-top: 5px; }
+.sidebar-menu { flex: 1; border-right: none; overflow-y: auto; overflow-x: hidden; padding: 0 12px 12px; background: transparent; }
+.nav-section { font-size: 10px; color: var(--ui-muted); letter-spacing: 1.6px; padding: 22px 14px 10px; list-style: none; }
+.nav-section:first-child { padding-top: 12px; }
+:deep(.el-menu) { border-right: none; background: transparent; }
+:deep(.el-menu-item), :deep(.el-sub-menu__title) { height: 43px; line-height: 43px; border-radius: 7px; margin-bottom: 5px; color: var(--ui-text); font-size: 13px; padding-left: 14px !important; }
+:deep(.el-menu-item .el-icon), :deep(.el-sub-menu__title .el-icon) { font-size: 17px; margin-right: 11px; color: var(--ui-muted); }
+:deep(.el-menu-item.is-active) { background: var(--ui-tint); color: var(--ui-primary); font-weight: 600; position: relative; }
+:deep(.el-menu-item.is-active)::before { content: ''; position: absolute; height: 17px; width: 3px; left: 0; border-radius: 0 3px 3px 0; background: var(--ui-cyan); }
+:deep(.el-menu-item.is-active .el-icon) { color: var(--ui-primary); }
+:deep(.el-menu-item:hover), :deep(.el-sub-menu__title:hover) { background: var(--ui-panel-soft); color: var(--ui-primary); }
+:deep(.el-sub-menu .el-menu-item) { padding-left: 43px !important; height: 36px; line-height: 36px; font-size: 12px; }
+:deep(.el-menu--collapse) { width: 71px; padding-inline: 10px; }
+:deep(.el-menu--collapse .el-sub-menu__title), :deep(.el-menu--collapse .el-menu-item) { padding-inline: 16px !important; }
+.sidebar-footer { flex-shrink: 0; margin: 12px 18px 20px; padding: 16px 3px 0; border-top: 1px solid var(--ui-border); display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+.footer-mark { font-family: var(--ui-font-mono); font-size: 10px; color: var(--ui-cyan); border: 1px solid var(--ui-border); border-radius: 8px; padding: 8px 5px; }
+.sidebar-footer strong { display: block; font-size: 11px; color: var(--ui-text); font-weight: 500; }.sidebar-footer small { display: block; font-size: 10px; color: var(--ui-muted); margin-top: 3px; }
+.main-area { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--ui-bg); }
+.main-header { height: 66px; background: var(--ui-panel); display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid var(--ui-border); flex-shrink: 0; }
+.header-left, .header-right { display: flex; align-items: center; }.header-left { gap: 22px; min-width: 0; }.header-right { flex-shrink: 0; }
+.collapse-btn, .theme-btn { border: 0; background: transparent; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; color: var(--ui-muted); border-radius: 7px; cursor: pointer; transition: background .15s, color .15s; }
+.collapse-btn:hover, .theme-btn:hover { background: var(--ui-tint); color: var(--ui-primary); }
+.header-breadcrumb { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--ui-muted); min-width: 0; }.header-breadcrumb strong { color: var(--ui-heading); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.breadcrumb-slash { color: var(--el-border-color); }
+.user-info { display: flex; align-items: center; gap: 10px; cursor: pointer; padding-left: 18px; border-left: 1px solid var(--ui-border); }
+.admin-avatar { background: var(--ui-tint); color: var(--ui-primary); font-size: 13px; font-weight: 650; border: 1px solid var(--el-color-primary-light-8); }.user-name { font-size: 12px; color: var(--ui-text); }
+.tab-bar { min-height: 43px; background: var(--ui-panel); display: flex; align-items: center; padding: 0 28px; gap: 5px; border-bottom: 1px solid var(--ui-border); overflow-x: auto; flex-shrink: 0; }.tab-bar::-webkit-scrollbar { height: 0; }
+.tab-item { display: flex; align-items: center; gap: 14px; height: 31px; padding: 0 13px; border-radius: 5px; font-size: 11px; color: var(--ui-muted); cursor: pointer; white-space: nowrap; transition: background .15s; border: 1px solid transparent; }
+.tab-item.active { color: var(--ui-primary); background: var(--ui-tint); border-color: var(--el-color-primary-light-8); }.tab-item:hover { color: var(--ui-primary); background: var(--ui-panel-soft); }
+.tab-close { border-radius: 3px; }.tab-close:hover { background: var(--el-color-primary-light-8); }
+.main-content { flex: 1; min-width: 0; overflow: auto; padding: 28px 32px 36px; scrollbar-gutter: stable; }
+.main-content--fill { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.form-hint { font-size: 12px; color: var(--ui-muted); margin-top: 3px; }
+.context-menu { position: fixed; z-index: 9999; background: var(--ui-panel); border: 1px solid var(--ui-border); border-radius: 9px; box-shadow: 0 8px 28px rgb(15 35 67 / 12%); padding: 6px; min-width: 140px; }
+.context-menu-item { padding: 8px 12px; font-size: 12px; color: var(--ui-text); cursor: pointer; border-radius: 5px; }.context-menu-item:hover { background: var(--ui-tint); color: var(--ui-primary); }
+.notify-item { padding: 16px 0; border-bottom: 1px solid var(--ui-border); }.notify-item.unread { background: var(--ui-tint); margin: 0 -20px; padding-inline: 20px; }
+.notify-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 550; color: var(--ui-heading); }.notify-content { font-size: 12px; color: var(--ui-text); margin-top: 8px; padding-left: 24px; }.notify-time { font-size: 11px; color: var(--ui-muted); margin-top: 8px; padding-left: 24px; }
+@media (max-width: 1100px) { .main-content { padding: 23px 22px; }.main-header { padding-inline: 20px; }.tab-bar { padding-inline: 20px; } }
+@media (max-width: 700px) { .main-content { padding: 18px 14px; }.main-header { padding-inline: 12px; height: 58px; }.user-name { display: none; }.header-breadcrumb > span:first-child, .breadcrumb-slash { display: none; }.header-left { gap: 8px; }.header-right :deep(.el-badge), .header-right :deep(.el-dropdown) { margin-right: 6px !important; }.user-info { padding-left: 8px; }.tab-bar { padding-inline: 12px; } }
 </style>

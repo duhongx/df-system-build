@@ -32,18 +32,10 @@ async function load() {
       pageSize: pageSize.value,
       app: filterApp.value || undefined,
       status: filterStatus.value || undefined,
+      search: searchText.value.trim() || undefined,
+      appType: filterType.value || undefined,
     })
-    let list = result.list || []
-    if (searchText.value) {
-      const s = searchText.value.toLowerCase()
-      list = list.filter(p =>
-        p.pipelineNo.toLowerCase().includes(s) || p.appName.toLowerCase().includes(s)
-      )
-    }
-    if (filterType.value) {
-      list = list.filter(p => p.appType === filterType.value)
-    }
-    pipelines.value = list
+    pipelines.value = result.list || []
     total.value = result.total || 0
   } catch (e) {
     pipelines.value = []
@@ -73,6 +65,11 @@ function goToDetail(p: Pipeline) {
   router.push(`/release/${p.id}`)
 }
 
+function handleSearch() {
+  page.value = 1
+  load()
+}
+
 function clearAppFilter() {
   filterApp.value = ''
   searchText.value = ''
@@ -97,11 +94,11 @@ function formatTime(time: string | null | undefined) {
   }
 }
 
-async function handleDelete(p: Pipeline) {
-  await ElMessageBox.confirm(`确定删除构建记录 "${p.pipelineNo}" 吗？`, '确认删除', { type: 'warning' })
+async function handleCancel(p: Pipeline) {
+  await ElMessageBox.confirm(`确定取消任务 "${p.pipelineNo}" 吗？`, '确认取消', { type: 'warning' })
   try {
-    await cancelPipeline(p.id) // reuse cancel API to delete/mark
-    ElMessage.success('已删除')
+    await cancelPipeline(p.id)
+    ElMessage.success('已取消')
     await load()
   } catch (e) {
     // handled
@@ -131,7 +128,7 @@ function handleSizeChange(newSize: number) {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page release-page">
     <div class="toolbar-row">
       <div class="toolbar-left">
         <el-tag v-if="filterApp" type="primary" closable @close="clearAppFilter" style="margin-right: 8px;">
@@ -142,20 +139,21 @@ function handleSizeChange(newSize: number) {
           placeholder="搜索任务编号 / 应用名"
           clearable
           style="width: 220px;"
-          @keyup.enter="load"
-          @clear="load"
+          @keyup.enter="handleSearch"
+          @clear="handleSearch"
         >
           <template #prefix><el-icon><Search /></el-icon></template>
         </el-input>
-        <el-select v-model="filterStatus" placeholder="状态" clearable style="width: 110px;" @change="load">
+        <el-select v-model="filterStatus" placeholder="状态" clearable style="width: 110px;" @change="handleSearch">
           <el-option label="运行中" value="RUNNING" />
           <el-option label="成功" value="SUCCESS" />
           <el-option label="失败" value="FAILED" />
           <el-option label="排队中" value="PENDING" />
+          <el-option label="滚动更新排队中" value="DEPLOYING" />
           <el-option label="已取消" value="CANCELED" />
           <el-option label="镜像制作完成" value="IMAGE_READY" />
         </el-select>
-        <el-select v-model="filterType" placeholder="应用类型" clearable style="width: 110px;" @change="load">
+        <el-select v-model="filterType" placeholder="应用类型" clearable style="width: 110px;" @change="handleSearch">
           <el-option label="Java" value="java" />
           <el-option label="Vue" value="vue" />
         </el-select>
@@ -163,36 +161,40 @@ function handleSizeChange(newSize: number) {
     </div>
 
     <div class="table-wrapper">
-      <el-table :data="pipelines" v-loading="loading" stripe @row-click="goToDetail" style="cursor: pointer;">
-        <el-table-column prop="pipelineNo" label="任务编号" width="170" />
-        <el-table-column prop="appName" label="应用" width="140" />
-        <el-table-column prop="gitBranch" label="分支" width="200" show-overflow-tooltip />
-        <el-table-column label="状态" width="200" align="center">
+      <div class="history-table">
+      <el-table :data="pipelines" height="100%" v-loading="loading" stripe @row-click="goToDetail" style="width: 100%; cursor: pointer;">
+        <el-table-column prop="pipelineNo" label="任务编号" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="appName" label="应用" min-width="110" show-overflow-tooltip />
+        <el-table-column prop="gitBranch" label="分支" min-width="150" show-overflow-tooltip />
+        <el-table-column label="状态" min-width="150" align="center">
           <template #default="{ row }">
             <el-tag :type="hasCompletedDeploymentError(row) ? 'warning' : statusType(row.status)" size="small" effect="dark">{{ hasCompletedDeploymentError(row) ? '部署成功，结果记录异常' : statusLabel(row.status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="错误阶段" width="110">
+        <el-table-column label="错误阶段" min-width="100" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.errorStage" style="color: #f56c6c; font-size: 12px;">{{ row.errorStage }}</span>
             <span v-else style="color: #c0c4cc;">-</span>
           </template>
         </el-table-column>
-        <el-table-column prop="triggerUser" label="触发人" width="80" />
-        <el-table-column label="耗时" width="70">
+        <el-table-column prop="triggerUser" label="触发人" width="70" />
+        <el-table-column label="耗时" width="65">
           <template #default="{ row }">{{ row.durationSeconds ? row.durationSeconds + 's' : '-' }}</template>
         </el-table-column>
-        <el-table-column prop="createdAt" label="触发时间" width="170">
+        <el-table-column prop="createdAt" label="触发时间" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right" align="center">
+        <el-table-column label="操作" width="145" fixed="right" align="center">
           <template #default="{ row }">
+            <div class="history-actions">
             <el-button v-if="row.status === 'IMAGE_READY'" type="warning" link size="small" @click.stop="handleDeploy(row)">滚动更新</el-button>
             <el-button type="primary" link size="small" @click.stop="goToDetail(row)">详情</el-button>
-            <el-button type="danger" link size="small" @click.stop="handleDelete(row)">删除</el-button>
+            <el-button type="danger" link size="small" v-if="['PENDING', 'RUNNING', 'DEPLOYING', 'IMAGE_READY'].includes(row.status)" @click.stop="handleCancel(row)">取消</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
+      </div>
       <div class="pagination-row">
         <el-pagination
           v-model:current-page="page"
@@ -209,7 +211,14 @@ function handleSizeChange(newSize: number) {
 </template>
 
 <style scoped>
+.release-page { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; width: 100%; }
+.history-table { flex: 1; min-height: 0; min-width: 0; }
+.history-actions { display: flex; justify-content: center; gap: 8px; white-space: nowrap; }
+.history-actions :deep(.el-button + .el-button) { margin-left: 0; }
+
 .toolbar-row {
+  flex-shrink: 0;
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -221,22 +230,30 @@ function handleSizeChange(newSize: number) {
 }
 
 .toolbar-left {
+  flex-wrap: wrap;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
 .table-wrapper {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: #fff;
   border-radius: 6px;
   border: 1px solid #ebeef5;
   overflow: hidden;
 }
-</style>
 
 .pagination-row {
+  flex-shrink: 0;
+  overflow-x: auto;
   display: flex;
   justify-content: flex-end;
   padding: 12px 16px;
   border-top: 1px solid #ebeef5;
 }
+</style>

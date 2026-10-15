@@ -516,7 +516,7 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
 </script>
 
 <template>
-  <div class="k8s-page">
+  <div class="k8s-page" :class="{ 'resource-list-page': ['deployments', 'pods', 'services', 'configmaps', 'ingresses'].includes(activeTab) }">
     <!-- Header -->
     <div class="k8s-header">
       <div class="header-left">
@@ -568,20 +568,19 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
         <el-table :data="topNodes" stripe size="small" border>
           <el-table-column prop="name" label="节点" min-width="180" />
           <el-table-column prop="cpuUsage" label="CPU 使用" width="120" />
-          <el-table-column prop="cpuPercent" label="CPU %" width="100" />
           <el-table-column prop="memUsage" label="内存使用" width="120" />
-          <el-table-column prop="memPercent" label="内存 %" width="100" />
         </el-table>
       </div>
 
       <!-- Deployments -->
-      <div v-if="activeTab === 'deployments'">
+      <div v-if="activeTab === 'deployments'" class="resource-table">
         <el-table
           :data="deploymentTableRows"
+          height="100%"
           stripe
           size="small"
           border
-          table-layout="auto"
+          table-layout="fixed"
           row-key="rowKey"
           :span-method="deploymentTableSpanMethod"
           :row-class-name="deploymentRowClassName"
@@ -644,7 +643,7 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
           <el-table-column label="创建时间" width="170">
             <template #default="{ row }">{{ row.deployment.metadata?.creationTimestamp?.replace('T', ' ').replace('Z', '') || '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="330">
+          <el-table-column label="操作" width="330" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link size="small" @click="handleRestart(row.deploymentName)">重启</el-button>
               <el-button type="primary" link size="small" @click="handleScale(row.deploymentName, row.deployment.spec?.replicas || 1)">扩缩容</el-button>
@@ -665,8 +664,8 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
       </div>
 
       <!-- Pods -->
-      <div v-if="activeTab === 'pods'">
-        <el-table :data="pods" stripe size="small" border>
+      <div v-if="activeTab === 'pods'" class="resource-table">
+        <el-table height="100%" :data="pods" stripe size="small" border>
           <el-table-column label="名称" min-width="280">
             <template #default="{ row }">{{ row.metadata?.name }}</template>
           </el-table-column>
@@ -690,7 +689,7 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
           <el-table-column label="内存" width="90">
             <template #default="{ row }">{{ getPodMetrics(row.metadata?.name)?.memUsage || '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="100">
+          <el-table-column label="操作" width="100" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link size="small" @click="handleViewLogs(row.metadata?.name)">日志</el-button>
             </template>
@@ -699,8 +698,8 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
       </div>
 
       <!-- Services -->
-      <div v-if="activeTab === 'services'">
-        <el-table :data="services" stripe size="small" border>
+      <div v-if="activeTab === 'services'" class="resource-table">
+        <el-table height="100%" :data="services" stripe size="small" border>
           <el-table-column label="名称" min-width="200">
             <template #default="{ row }">{{ row.metadata?.name }}</template>
           </el-table-column>
@@ -717,7 +716,7 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="140">
+          <el-table-column label="操作" width="140" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link size="small" @click="handleEditService(row)">修改</el-button>
               <el-button type="danger" link size="small" @click="handleDeleteService(row.metadata?.name)">删除</el-button>
@@ -747,16 +746,14 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
           <el-table :data="topNodes" stripe size="small" border>
             <el-table-column prop="name" label="节点" min-width="180" />
             <el-table-column prop="cpuUsage" label="CPU 使用" width="120" />
-            <el-table-column prop="cpuPercent" label="CPU %" width="100" />
             <el-table-column prop="memUsage" label="内存使用" width="120" />
-            <el-table-column prop="memPercent" label="内存 %" width="100" />
           </el-table>
         </div>
       </div>
 
       <!-- ConfigMaps -->
-      <div v-if="activeTab === 'configmaps'">
-        <el-table :data="configmaps" stripe size="small" border>
+      <div v-if="activeTab === 'configmaps'" class="resource-table">
+        <el-table height="100%" :data="configmaps" stripe size="small" border>
           <el-table-column label="名称" min-width="250">
             <template #default="{ row }">{{ row.metadata?.name }}</template>
           </el-table-column>
@@ -766,7 +763,7 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
           <el-table-column label="创建时间" width="180">
             <template #default="{ row }">{{ row.metadata?.creationTimestamp?.replace('T', ' ').replace('Z', '') || '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="100">
+          <el-table-column label="操作" width="100" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link size="small" @click="handleEditConfigMap(row)">编辑</el-button>
             </template>
@@ -775,8 +772,8 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
       </div>
 
       <!-- Ingresses -->
-      <div v-if="activeTab === 'ingresses'">
-        <el-table :data="ingresses" stripe size="small" border>
+      <div v-if="activeTab === 'ingresses'" class="resource-table">
+        <el-table height="100%" :data="ingresses" stripe size="small" border>
           <el-table-column label="名称" min-width="200">
             <template #default="{ row }">{{ row.metadata?.name }}</template>
           </el-table-column>
@@ -923,6 +920,9 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
 </template>
 
 <style scoped>
+.resource-list-page { flex: 1; min-height: 0; }
+.resource-list-page .content-area { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.resource-table { flex: 1; min-height: 0; }
 .k8s-page { display: flex; flex-direction: column; gap: 12px; }
 .k8s-header {
   display: flex; align-items: center; justify-content: space-between;

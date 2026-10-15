@@ -9,7 +9,6 @@ import { formatTime } from '../utils/time'
 const route = useRoute()
 const task = ref<Pipeline | null>(null)
 const loading = ref(true)
-const stateError = ref('')
 const rolling = ref(false)
 const activeStageId = ref<number | null>(null)
 const logLines = ref<StageLog[]>([])
@@ -56,7 +55,6 @@ function subscribeToLogs() {
       logLines.value = mergeLogs(logLines.value, [entry])
     }
   })
-  eventSource.addEventListener('state_error', (e: MessageEvent) => { stateError.value = e.data })
   eventSource.addEventListener('done', () => {
     eventSource?.close()
     if (pollTimer) clearInterval(pollTimer)
@@ -188,22 +186,12 @@ const activeStage = computed(() => {
         <div class="info-bar-right">
           <el-button v-if="task.status === 'IMAGE_READY'" type="primary" :loading="rolling" @click="handleRollout">第二步：滚动更新</el-button>
           <span class="info-meta">触发人: {{ task.triggerUser }}</span>
-          <span class="info-meta">耗时: {{ task.durationSeconds ? task.durationSeconds + 's' : '-' }}</span>
+          <span class="info-meta">耗时: {{ task.durationSeconds != null ? task.durationSeconds + 's' : '-' }}</span>
           <span class="info-meta">{{ formatTime(task.startTime) }}</span>
         </div>
       </div>
 
       <el-alert v-if="task.status === 'IMAGE_READY'" title="第一步完成：镜像已制作并推送，可执行滚动更新。" :description="task.imageName" type="success" :closable="false" style="margin-bottom: 12px" />
-      <el-alert v-if="stateError" title="结果记录保存失败" :description="stateError" type="error" show-icon :closable="false" style="margin-bottom: 12px" />
-      <el-alert
-        v-if="task.errorMessage"
-        :title="deploymentRecordError ? '部署已成功，结果记录异常' : '失败阶段: ' + task.errorStage"
-        :description="task.errorMessage"
-        :type="deploymentRecordError ? 'warning' : 'error'"
-        show-icon
-        :closable="false"
-        style="margin-bottom: 12px; border-radius: 6px;"
-      />
 
       <div class="pipeline-bar">
         <div

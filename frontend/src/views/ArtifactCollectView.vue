@@ -479,7 +479,7 @@ async function uploadEntries(entries: UploadEntry[]) {
                 </template>
               </el-table-column>
               <el-table-column label="大小" width="90">
-                <template #default="{ row }">{{ row.isDir ? '-' : row.size }}</template>
+                <template #default="{ row }">{{ row.isDir ? '-' : formatDownloadSize(row.size) }}</template>
               </el-table-column>
               <el-table-column prop="modTime" label="修改时间" width="170" />
               <el-table-column label="操作" width="90" fixed="right">

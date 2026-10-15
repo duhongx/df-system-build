@@ -34,11 +34,3 @@ export function getProfile() {
 export function updateProfile(data: Partial<User>) {
   return request.put<any, User>('/auth/profile', data)
 }
-
-export function sendVerifyCode(email: string) {
-  return request.post<any, null>('/auth/send-code', { email })
-}
-
-export function changePassword(data: { email: string; code: string; newPassword: string; confirmPassword: string }) {
-  return request.post<any, null>('/auth/change-password', data)
-}

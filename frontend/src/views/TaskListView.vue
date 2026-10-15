@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listTasks, createTask, updateTask as apiUpdateTask, deleteTask, executeTask, batchExecuteTasks, type Task } from '../api/task'
 import { listAllApps, type Application } from '../api/application'
-import { listBuildConfigs, type BuildConfig } from '../api/build-config'
+import { getDefaultBuildConfigs, type BuildConfig } from '../api/build-config'
 import { useSettingsStore } from '../stores/settings'
 import { formatTime as formatTimeStr } from '../utils/time'
 
@@ -20,7 +20,7 @@ const total = ref(0)
 
 const tasks = ref<Task[]>([])
 const apps = ref<Application[]>([])
-const buildConfigs = ref<BuildConfig[]>([])
+const defaultBuildConfigs = ref<Partial<Record<'java' | 'vue', BuildConfig>>>({})
 
 // Execute dialog
 const executeDialogVisible = ref(false)
@@ -35,9 +35,7 @@ const editForm = ref({
   taskName: '',
   applicationId: null as number | null,
   gitBranch: '',
-  buildConfigId: null as number | null,
   deployMode: 'build_image',
-  k8sNamespace: '',
 })
 
 // Create dialog
@@ -46,9 +44,7 @@ const createForm = ref({
   taskName: '',
   applicationId: null as number | null,
   gitBranch: '',
-  buildConfigId: null as number | null,
   deployMode: 'build_image',
-  k8sNamespace: '',
 })
 
 onMounted(async () => {
@@ -64,12 +60,12 @@ async function loadAll() {
     const [taskResult, appList, bcList] = await Promise.all([
       listTasks({ page: page.value, pageSize: pageSize.value, search: searchText.value || undefined, appType: filterType.value || undefined }),
       listAllApps(),
-      listBuildConfigs(),
+      getDefaultBuildConfigs(),
     ])
     tasks.value = taskResult.list || []
     total.value = taskResult.total || 0
     apps.value = appList || []
-    buildConfigs.value = bcList || []
+    defaultBuildConfigs.value = bcList || {}
   } catch (e) {
     tasks.value = []
   } finally {
@@ -114,18 +110,20 @@ function formatDuration(seconds: number | null | undefined) {
 }
 
 // ---- Execute ----
-function handleExecute(task: Task) {
+async function handleExecute(task: Task) {
+  await settingsStore.fetchSettings()
   currentTask.value = task
   executeMode.value = 'single'
   executeForm.value = { gitBranch: task.gitBranch || '' }
   executeDialogVisible.value = true
 }
 
-function handleBatchExecute() {
+async function handleBatchExecute() {
   if (!selectedTasks.value.length) {
     ElMessage.warning('请至少选择一个任务')
     return
   }
+  await settingsStore.fetchSettings()
   currentTask.value = null
   executeMode.value = 'batch'
   executeForm.value = { gitBranch: '' }
@@ -156,15 +154,18 @@ async function handleSubmitExecute() {
   }
 }
 
+function defaultBuildConfig(applicationId: number | null) {
+  const app = apps.value.find(app => app.id === applicationId)
+  return app ? defaultBuildConfigs.value[app.appType as 'java' | 'vue'] : undefined
+}
+
 // ---- Create ----
 function handleCreate() {
   createForm.value = {
     taskName: '',
     applicationId: null,
     gitBranch: '',
-    buildConfigId: null,
     deployMode: 'build_image',
-    k8sNamespace: '',
   }
   createDialogVisible.value = true
 }
@@ -176,9 +177,7 @@ async function handleSaveCreate() {
       taskName: createForm.value.taskName,
       applicationId: createForm.value.applicationId!,
       gitBranch: createForm.value.gitBranch,
-      buildConfigId: createForm.value.buildConfigId!,
       deployMode: createForm.value.deployMode,
-      k8sNamespace: createForm.value.k8sNamespace,
     })
     ElMessage.success('任务创建成功')
     createDialogVisible.value = false
@@ -195,9 +194,7 @@ function handleEdit(task: Task) {
     taskName: task.taskName,
     applicationId: task.applicationId,
     gitBranch: task.gitBranch,
-    buildConfigId: task.buildConfigId,
     deployMode: task.deployMode && !['deploy', 'deploy_with_approval'].includes(task.deployMode) ? task.deployMode : 'build_image',
-    k8sNamespace: (task as any).k8sNamespace || '',
   }
   editDialogVisible.value = true
 }
@@ -209,9 +206,7 @@ async function handleSaveEdit() {
       taskName: editForm.value.taskName,
       applicationId: editForm.value.applicationId!,
       gitBranch: editForm.value.gitBranch,
-      buildConfigId: editForm.value.buildConfigId!,
       deployMode: editForm.value.deployMode,
-      k8sNamespace: editForm.value.k8sNamespace,
     })
     ElMessage.success('修改成功')
     editDialogVisible.value = false
@@ -225,7 +220,7 @@ function validateForm(f: any): boolean {
   if (!f.taskName?.trim()) { ElMessage.warning('请输入任务名称'); return false }
   if (!f.applicationId) { ElMessage.warning('请选择应用'); return false }
   if (!f.gitBranch?.trim()) { ElMessage.warning('请输入分支'); return false }
-  if (!f.buildConfigId) { ElMessage.warning('请选择编译配置'); return false }
+  if (settingsStore.isLocal && !defaultBuildConfig(f.applicationId)) { ElMessage.warning('该应用没有可用的默认编译配置'); return false }
   return true
 }
 
@@ -248,7 +243,7 @@ function handleHistory(task: Task) {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page viewport-table-page">
     <div class="toolbar-row">
       <div class="toolbar-left">
         <el-input
@@ -278,7 +273,7 @@ function handleHistory(task: Task) {
     </div>
 
     <div class="table-wrapper">
-      <el-table :data="tasks" v-loading="loading" @selection-change="handleSelectionChange" stripe size="default">
+      <el-table height="100%" :data="tasks" v-loading="loading" @selection-change="handleSelectionChange" stripe size="default">
         <el-table-column type="selection" width="45" />
         <el-table-column prop="taskName" label="任务名称" min-width="180">
           <template #default="{ row }">
@@ -347,7 +342,7 @@ function handleHistory(task: Task) {
         <el-form-item label="Git 分支" required>
           <el-input v-model="executeForm.gitBranch" placeholder="如 release_2.15.3_250515" />
         </el-form-item>
-        <el-alert title="先编译并制作、推送镜像，完成后单独执行滚动更新。" type="info" :closable="false" />
+        <el-alert :title="settingsStore.autoRollout ? '本地环境：编译、镜像制作及推送成功后自动滚动更新。' : '先编译并制作、推送镜像，完成后单独执行滚动更新。'" type="info" :closable="false" />
       </el-form>
       <template #footer>
         <el-button @click="executeDialogVisible = false">取消</el-button>
@@ -369,16 +364,11 @@ function handleHistory(task: Task) {
         <el-form-item label="分支" required>
           <el-input v-model="createForm.gitBranch" placeholder="如 release_2.15.3_250515" />
         </el-form-item>
-        <el-form-item label="编译配置" required>
-          <el-select v-model="createForm.buildConfigId" placeholder="选择编译配置" style="width: 100%;">
-            <el-option v-for="bc in buildConfigs" :key="bc.id" :label="`${bc.name} (${bc.buildMode})`" :value="bc.id" />
-          </el-select>
+        <el-form-item v-if="settingsStore.isLocal" label="编译配置">
+          <el-input :model-value="createForm.applicationId ? (defaultBuildConfig(createForm.applicationId)?.name || '暂无可用默认配置') : '选择应用后自动带出'" readonly />
+          <div v-if="defaultBuildConfig(createForm.applicationId)" class="form-hint">{{ defaultBuildConfig(createForm.applicationId)?.buildCommand }}</div>
         </el-form-item>
 
-        <el-form-item label="K8s 命名空间">
-          <el-input v-model="createForm.k8sNamespace" :placeholder="`留空使用全局默认：${settingsStore.k8sNamespace}`" />
-          <div class="form-hint">留空则使用系统设置中的全局默认命名空间</div>
-        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="createDialogVisible = false">取消</el-button>
@@ -400,16 +390,11 @@ function handleHistory(task: Task) {
         <el-form-item label="分支" required>
           <el-input v-model="editForm.gitBranch" placeholder="如 release_2.15.3_250515" />
         </el-form-item>
-        <el-form-item label="编译配置" required>
-          <el-select v-model="editForm.buildConfigId" placeholder="选择编译配置" style="width: 100%;">
-            <el-option v-for="bc in buildConfigs" :key="bc.id" :label="`${bc.name} (${bc.buildMode})`" :value="bc.id" />
-          </el-select>
+        <el-form-item v-if="settingsStore.isLocal" label="编译配置">
+          <el-input :model-value="editForm.applicationId ? (defaultBuildConfig(editForm.applicationId)?.name || '暂无可用默认配置') : '选择应用后自动带出'" readonly />
+          <div v-if="defaultBuildConfig(editForm.applicationId)" class="form-hint">{{ defaultBuildConfig(editForm.applicationId)?.buildCommand }}</div>
         </el-form-item>
 
-        <el-form-item label="K8s 命名空间">
-          <el-input v-model="editForm.k8sNamespace" :placeholder="`留空使用全局默认：${settingsStore.k8sNamespace}`" />
-          <div class="form-hint">留空则使用系统设置中的全局默认命名空间</div>
-        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editDialogVisible = false">取消</el-button>

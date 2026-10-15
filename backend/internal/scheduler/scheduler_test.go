@@ -95,7 +95,7 @@ func TestBuildContextRestoresPersistedImageName(t *testing.T) {
 	}
 }
 
-func TestCreateAndEnqueueUsesDefaultK8sNamespaceWhenTaskNamespaceEmpty(t *testing.T) {
+func TestCreateAndEnqueueUsesEnvironmentNamespaceDespiteLegacyTaskOverride(t *testing.T) {
 	setupSchedulerTestDB(t)
 	Init()
 	DefaultScheduler.SetConcurrency(0)
@@ -107,7 +107,7 @@ func TestCreateAndEnqueueUsesDefaultK8sNamespaceWhenTaskNamespaceEmpty(t *testin
 	if err := repository.DB.Create(&app).Error; err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	buildConfig := model.BuildConfig{Name: "java-docker", BuildMode: "docker", DockerImage: "gradle:8"}
+	buildConfig := model.BuildConfig{Name: "java-local", Category: "java", BuildCommand: "gradle clean build -x test"}
 	if err := repository.DB.Create(&buildConfig).Error; err != nil {
 		t.Fatalf("create build config: %v", err)
 	}
@@ -117,6 +117,7 @@ func TestCreateAndEnqueueUsesDefaultK8sNamespaceWhenTaskNamespaceEmpty(t *testin
 		GitBranch:     "main",
 		BuildConfigID: buildConfig.ID,
 		DeployMode:    "deploy",
+		K8sNamespace:  "old-task-namespace",
 		Enabled:       true,
 	}
 	if err := repository.DB.Create(&task).Error; err != nil {

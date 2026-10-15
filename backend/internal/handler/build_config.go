@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"strconv"
 
 	"df-build-server/internal/middleware"
@@ -9,6 +10,7 @@ import (
 	"df-build-server/pkg/response"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 )
 
 type BuildConfigHandler struct {
@@ -24,9 +26,10 @@ func (h *BuildConfigHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g.Use(middleware.AuthRequired())
 	{
 		g.GET("", h.List)
-		g.POST("", h.Create)
-		g.PUT("/:id", h.Update)
-		g.DELETE("/:id", h.Delete)
+		g.GET("/defaults", h.Defaults)
+		g.POST("", middleware.SourceBuildRequired(), h.Create)
+		g.PUT("/:id", middleware.SourceBuildRequired(), h.Update)
+		g.DELETE("/:id", middleware.SourceBuildRequired(), h.Delete)
 	}
 }
 
@@ -39,14 +42,20 @@ func (h *BuildConfigHandler) List(c *gin.Context) {
 	response.OK(c, list)
 }
 
+func (h *BuildConfigHandler) Defaults(c *gin.Context) {
+	defaults := make(map[string]*model.BuildConfig)
+	for _, category := range []string{"java", "vue"} {
+		bc, err := repository.DefaultBuildConfig(category)
+		if err == nil {
+			defaults[category] = bc
+		}
+	}
+	response.OK(c, defaults)
+}
+
 type buildConfigReq struct {
 	Name           string `json:"name" binding:"required"`
-	Category       string `json:"category" binding:"required"`
-	BuildMode      string `json:"buildMode" binding:"required"`
-	DockerImage    string `json:"dockerImage"`
-	CPULimit       string `json:"cpuLimit"`
-	MemoryLimit    string `json:"memoryLimit"`
-	CacheMounts    string `json:"cacheMounts"`
+	Category       string `json:"category" binding:"required,oneof=java vue"`
 	InstallCommand string `json:"installCommand"`
 	BuildCommand   string `json:"buildCommand" binding:"required"`
 	ArtifactDir    string `json:"artifactDir"`
@@ -55,9 +64,18 @@ type buildConfigReq struct {
 	Status         string `json:"status"`
 }
 
+func bindBuildConfig(c *gin.Context, req *buildConfigReq) error {
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(req); err != nil {
+		return err
+	}
+	return binding.Validator.ValidateStruct(req)
+}
+
 func (h *BuildConfigHandler) Create(c *gin.Context) {
 	var req buildConfigReq
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindBuildConfig(c, &req); err != nil {
 		response.Fail(c, 10802, "参数错误")
 		return
 	}
@@ -68,11 +86,6 @@ func (h *BuildConfigHandler) Create(c *gin.Context) {
 	bc := &model.BuildConfig{
 		Name:           req.Name,
 		Category:       req.Category,
-		BuildMode:      req.BuildMode,
-		DockerImage:    req.DockerImage,
-		CPULimit:       req.CPULimit,
-		MemoryLimit:    req.MemoryLimit,
-		CacheMounts:    req.CacheMounts,
 		InstallCommand: req.InstallCommand,
 		BuildCommand:   req.BuildCommand,
 		ArtifactDir:    req.ArtifactDir,
@@ -90,7 +103,7 @@ func (h *BuildConfigHandler) Create(c *gin.Context) {
 func (h *BuildConfigHandler) Update(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
 	var req buildConfigReq
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindBuildConfig(c, &req); err != nil {
 		response.Fail(c, 10803, "参数错误")
 		return
 	}
@@ -101,11 +114,6 @@ func (h *BuildConfigHandler) Update(c *gin.Context) {
 	}
 	bc.Name = req.Name
 	bc.Category = req.Category
-	bc.BuildMode = req.BuildMode
-	bc.DockerImage = req.DockerImage
-	bc.CPULimit = req.CPULimit
-	bc.MemoryLimit = req.MemoryLimit
-	bc.CacheMounts = req.CacheMounts
 	bc.InstallCommand = req.InstallCommand
 	bc.BuildCommand = req.BuildCommand
 	bc.ArtifactDir = req.ArtifactDir
@@ -114,7 +122,10 @@ func (h *BuildConfigHandler) Update(c *gin.Context) {
 	if req.Status != "" {
 		bc.Status = req.Status
 	}
-	h.repo.Update(bc)
+	if err := h.repo.Update(bc); err != nil {
+		response.Fail(c, 10803, "更新失败")
+		return
+	}
 	response.OKWithMessage(c, "更新成功", bc)
 }
 

@@ -33,6 +33,8 @@ type PipelineListParams struct {
 	PageSize int
 	AppName  string
 	Status   string
+	Search   string
+	AppType  string
 }
 
 func (r *PipelineRepo) List(params PipelineListParams) ([]model.Pipeline, int64, error) {
@@ -47,7 +49,15 @@ func (r *PipelineRepo) List(params PipelineListParams) ([]model.Pipeline, int64,
 		query = query.Where("status = ?", params.Status)
 	}
 
-	query.Count(&total)
+	if params.Search != "" {
+		query = query.Where("pipeline_no ILIKE ? OR app_name ILIKE ?", "%"+params.Search+"%", "%"+params.Search+"%")
+	}
+	if params.AppType != "" {
+		query = query.Where("app_type = ?", params.AppType)
+	}
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
 
 	if params.PageSize <= 0 {
 		params.PageSize = 20
@@ -112,4 +122,10 @@ func (r *PipelineRepo) SaveImageCheckpoint(p *model.Pipeline) error {
 	return DB.Model(&model.Pipeline{}).Where("id = ?", p.ID).Updates(map[string]any{
 		"image_name": p.ImageName, "frontend_baseline_json": p.FrontendBaselineJSON,
 	}).Error
+}
+
+// CancelActive protects completed history from stale UI or direct cancel requests.
+func (r *PipelineRepo) CancelActive(id uint) (bool, error) {
+	result := DB.Model(&model.Pipeline{}).Where("id = ? AND status IN ?", id, []string{"PENDING", "RUNNING", "DEPLOYING", "IMAGE_READY"}).Update("status", "CANCELED")
+	return result.RowsAffected == 1, result.Error
 }

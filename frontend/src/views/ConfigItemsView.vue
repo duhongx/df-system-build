@@ -89,7 +89,7 @@ onMounted(loadItems)
 </script>
 
 <template>
-  <div class="config-items-page">
+  <div class="config-items-page viewport-table-page">
     <div class="page-title-row">
       <div>
         <h4 class="page-title">配置项管理</h4>
@@ -107,7 +107,7 @@ onMounted(loadItems)
     </div>
 
     <div class="content-card">
-      <el-table :data="filteredItems" stripe border>
+      <el-table height="100%" :data="filteredItems" stripe border>
         <el-table-column prop="name" label="名称" min-width="160" />
         <el-table-column prop="code" label="编码" width="160" />
         <el-table-column label="分类" width="110">

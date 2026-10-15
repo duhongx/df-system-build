@@ -22,24 +22,6 @@ export const updateTemplate = (id: number, data: Partial<Template>) =>
   request.put<any, Template>(`/templates/${id}`, data)
 export const deleteTemplate = (id: number) => request.delete<any, null>(`/templates/${id}`)
 
-// ---------- Executor ----------
-export interface Executor {
-  id: number
-  name: string
-  dockerImage: string
-  type: string
-  cpuLimit: string
-  memoryLimit: string
-  cacheMounts?: string  // JSON string: [{"hostPath":"...","containerPath":"..."}]
-  status?: string
-}
-
-export const listExecutors = () => request.get<any, Executor[]>('/executors')
-export const createExecutor = (data: Partial<Executor>) => request.post<any, Executor>('/executors', data)
-export const updateExecutor = (id: number, data: Partial<Executor>) =>
-  request.put<any, Executor>(`/executors/${id}`, data)
-export const deleteExecutor = (id: number) => request.delete<any, null>(`/executors/${id}`)
-
 // ---------- Remote Server ----------
 export interface RemoteServer {
   id: number
@@ -84,6 +66,31 @@ export const testNotification = (id: number) => request.post<any, null>(`/notifi
 // ---------- Global Settings ----------
 export const getSettings = () => request.get<any, Record<string, string>>('/settings')
 export const updateSettings = (data: Record<string, string>) => request.put<any, null>('/settings', data)
+
+export interface PostgreSQLBusinessAccount {
+  username: string
+  hasOverride: boolean
+  discovered: boolean
+}
+export interface PostgreSQLAccountTestResult {
+  username: string
+  passwordSource: 'admin' | 'common' | 'override' | ''
+  success: boolean
+  message: string
+}
+export interface PostgreSQLConnectionTestReport {
+  success: boolean
+  message: string
+  results: PostgreSQLAccountTestResult[]
+  accounts: PostgreSQLBusinessAccount[]
+}
+export const listPostgreSQLPasswordOverrides = () => request.get<any, { username: string; updatedAt: string }[]>('/settings/postgresql-accounts')
+export const discoverPostgreSQLAccounts = (config: Record<string, string>) => request.post<any, PostgreSQLBusinessAccount[]>('/settings/postgresql-accounts/discover', { config })
+export const setPostgreSQLAccountPassword = (username: string, password: string) => request.put<any, null>(`/settings/postgresql-accounts/${encodeURIComponent(username)}/password`, { password })
+export const savePostgreSQLAccountPasswords = (items: { username: string; password: string }[], config?: Record<string, string>) => request.post<any, { updatedCount: number }>('/settings/postgresql-accounts/passwords/batch', { items, config })
+export const clearPostgreSQLAccountPassword = (username: string) => request.delete<any, null>(`/settings/postgresql-accounts/${encodeURIComponent(username)}/password`)
+export const testPostgreSQLAccount = (username: string, config: Record<string, string>) => request.post<any, PostgreSQLAccountTestResult>(`/settings/postgresql-accounts/${encodeURIComponent(username)}/test`, { config })
+export const testPostgreSQLConnections = (config: Record<string, string>) => request.post<any, PostgreSQLConnectionTestReport>('/settings/test-connection', { type: 'postgresql', config }, { timeout: 90000 })
 
 // ---------- Registry Test ----------
 export const testRegistry = () => request.post<any, null>('/settings/test-registry')

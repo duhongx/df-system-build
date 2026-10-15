@@ -15,10 +15,9 @@ onMounted(load)
 async function load() {
   loading.value = true
   try {
-    const result = await listArtifacts({ page: page.value, pageSize: onlyLatest.value ? 500 : pageSize.value })
-    const list = result.list || []
-    artifacts.value = onlyLatest.value ? list.filter(item => item.isLatest) : list
-    total.value = onlyLatest.value ? artifacts.value.length : result.total || 0
+    const result = await listArtifacts({ page: page.value, pageSize: pageSize.value, onlyLatest: onlyLatest.value })
+    artifacts.value = result.list || []
+    total.value = result.total || 0
   } catch (e) {
     artifacts.value = []
     total.value = 0
@@ -56,7 +55,7 @@ function sourceLabel(sourceType?: string) {
 </script>
 
 <template>
-  <div class="artifact-management-page">
+  <div class="artifact-management-page viewport-table-page">
     <div class="page-header">
       <div>
         <h4>最新制品库</h4>
@@ -93,7 +92,7 @@ function sourceLabel(sourceType?: string) {
         </div>
       </div>
 
-      <el-table :data="artifacts" v-loading="loading" stripe border table-layout="auto">
+      <el-table height="100%" :data="artifacts" v-loading="loading" stripe border table-layout="auto">
         <el-table-column prop="appName" label="应用" min-width="140" show-overflow-tooltip />
         <el-table-column prop="artifactName" label="制品名称" min-width="150" show-overflow-tooltip />
         <el-table-column label="来源" width="110">

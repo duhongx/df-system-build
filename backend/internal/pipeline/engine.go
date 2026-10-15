@@ -35,7 +35,18 @@ func NewEngine() *Engine {
 }
 
 func (e *Engine) Execute(ctx context.Context, p *model.Pipeline, pCtx *types.PipelineContext) error {
+	if !pCtx.ResumeDeployment && p.Status != "DEPLOYING" {
+		environment, err := repository.NewSettingsRepo().Read("customer_env", false)
+		if err != nil {
+			return fmt.Errorf("读取部署环境失败: %w", err)
+		}
+		pCtx.AutoRollout = AutoRolloutForEnvironment(environment)
+	}
 	return e.executeStages(ctx, p, pCtx, ResolveStagesWithMode(p.AppType, p.DeployMode))
+}
+
+func AutoRolloutForEnvironment(environment string) bool {
+	return strings.TrimSpace(environment) == "本地"
 }
 
 func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *types.PipelineContext, stageDefs []StageDefinition) error {
@@ -142,6 +153,13 @@ func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *typ
 		}
 
 		if !loggedScope {
+			if !resume {
+				if pCtx.AutoRollout {
+					pCtx.OnLog(p.ID, 0, "[发布方式] 本地环境：镜像推送成功后自动滚动更新", "stdout")
+				} else {
+					pCtx.OnLog(p.ID, 0, "[发布方式] 镜像制作完成后等待手动滚动更新", "stdout")
+				}
+			}
 			pCtx.OnLog(p.ID, 0, fmt.Sprintf("[更新任务] 流水线=%s；应用=%s；角色=%s；appCode=%s；命名空间=%s；模式=%s；滚动更新步骤=%t", p.PipelineNo, pCtx.AppName, pCtx.VueRole, pCtx.AppCode, pCtx.K8sNamespace, pCtx.DeployMode, resume), "stdout")
 			if p.FrontendUpdateSummary != "" {
 				pCtx.OnLog(p.ID, 0, "[批次选择] 以下是提交时选择的前端应用；各独立应用由各自流水线执行，执行结果分别查看", "stdout")
@@ -206,8 +224,12 @@ func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *typ
 		e.sseHub.Publish(p.ID, sse.Event{Type: "stage_success", Data: fmt.Sprintf(`{"stageId":%d}`, stage.ID)})
 		logger.Log.Infof("Stage %s completed in %ds", def.Code, dur)
 
-		// Image preparation is complete; rollout is always a separate operation.
+		// Local execution continues through deployment in the same worker and lock.
 		if !resume && def.Code == "PUSH_IMAGE" {
+			if pCtx.AutoRollout {
+				pCtx.OnLog(p.ID, 0, "[自动滚动更新] 镜像制作及推送成功，继续执行 Kubernetes 滚动更新", "stdout")
+				continue
+			}
 			// Mark remaining stages as PENDING (they'll be executed later)
 			e.sseHub.Publish(p.ID, sse.Event{Type: "image_ready", Data: "第一步完成：镜像已制作并推送，可执行滚动更新"})
 			return ErrImageReady

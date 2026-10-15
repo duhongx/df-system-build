@@ -31,11 +31,3 @@ func (r *UserRepo) FindByID(id uint) (*model.User, error) {
 func (r *UserRepo) Update(user *model.User) error {
 	return DB.Save(user).Error
 }
-
-func (r *UserRepo) UpdatePassword(id uint, passwordHash string) error {
-	return DB.Model(&model.User{}).Where("id = ?", id).Update("password_hash", passwordHash).Error
-}
-
-func (r *UserRepo) SetMustChangePassword(id uint, must bool) error {
-	return DB.Model(&model.User{}).Where("id = ?", id).Update("must_change_password", must).Error
-}

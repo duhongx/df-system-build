@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -103,7 +104,7 @@ func TestJavaImageBuildAndPushUseOnlyUniqueTag(t *testing.T) {
 	t.Setenv("DOCKER_API_VERSION", "1.43")
 	t.Setenv("DOCKER_TLS_VERIFY", "")
 	t.Setenv("DOCKER_CERT_PATH", "")
-	pc := &types.PipelineContext{PipelineID: 17, AppName: "service", AppType: "java", GitBranch: "manual-upload", ArtifactName: "service.jar", Workspace: &types.Workspace{BaseDir: t.TempDir(), AppName: "service", PipelineID: 17}, OnLog: func(uint, uint, string, string) {}}
+	pc := &types.PipelineContext{PipelineID: 17, Pipeline: &model.Pipeline{GitCommitHash: "67b5cf6e9db2bb3fad6ee07126e62b36cd365820"}, AppName: "service", AppType: "java", GitBranch: "release", ArtifactName: "service.jar", Workspace: &types.Workspace{BaseDir: t.TempDir(), AppName: "service", PipelineID: 17}, OnLog: func(uint, uint, string, string) {}}
 	path := filepath.Join(pc.Workspace.SourceDir(), "build/libs/service.jar")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
@@ -119,5 +120,8 @@ func TestJavaImageBuildAndPushUseOnlyUniqueTag(t *testing.T) {
 	}
 	if len(buildTags) != 1 || buildTags[0] != pc.ImageName || strings.Contains(buildTags[0], "latest") || len(pushed) != 1 || strings.Contains(pushed[0], "latest") {
 		t.Fatalf("unexpected tags: build=%v push=%v", buildTags, pushed)
+	}
+	if !regexp.MustCompile(`^registry\.example/prod/service:release-67b5cf6e-[0-9]{14}$`).MatchString(pc.ImageName) {
+		t.Fatalf("unexpected image name: %s", pc.ImageName)
 	}
 }

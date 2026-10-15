@@ -25,8 +25,6 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g.Use(middleware.AuthRequired())
 	{
 		g.GET("/instance", h.Instance)
-		g.GET("/sql-force-whitelist", h.GetSQLForceWhitelist)
-		g.PUT("/sql-force-whitelist", h.SaveSQLForceWhitelist)
 		g.GET("/view-dependency-tasks", h.ListSQLViewDependencyTasks)
 		g.POST("/view-dependency-tasks", h.CreateSQLViewDependencyTask)
 		g.GET("/view-dependency-tasks/:id", h.GetSQLViewDependencyTask)
@@ -46,20 +44,13 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/sql-batches", h.ListSQLBatches)
 		g.GET("/sql-batches/:id", h.GetSQLBatch)
 		g.POST("/sql-batches/parse", h.ParseSQLBatch)
-		g.POST("/sql-batches/:id/execute", h.ExecuteSQLBatch)
-		g.POST("/sql-batches/:id/cancel", h.CancelSQLBatch)
 		g.POST("/sql-files/parse", h.ParseSQL)
-		g.PUT("/sql-files/:id/content", h.UpdateSQLFileContent)
 		g.POST("/sql-files/:id/execute", h.ExecuteSQLFile)
 		g.POST("/sql-files/:id/cancel", h.CancelSQLFile)
 		g.POST("/sql-files/save", h.ParseSQL)
 		g.POST("/sql-files/import-server", h.ImportServerSQL)
-		g.POST("/sql-files/execute-content", h.ExecuteSQLContent)
 		g.POST("/sql-files/:id/skip", h.SkipSQLFile)
 		g.DELETE("/sql-files/:id", h.DeleteSQLFile)
-		g.PUT("/sql-statements/:id/content", h.UpdateSQLStatementContent)
-		g.POST("/sql-statements/:id/schema-autocomplete", h.AutocompleteSQLStatementSchema)
-		g.POST("/sql-statements/:id/execute", h.ExecuteSQLStatement)
 		g.POST("/sql-statements/:id/skip", h.SkipSQLStatement)
 	}
 }
@@ -71,31 +62,6 @@ func (h *PostgreSQLHandler) Instance(c *gin.Context) {
 		return
 	}
 	response.OK(c, info)
-}
-
-func (h *PostgreSQLHandler) GetSQLForceWhitelist(c *gin.Context) {
-	config, err := h.svc.GetSQLForceWhitelist()
-	if err != nil {
-		response.Fail(c, 14017, err.Error())
-		return
-	}
-	response.OK(c, config)
-}
-
-func (h *PostgreSQLHandler) SaveSQLForceWhitelist(c *gin.Context) {
-	var req struct {
-		Enabled []string `json:"enabled"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Fail(c, 14017, "参数错误")
-		return
-	}
-	config, err := h.svc.SaveSQLForceWhitelist(req.Enabled)
-	if err != nil {
-		response.Fail(c, 14017, err.Error())
-		return
-	}
-	response.OK(c, config)
 }
 
 func (h *PostgreSQLHandler) ListSQLViewDependencyTasks(c *gin.Context) {
@@ -294,58 +260,6 @@ func (h *PostgreSQLHandler) ParseSQL(c *gin.Context) {
 	response.OK(c, gin.H{"file": file, "statements": statements})
 }
 
-func (h *PostgreSQLHandler) UpdateSQLFileContent(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		response.Fail(c, 14000, "无效的 ID 参数")
-		return
-	}
-	var req service.UpdateSQLFileContentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Fail(c, 14018, "参数错误")
-		return
-	}
-	file, statements, err := h.svc.UpdateSQLFileContent(uint(id), req, middleware.GetCurrentUsername(c))
-	if err != nil {
-		response.Fail(c, 14018, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"file": file, "statements": statements})
-}
-
-func (h *PostgreSQLHandler) UpdateSQLStatementContent(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		response.Fail(c, 14000, "无效的 ID 参数")
-		return
-	}
-	var req service.UpdateSQLStatementContentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Fail(c, 14018, "参数错误")
-		return
-	}
-	file, statements, err := h.svc.UpdateSQLStatementContent(uint(id), req, middleware.GetCurrentUsername(c))
-	if err != nil {
-		response.Fail(c, 14018, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"file": file, "statements": statements})
-}
-
-func (h *PostgreSQLHandler) AutocompleteSQLStatementSchema(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		response.Fail(c, 14000, "无效的 ID 参数")
-		return
-	}
-	file, statements, err := h.svc.AutocompleteSQLStatementSchema(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
-	if err != nil {
-		response.Fail(c, 14018, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"file": file, "statements": statements})
-}
-
 func (h *PostgreSQLHandler) ExecuteSQLFile(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -357,24 +271,6 @@ func (h *PostgreSQLHandler) ExecuteSQLFile(c *gin.Context) {
 	}
 	_ = c.ShouldBindJSON(&req)
 	file, statements, err := h.svc.StartSQLFileExecution(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
-	if err != nil {
-		response.Fail(c, 14003, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"file": file, "statements": statements})
-}
-
-func (h *PostgreSQLHandler) ExecuteSQLStatement(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		response.Fail(c, 14000, "无效的 ID 参数")
-		return
-	}
-	var req struct {
-		Options service.SQLExecuteOptions `json:"options"`
-	}
-	_ = c.ShouldBindJSON(&req)
-	file, statements, err := h.svc.ExecuteSQLStatementWithOptions(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
 	if err != nil {
 		response.Fail(c, 14003, err.Error())
 		return
@@ -408,52 +304,6 @@ func (h *PostgreSQLHandler) ParseSQLBatch(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"batch": batch, "files": files})
-}
-
-func (h *PostgreSQLHandler) ExecuteSQLBatch(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		response.Fail(c, 14000, "无效的 ID 参数")
-		return
-	}
-	var req struct {
-		Options service.SQLExecuteOptions `json:"options"`
-	}
-	_ = c.ShouldBindJSON(&req)
-	batch, files, err := h.svc.StartSQLBatchExecution(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
-	if err != nil {
-		response.Fail(c, 14014, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"batch": batch, "files": files})
-}
-
-func (h *PostgreSQLHandler) CancelSQLBatch(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		response.Fail(c, 14000, "无效的 ID 参数")
-		return
-	}
-	batch, err := h.svc.CancelSQLBatch(uint(id), middleware.GetCurrentUsername(c))
-	if err != nil {
-		response.Fail(c, 14015, err.Error())
-		return
-	}
-	response.OK(c, batch)
-}
-
-func (h *PostgreSQLHandler) ExecuteSQLContent(c *gin.Context) {
-	var req service.ExecuteSQLContentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Fail(c, 14007, "参数错误")
-		return
-	}
-	file, statements, err := h.svc.ExecuteSQLContent(c.Request.Context(), req, middleware.GetCurrentUsername(c))
-	if err != nil {
-		response.Fail(c, 14007, err.Error())
-		return
-	}
-	response.OK(c, gin.H{"file": file, "statements": statements})
 }
 
 func (h *PostgreSQLHandler) ListSQLFiles(c *gin.Context) {
@@ -512,7 +362,7 @@ func (h *PostgreSQLHandler) listSQLFilesByGroup(c *gin.Context, group string) {
 	if pageSize > 100 {
 		pageSize = 100
 	}
-	files, total, err := h.svc.ListSQLFilesByStatus(page, pageSize, group)
+	files, total, err := h.svc.ListSQLFilesByStatus(page, pageSize, group, service.SQLFileFilter{Version: c.Query("version"), SchemaName: c.Query("schemaName"), FileName: c.Query("fileName")})
 	if err != nil {
 		response.Fail(c, 14004, err.Error())
 		return

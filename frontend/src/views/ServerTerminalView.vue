@@ -14,6 +14,31 @@ const statusText = ref('连接中...')
 
 let ws: WebSocket | null = null
 let term: any = null
+let resizeObserver: ResizeObserver | null = null
+let resizeHandler: (() => void) | null = null
+
+function disposeTerminal() {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  if (resizeHandler) window.removeEventListener('resize', resizeHandler)
+  resizeHandler = null
+  terminalRef.value?.removeEventListener('contextmenu', handlePaste)
+  if (ws) {
+    ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null
+    ws.close()
+    ws = null
+  }
+  term?.dispose()
+  term = null
+}
+
+async function handlePaste(e: MouseEvent) {
+  e.preventDefault()
+  try {
+    const text = await navigator.clipboard.readText()
+    if (text && ws?.readyState === WebSocket.OPEN) ws.send(text)
+  } catch { /* Browser clipboard permissions may be unavailable. */ }
+}
 
 onMounted(async () => {
   try {
@@ -28,8 +53,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (ws) { ws.close(); ws = null }
-  if (term) { term.dispose(); term = null }
+  disposeTerminal()
 })
 
 async function initTerminal() {
@@ -57,7 +81,7 @@ async function initTerminal() {
   fitAddon.fit()
 
   // Handle window resize
-  const resizeHandler = () => {
+  resizeHandler = () => {
     fitAddon.fit()
     // Send resize event to server
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -66,6 +90,8 @@ async function initTerminal() {
     }
   }
   window.addEventListener('resize', resizeHandler)
+  resizeObserver = new ResizeObserver(resizeHandler)
+  resizeObserver.observe(terminalRef.value!)
 
   // Connect WebSocket
   const wsUrl = getTerminalWsUrl(serverId)
@@ -100,18 +126,7 @@ async function initTerminal() {
     }
   })
 
-  // Right-click paste support
-  terminalRef.value!.addEventListener('contextmenu', async (e: MouseEvent) => {
-    e.preventDefault()
-    try {
-      const text = await navigator.clipboard.readText()
-      if (text && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(text)
-      }
-    } catch (err) {
-      // Clipboard API not available or permission denied
-    }
-  })
+  terminalRef.value!.addEventListener('contextmenu', handlePaste)
 
   // Copy on selection (auto-copy)
   term.onSelectionChange(() => {
@@ -127,8 +142,7 @@ function handleBack() {
 }
 
 function handleReconnect() {
-  if (ws) { ws.close() }
-  if (term) { term.dispose() }
+  disposeTerminal()
   connected.value = false
   statusText.value = '重新连接中...'
   initTerminal()
@@ -149,6 +163,7 @@ function handleReconnect() {
         </span>
       </div>
       <div class="header-right">
+        <span class="form-hint">{{ statusText }}</span>
         <el-button size="small" @click="handleReconnect" :disabled="connected">重新连接</el-button>
       </div>
     </div>
@@ -160,7 +175,9 @@ function handleReconnect() {
 .terminal-page {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 130px);
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
 }
 
 .terminal-header {
@@ -192,6 +209,7 @@ function handleReconnect() {
 
 .terminal-container {
   flex: 1;
+  min-height: 0;
   background: #1e1e1e;
   border-radius: 0 0 6px 6px;
   padding: 4px;

@@ -56,7 +56,7 @@ func TestUpdateLogsPersistScopeAndPublishFailureWithStageIdentity(t *testing.T) 
 		text.WriteString(entry.Content + "\n")
 		byID[entry.ID] = entry
 	}
-	for _, want := range []string{"独立应用：web-cdr", "子应用：门诊", "[阶段失败]", "Docker 镜像仓库地址未配置", "停止后续步骤"} {
+	for _, want := range []string{"独立应用：web-cdr", "子应用：门诊", "[阶段失败]", "docker_registry_url", "未配置", "停止后续步骤"} {
 		if !strings.Contains(text.String(), want) {
 			t.Fatalf("missing persisted detail %q: %s", want, text.String())
 		}
