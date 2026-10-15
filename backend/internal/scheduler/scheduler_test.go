@@ -210,7 +210,11 @@ func TestDisabledTasksAndApplicationsCannotCreatePipelines(t *testing.T) {
 	if err := repository.DB.Create(&app).Error; err != nil {
 		t.Fatal(err)
 	}
-	task := model.Task{TaskName: "disabled-migration-task", ApplicationID: app.ID, GitBranch: "main", Enabled: true}
+	bc := model.BuildConfig{Name: "disabled-migration-tools", Category: "java", BuildCommand: "gradle build", Status: "online"}
+	if err := repository.DB.Create(&bc).Error; err != nil {
+		t.Fatal(err)
+	}
+	task := model.Task{TaskName: "disabled-migration-task", ApplicationID: app.ID, GitBranch: "main", BuildConfigID: bc.ID, Enabled: true}
 	if err := repository.DB.Create(&task).Error; err != nil {
 		t.Fatal(err)
 	}
