@@ -39,7 +39,11 @@ func frontendArtifacts(pCtx *types.PipelineContext) ([]model.FrontendArtifact, e
 	if pCtx.DeployMode == "artifact_image" || pCtx.DeployMode == "manual" || pCtx.DeployMode == "artifact_deploy" {
 		return nil, fmt.Errorf("前端任务缺少制品清单，请重新提交更新")
 	}
-	return []model.FrontendArtifact{{FileName: pCtx.ArtifactName, Role: pCtx.VueRole, AppCode: pCtx.AppCode, AppName: pCtx.AppName}}, nil
+	var appID uint
+	if pCtx.Pipeline != nil {
+		appID = pCtx.Pipeline.ApplicationID
+	}
+	return []model.FrontendArtifact{{AppID: appID, FileName: pCtx.ArtifactName, Role: pCtx.VueRole, AppCode: pCtx.AppCode, AppName: pCtx.AppName}}, nil
 }
 
 func prepareWebUpdate(sourceDir, workDir string, artifacts []model.FrontendArtifact, logs ...webLog) (*webUpdatePlan, error) {

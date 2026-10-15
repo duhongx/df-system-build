@@ -23,6 +23,7 @@ type File struct {
 type Files map[string]File
 
 type Region struct {
+	AppID    uint   `json:"appId,omitempty"`
 	AppName  string `json:"appName"`
 	Role     string `json:"role"`
 	AppCode  string `json:"appCode,omitempty"`

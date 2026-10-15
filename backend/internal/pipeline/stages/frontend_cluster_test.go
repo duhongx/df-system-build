@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"df-build-server/internal/frontend"
 	"df-build-server/internal/k8s"
 	"df-build-server/internal/model"
 	"df-build-server/internal/pipeline/types"
@@ -22,6 +23,34 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
+
+func TestFrontendDeploymentRejectsRecreatedRegistration(t *testing.T) {
+	logger.Init("error", "stdout", "")
+	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DB.AutoMigrate(&model.Application{}); err != nil {
+		t.Fatal(err)
+	}
+	app := model.Application{AppName: "web-identity", AppType: "vue", VueRole: "sub", AppCode: "42", Enabled: true}
+	if err := repository.DB.Create(&app).Error; err != nil {
+		t.Fatal(err)
+	}
+	b := &webBaseline{DeploymentName: "web-main", Regions: []frontend.Region{{AppID: app.ID, AppName: app.AppName, Role: "sub", AppCode: "42"}}}
+	if err := validateDeploymentRegistrations(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DB.Delete(&app).Error; err != nil {
+		t.Fatal(err)
+	}
+	app.ID = 0
+	if err := repository.DB.Create(&app).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDeploymentRegistrations(b); err == nil {
+		t.Fatal("recreated registration accepted for old approval")
+	}
+}
 
 // Explicit opt-in only. The settings file contains registry credentials and is
 // supplied outside the repository. All cluster writes stay in a fresh namespace.

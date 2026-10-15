@@ -179,6 +179,9 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 	if err := requireWebIndex(temporary); err != nil {
 		return nil, err
 	}
+	if _, err := frontend.ValidateReferences(temporary, "."); err != nil {
+		return nil, fmt.Errorf("运行基线的主入口或引用资源损坏，停止更新: %w", err)
+	}
 	if _, err := webChildren(temporary); err != nil {
 		return nil, err
 	}

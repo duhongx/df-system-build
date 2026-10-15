@@ -224,7 +224,7 @@ func validateDeploymentRegistrations(b *webBaseline) error {
 	}
 	for _, region := range b.Regions {
 		app := byName[region.AppName]
-		if !app.Enabled || app.DeploymentTarget() != b.target() || (region.Role == "sub" && app.AppCode != region.AppCode) {
+		if app.ID != region.AppID || !app.Enabled || app.VueRole != region.Role || app.DeploymentTarget() != b.target() || (region.Role == "sub" && app.AppCode != region.AppCode) {
 			return fmt.Errorf("应用 %s 已停用或部署身份已变化", region.AppName)
 		}
 		if err := app.ValidateIdentity(); err != nil {

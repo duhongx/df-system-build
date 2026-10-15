@@ -189,6 +189,7 @@ func validateFrontendRegistrations(pCtx *types.PipelineContext, artifacts []mode
 			return fmt.Errorf("区域 %s 未登记或已停用", region.Path)
 		}
 		region.AppName = name
+		region.AppID = app.ID
 	}
 	data, err := json.Marshal(artifacts)
 	if err != nil {

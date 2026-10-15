@@ -2,7 +2,7 @@
   "badRoutingBlockedWithoutImageChange": true,
   "cdnAndEmptyDirectoryPreserved": true,
   "compatibleRollback": true,
-  "namespace": "df-frontend-rules-1792036028",
+  "namespace": "df-frontend-rules-1792036472",
   "newSubApplication": true,
   "productionNamespaceWritten": false,
   "replicas": 2,
