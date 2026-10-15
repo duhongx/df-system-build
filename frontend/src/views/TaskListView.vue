@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listTasks, createTask, updateTask as apiUpdateTask, deleteTask, executeTask, batchExecuteTasks, type Task } from '../api/task'
@@ -46,6 +46,15 @@ const createForm = ref({
   gitBranch: '',
   deployMode: 'build_image',
 })
+
+watch(() => {
+  const app = apps.value.find(app => app.id === createForm.value.applicationId)
+  return app ? `${app.appName}-${settingsStore.k8sNamespace.trim() || 'default'}` : ''
+}, (suggestedName, previousName) => {
+  if (!createForm.value.taskName.trim() || createForm.value.taskName === previousName) {
+    createForm.value.taskName = suggestedName
+  }
+}, { flush: 'sync' })
 
 onMounted(async () => {
   if (!settingsStore.loaded) {
@@ -160,7 +169,8 @@ function defaultBuildConfig(applicationId: number | null) {
 }
 
 // ---- Create ----
-function handleCreate() {
+async function handleCreate() {
+  await settingsStore.fetchSettings()
   createForm.value = {
     taskName: '',
     applicationId: null,
@@ -353,13 +363,13 @@ function handleHistory(task: Task) {
     <!-- Create Dialog -->
     <el-dialog v-model="createDialogVisible" title="创建任务" width="540px" :close-on-click-modal="false">
       <el-form :model="createForm" label-width="100px">
-        <el-form-item label="任务名称" required>
-          <el-input v-model="createForm.taskName" placeholder="如 his-gateway-2sftp" />
-        </el-form-item>
         <el-form-item label="选择应用" required>
           <el-select v-model="createForm.applicationId" placeholder="从应用管理中选择" filterable style="width: 100%;">
             <el-option v-for="app in apps" :key="app.id" :label="app.appName" :value="app.id" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="任务名称" required>
+          <el-input v-model="createForm.taskName" placeholder="选择应用后自动生成，可修改" />
         </el-form-item>
         <el-form-item label="分支" required>
           <el-input v-model="createForm.gitBranch" placeholder="如 release_2.15.3_250515" />
