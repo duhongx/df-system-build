@@ -27,7 +27,6 @@ const metrics = computed(() => [
 const quickActions = computed(() => [
   { icon: 'VideoPlay', label: '新增更新任务', path: '/batch-deploy', color: 'blue' },
   { icon: 'Box', label: '更新版本', path: '/artifacts/versions', color: 'cyan' },
-  { icon: 'Files', label: '日志收集', path: '/log-collection', color: 'violet' },
   { icon: 'Coin', label: 'SQL 执行', path: '/postgresql/sql-execution', color: 'green' },
   { icon: 'Platform', label: '服务器管理', path: '/servers', color: 'blue' },
   { icon: 'Cloudy', label: 'Kubernetes', path: '/kubernetes/overview', color: 'cyan' },

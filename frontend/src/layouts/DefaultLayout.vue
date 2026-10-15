@@ -15,7 +15,7 @@ const route = useRoute()
 const router = useRouter()
 const isCollapsed = ref(window.innerWidth < 1200)
 const pageSection = computed(() => {
-  if (/^\/(servers|log-collection|kubernetes)/.test(route.path)) return '运维管理'
+  if (/^\/(servers|kubernetes)/.test(route.path)) return '运维管理'
   if (route.path.startsWith('/postgresql')) return '数据库管理'
   if (route.path.startsWith('/settings')) return '平台配置'
   if (route.path.startsWith('/deployment')) return '基础设施'
@@ -260,11 +260,6 @@ async function handleSaveProfile() {
         <el-menu-item index="/servers">
           <el-icon><Platform /></el-icon>
           <template #title>服务器管理</template>
-        </el-menu-item>
-
-        <el-menu-item index="/log-collection">
-          <el-icon><Files /></el-icon>
-          <template #title>日志收集</template>
         </el-menu-item>
 
         <el-sub-menu index="k8s-center">

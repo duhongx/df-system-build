@@ -13,7 +13,6 @@
 | 制品与批量更新 | 上传／目录导入／远程下载、应用匹配、最新制品库、更新版本、文件替换与重下载、制品仅更新一次（再次更新须重新上传）、上传并制作镜像、单独执行滚动更新、人工批次回滚与版本信息展示 |
 | Kubernetes | 集群与资源查询、Pod 日志、指标、YAML 查看、重启、扩缩容、镜像与资源调整、ConfigMap 编辑、Service 端口维护 |
 | 服务器 | 主机与连接管理、WebSSH、SFTP 文件操作、node_exporter 即时指标 |
-| 日志收集 | 配置微服务／数据库／RabbitMQ／Redis 等日志来源；选择主机文件、后台收集、逐项错误、ZIP 下载、收集记录与清理；在线查询使用 VictoriaLogs |
 | PostgreSQL | 实例信息；SQL／ZIP／服务器文件导入、按文件后台执行、遇错停止、失败重试、停止、跳过和历史；独立视图依赖变更、恢复与验证 |
 | 基础设施部署 | 组件及主机绑定、参数配置、冲突检查、部署预览、SSH 执行、日志、回滚、离线包管理 |
 | 平台基础 | JWT 登录、退出、个人资料、凭据加密、工作台统计、钉钉／企微通知、站内消息、日志清理、多标签页与暗色模式 |
@@ -98,7 +97,6 @@ go test ./...
 - [部署管理](docs/deployment-management.md)
 - [Vue 构建与微前端更新](docs/vue-app-build-flow.md)
 - [PostgreSQL 当前功能](docs/postgresql.md)
-- [日志收集与打包下载](docs/log-collection.md)
 - [机房与客户现场使用场景](docs/usage-scenarios.md)
 
 `docs/plans/` 与需求文档保留设计历史，其中的目标、勾选项和命令不代表当前验收结果；当前使用方式以上述说明为准。

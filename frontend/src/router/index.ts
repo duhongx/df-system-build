@@ -29,7 +29,6 @@ const routes: RouteRecordRaw[] = [
       { path: 'artifacts/latest', name: 'ArtifactList', component: () => import('../views/ArtifactListView.vue'), meta: { title: '制品库', fillViewport: true } },
       { path: 'artifacts/versions/:versionNo', name: 'ArtifactVersionDetail', component: () => import('../views/ArtifactVersionDetailView.vue'), meta: { title: '更新版本详情' } },
       { path: 'servers', name: 'ServerMgmt', component: () => import('../views/ServerMgmtView.vue'), meta: { title: '服务器管理', fillViewport: true } },
-      { path: 'log-collection', name: 'LogCollection', component: () => import('../views/LogCollectionView.vue'), meta: { title: '日志收集' } },
       { path: 'servers/:id/terminal', name: 'ServerTerminal', component: () => import('../views/ServerTerminalView.vue'), meta: { title: 'WebSSH 终端', fillViewport: true } },
       { path: 'servers/:id/files', name: 'ServerFiles', component: () => import('../views/ServerFilesView.vue'), meta: { title: '文件管理', fillViewport: true } },
       { path: 'servers/:id/monitor', name: 'ServerMonitor', component: () => import('../views/ServerMonitorView.vue'), meta: { title: '系统监控' } },
