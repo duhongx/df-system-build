@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Pipeline struct {
 	ID                    uint            `gorm:"primaryKey" json:"id"`
@@ -26,7 +29,8 @@ type Pipeline struct {
 	DeploymentProgress    string          `gorm:"size:32" json:"deploymentProgress"` // preparing/submitting/submitted/completed
 	FrontendUpdateSummary string          `gorm:"type:text" json:"-"`                // Submitted frontend selection, for batch-level execution logs.
 	FrontendBaselineJSON  string          `gorm:"type:text" json:"-"`                // Build-time Deployment baseline, retained between image preparation and rollout.
-	K8sNamespace          string          `gorm:"size:64" json:"k8sNamespace"`       // K8s namespace
+	FrontendRelease       json.RawMessage `gorm:"-" json:"frontendRelease,omitempty"`
+	K8sNamespace          string          `gorm:"size:64" json:"k8sNamespace"` // K8s namespace
 	StartTime             *time.Time      `json:"startTime"`
 	EndTime               *time.Time      `json:"endTime"`
 	DurationSeconds       *int            `json:"durationSeconds"`
@@ -37,6 +41,8 @@ type Pipeline struct {
 }
 
 type FrontendArtifact struct {
+	AppID    uint   `json:"appId,omitempty"`
+	AppName  string `json:"appName,omitempty"`
 	FileName string `json:"fileName"`
 	Role     string `json:"role"`
 	AppCode  string `json:"appCode,omitempty"`

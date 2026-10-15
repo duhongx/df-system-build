@@ -2,6 +2,7 @@ package stages
 
 import (
 	"context"
+	"df-build-server/internal/frontend"
 	"fmt"
 	"path/filepath"
 
@@ -27,8 +28,15 @@ func (s *ZipPackageStage) Run(ctx context.Context, pCtx *types.PipelineContext) 
 	}
 
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("打包 %s → %s", artifactDir, zipName), "stdout")
+	commit := ""
+	if pCtx.Pipeline != nil {
+		commit = pCtx.Pipeline.GitCommitHash
+	}
+	if err := frontend.WriteBuildManifest(artifactDir, frontend.BuildManifest{AppName: pCtx.AppName, Role: pCtx.VueRole, AppCode: pCtx.AppCode, Commit: commit}); err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
 
-	if err := ZipDirectory(artifactDir, ".", zipPath); err != nil {
+	if err := zipDirectory(artifactDir, ".", zipPath, pCtx.VueRole == "main"); err != nil {
 		errMsg := fmt.Sprintf("打包失败: %v", err)
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return &types.StageResult{ExitCode: 1, Error: errMsg}, err

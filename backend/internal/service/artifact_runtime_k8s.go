@@ -3,12 +3,17 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"df-build-server/internal/frontend"
 	"df-build-server/internal/k8s"
 	"df-build-server/internal/model"
+	"df-build-server/internal/repository"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,7 +37,15 @@ func NewK8sDeploymentRollbacker() K8sDeploymentRollbacker {
 }
 
 func (K8sDeploymentRollbacker) RollbackDeployment(ctx context.Context, namespace, deploymentName, image string) error {
-	if deploymentName == "web-main" {
+	return rollbackDeployment(ctx, namespace, deploymentName, "", 0, image)
+}
+
+func (K8sDeploymentRollbacker) RollbackDeploymentIfCurrent(ctx context.Context, namespace, deploymentName, expected string, pipelineID uint, image string) error {
+	return rollbackDeployment(ctx, namespace, deploymentName, expected, pipelineID, image)
+}
+
+func rollbackDeployment(ctx context.Context, namespace, deploymentName, expected string, pipelineID uint, image string) error {
+	{
 		unlock, err := k8s.LockDeployment(ctx, namespace, deploymentName)
 		if err != nil {
 			return err
@@ -47,13 +60,155 @@ func (K8sDeploymentRollbacker) RollbackDeployment(ctx context.Context, namespace
 	if err != nil {
 		return err
 	}
+	var expectedTree string
+	if pipelineID != 0 {
+		var p model.Pipeline
+		if err := repository.DB.First(&p, pipelineID).Error; err != nil {
+			return err
+		}
+		if p.FrontendBaselineJSON != "" {
+			var b struct {
+				Cluster            string            `json:"cluster"`
+				UID                string            `json:"uid"`
+				Generation         int64             `json:"generation"`
+				FinalGeneration    int64             `json:"finalGeneration"`
+				PreparedGeneration int64             `json:"preparedGeneration"`
+				PreparationImage   string            `json:"preparationImage"`
+				Image              string            `json:"image"`
+				NewImage           string            `json:"newImage"`
+				PreparationSHA256  string            `json:"preparationSha256"`
+				ContentSHA256      string            `json:"contentSha256"`
+				ConfigMaps         map[string]string `json:"configMaps"`
+			}
+			if err := json.Unmarshal([]byte(p.FrontendBaselineJSON), &b); err != nil {
+				return err
+			}
+			cfg, err := k8s.GetRestConfig()
+			if err != nil {
+				return err
+			}
+			if cfg.Host != b.Cluster || string(dep.UID) != b.UID {
+				return fmt.Errorf("回滚目标集群或 Deployment 身份已改变")
+			}
+			current := DeploymentContainerImage(dep, deploymentName)
+			allowed := current == expected && dep.Generation == b.FinalGeneration
+			// Legacy snapshots predate explicit final-generation checkpoints.
+			// Accept only their immediate image-only successor, never later edits.
+			if b.FinalGeneration == 0 && b.PreparedGeneration == 0 && b.NewImage == expected && current == expected && dep.Generation == b.Generation+1 {
+				allowed = true
+			}
+			if current == b.PreparationImage && dep.Generation == b.PreparedGeneration && dep.Annotations["df-build-system/pipeline"] == fmt.Sprint(pipelineID) {
+				allowed = true
+				expected = current
+			}
+			if !allowed {
+				return fmt.Errorf("当前发布序列不属于该批次，拒绝历史回滚")
+			}
+			for name, rv := range b.ConfigMaps {
+				cm, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+				if err != nil {
+					return err
+				}
+				if cm.ResourceVersion != rv {
+					return fmt.Errorf("ConfigMap %s 已变化，不能仅回滚镜像", name)
+				}
+			}
+			expectedTree = b.ContentSHA256
+			if image == b.PreparationImage {
+				expectedTree = b.PreparationSHA256
+			}
+		}
+	}
+	if expected != "" && (DeploymentContainerImage(dep, deploymentName) != expected || (pipelineID != 0 && dep.Annotations["df-build-system/pipeline"] != "" && dep.Annotations["df-build-system/pipeline"] != fmt.Sprint(pipelineID))) {
+		return fmt.Errorf("目标已有其他发布，拒绝回滚历史批次；请基于最新版本创建定向回退任务")
+	}
 	if !SetDeploymentImage(dep, deploymentName, image) {
 		return fmt.Errorf("Deployment %s 没有可更新的容器", deploymentName)
 	}
 	if _, err := cs.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{}); err != nil {
 		return err
 	}
-	return WaitDeploymentRollout(ctx, cs, namespace, deploymentName, 5*time.Minute)
+	if err := WaitDeploymentRollout(ctx, cs, namespace, deploymentName, 5*time.Minute); err != nil {
+		return err
+	}
+	if expectedTree != "" {
+		return verifyRollbackSite(ctx, cs, namespace, deploymentName, image, expectedTree)
+	}
+	return nil
+}
+
+func verifyRollbackSite(ctx context.Context, cs kubernetes.Interface, namespace, name, image, expectedTree string) error {
+	cfg, err := k8s.GetRestConfig()
+	if err != nil {
+		return err
+	}
+	dep, err := cs.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	selector, err := metav1.LabelSelectorAsSelector(dep.Spec.Selector)
+	if err != nil {
+		return err
+	}
+	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return err
+	}
+	var verified int32
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		if !podReady(&pod) {
+			return fmt.Errorf("回滚副本未就绪")
+		}
+		matches := false
+		for _, c := range pod.Spec.Containers {
+			if c.Name == name && c.Image == image {
+				matches = true
+			}
+		}
+		if !matches {
+			return fmt.Errorf("回滚仍存在非目标镜像副本")
+		}
+		tmp, err := os.MkdirTemp("", "df-rollback-verify-")
+		if err != nil {
+			return err
+		}
+		err = func() error {
+			defer os.RemoveAll(tmp)
+			if err := frontend.ExportPodSite(ctx, cs, cfg, namespace, pod.Name, name, tmp); err != nil {
+				return err
+			}
+			hash, err := frontend.TreeHash(tmp)
+			if err != nil {
+				return err
+			}
+			if hash != expectedTree {
+				return fmt.Errorf("回滚副本 %s 的文件清单不匹配", pod.Name)
+			}
+			body, _, err := frontend.ProbePodHTTP(ctx, cs, cfg, namespace, pod.Name, name, "/index.html")
+			if err != nil {
+				return err
+			}
+			entry, err := os.ReadFile(filepath.Join(tmp, "index.html"))
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(body, entry) {
+				return fmt.Errorf("回滚入口 HTTP 内容不匹配")
+			}
+			return nil
+		}()
+		if err != nil {
+			return err
+		}
+		verified++
+	}
+	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != verified || verified == 0 {
+		return fmt.Errorf("回滚副本验证不完整")
+	}
+	return nil
 }
 
 func (K8sRuntimeVersionReader) ReadBusinessVersion(ctx context.Context, record model.ArtifactDeployRecord) (string, error) {
@@ -202,8 +357,9 @@ func WaitDeploymentRollout(ctx context.Context, cs kubernetes.Interface, namespa
 			replicas = *dep.Spec.Replicas
 		}
 		if dep.Status.ObservedGeneration >= dep.Generation &&
-			dep.Status.UpdatedReplicas >= replicas &&
-			dep.Status.AvailableReplicas >= replicas &&
+			replicas > 0 && dep.Status.Replicas == replicas &&
+			dep.Status.UpdatedReplicas == replicas && dep.Status.ReadyReplicas == replicas &&
+			dep.Status.AvailableReplicas == replicas &&
 			dep.Status.UnavailableReplicas == 0 {
 			return nil
 		}

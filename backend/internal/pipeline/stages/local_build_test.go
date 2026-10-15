@@ -62,7 +62,7 @@ func TestConfiguredArtifactDirectoriesAndVueArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer zr.Close()
-	if len(zr.File) != 1 || zr.File[0].Name != "index.html" {
+	if len(zr.File) != 2 || zr.File[0].Name != ".df-build.json" || zr.File[1].Name != "index.html" {
 		t.Fatalf("unexpected archive: %+v", zr.File)
 	}
 	pc.ArtifactDir = "."

@@ -6,31 +6,32 @@ import (
 )
 
 type Application struct {
-	ID                uint       `gorm:"primaryKey" json:"id"`
-	AppName           string     `gorm:"uniqueIndex;size:128;not null" json:"appName"`
-	AppType           string     `gorm:"size:20;not null" json:"appType"` // java / vue
-	VueRole           string     `gorm:"size:20" json:"vueRole"`          // main / sub / standalone (Vue only)
-	IsGateway         bool       `gorm:"default:false" json:"isGateway"`  // Java 网关标识
-	AppCode           string     `gorm:"size:20" json:"appCode"`          // 子应用编号 (sub only)
-	AppDesc           string     `gorm:"size:255" json:"appDesc"`
-	GitRepo           string     `gorm:"size:512;not null" json:"gitRepo"`
-	DefaultBranch     string     `gorm:"size:128;default:master" json:"defaultBranch"`
-	NodePort          int        `gorm:"default:0" json:"nodePort"`         // K8s Service NodePort (0=不暴露)
-	IngressHost       string     `gorm:"size:256" json:"ingressHost"`       // Deprecated: 单 Ingress 域名 (向后兼容)
-	Ingresses         string     `gorm:"type:text" json:"ingresses"`        // JSON array of IngressConfig
-	ConfigMapContent  string     `gorm:"type:text" json:"configMapContent"` // K8s ConfigMap 内容 (空=不创建)
-	EnvTags           string     `gorm:"size:512" json:"envTags"`           // 客户环境标签 (空=所有环境部署, 逗号分隔如"四川,重庆")
-	TemplateCode      string     `gorm:"size:32" json:"templateCode"`
-	ArtifactName      string     `gorm:"size:128" json:"artifactName"`
-	BuildCommand      string     `gorm:"size:512" json:"buildCommand"`
-	InstallCommand    string     `gorm:"size:512" json:"installCommand"`
-	ArtifactDir       string     `gorm:"size:256" json:"artifactDir"`
-	ArtifactCheckFile string     `gorm:"size:256" json:"artifactCheckFile"`
-	Enabled           bool       `gorm:"default:true" json:"enabled"`
-	LastBuildStatus   string     `gorm:"size:20" json:"lastBuildStatus"`
-	LastBuildTime     *time.Time `json:"lastBuildTime"`
-	CreatedAt         time.Time  `json:"createdAt"`
-	UpdatedAt         time.Time  `json:"updatedAt"`
+	ID                     uint       `gorm:"primaryKey" json:"id"`
+	AppName                string     `gorm:"uniqueIndex;size:128;not null" json:"appName"`
+	AppType                string     `gorm:"size:20;not null" json:"appType"` // java / vue
+	VueRole                string     `gorm:"size:20" json:"vueRole"`          // main / sub / standalone (Vue only)
+	IsGateway              bool       `gorm:"default:false" json:"isGateway"`  // Java 网关标识
+	AppCode                string     `gorm:"size:20" json:"appCode"`          // 子应用编号 (sub only)
+	AdoptExistingDirectory bool       `gorm:"default:false" json:"adoptExistingDirectory"`
+	AppDesc                string     `gorm:"size:255" json:"appDesc"`
+	GitRepo                string     `gorm:"size:512;not null" json:"gitRepo"`
+	DefaultBranch          string     `gorm:"size:128;default:master" json:"defaultBranch"`
+	NodePort               int        `gorm:"default:0" json:"nodePort"`         // K8s Service NodePort (0=不暴露)
+	IngressHost            string     `gorm:"size:256" json:"ingressHost"`       // Deprecated: 单 Ingress 域名 (向后兼容)
+	Ingresses              string     `gorm:"type:text" json:"ingresses"`        // JSON array of IngressConfig
+	ConfigMapContent       string     `gorm:"type:text" json:"configMapContent"` // K8s ConfigMap 内容 (空=不创建)
+	EnvTags                string     `gorm:"size:512" json:"envTags"`           // 客户环境标签 (空=所有环境部署, 逗号分隔如"四川,重庆")
+	TemplateCode           string     `gorm:"size:32" json:"templateCode"`
+	ArtifactName           string     `gorm:"size:128" json:"artifactName"`
+	BuildCommand           string     `gorm:"size:512" json:"buildCommand"`
+	InstallCommand         string     `gorm:"size:512" json:"installCommand"`
+	ArtifactDir            string     `gorm:"size:256" json:"artifactDir"`
+	ArtifactCheckFile      string     `gorm:"size:256" json:"artifactCheckFile"`
+	Enabled                bool       `gorm:"default:true" json:"enabled"`
+	LastBuildStatus        string     `gorm:"size:20" json:"lastBuildStatus"`
+	LastBuildTime          *time.Time `json:"lastBuildTime"`
+	CreatedAt              time.Time  `json:"createdAt"`
+	UpdatedAt              time.Time  `json:"updatedAt"`
 }
 
 // IngressConfig describes a single Ingress entry attached to an application.

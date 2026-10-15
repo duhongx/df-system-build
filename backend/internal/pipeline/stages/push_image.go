@@ -15,7 +15,7 @@ type PushImageStage struct{}
 func (s *PushImageStage) Name() string { return "推送镜像" }
 func (s *PushImageStage) Code() string { return "PUSH_IMAGE" }
 
-func (s *PushImageStage) Run(ctx context.Context, pCtx *types.PipelineContext) (*types.StageResult, error) {
+func (s *PushImageStage) pushOne(ctx context.Context, pCtx *types.PipelineContext) (*types.StageResult, error) {
 	if pCtx.ImageName == "" {
 		errMsg := "镜像名称为空，BUILD_IMAGE 阶段可能未成功"
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
@@ -69,8 +69,44 @@ func (s *PushImageStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("目标镜像推送流处理完成；镜像=%s；退出码=%d", pCtx.ImageName, cmdReader.ExitCode), "stdout")
 
+	if pCtx.AppType == "vue" {
+		digest, err := cli.ResolveImageDigest(ctx, pCtx.ImageName, authStr)
+		if err != nil {
+			return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+		}
+		pCtx.ImageName = digest
+	}
 	pCtx.OnLog(pCtx.PipelineID, 0, "镜像推送完成 ✓", "stdout")
 	logger.Log.Infof("Docker image pushed: %s", pCtx.ImageName)
 
 	return &types.StageResult{ExitCode: 0}, nil
+}
+
+func (s *PushImageStage) Run(ctx context.Context, pCtx *types.PipelineContext) (*types.StageResult, error) {
+	if pCtx.AppType != "vue" {
+		return s.pushOne(ctx, pCtx)
+	}
+	b, err := loadWebBaseline(pCtx)
+	if err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
+	final := pCtx.ImageName
+	if b.PreparationImage != "" {
+		pCtx.ImageName = b.PreparationImage
+		if result, err := s.pushOne(ctx, pCtx); err != nil {
+			pCtx.ImageName = final
+			return result, err
+		}
+		b.PreparationImage = pCtx.ImageName
+	}
+	pCtx.ImageName = final
+	result, err := s.pushOne(ctx, pCtx)
+	if err != nil {
+		return result, err
+	}
+	b.NewImage = pCtx.ImageName
+	if err := saveWebBaseline(pCtx, b); err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
+	return result, nil
 }

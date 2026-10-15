@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"archive/zip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,9 +19,11 @@ import (
 	"sync"
 	"time"
 
+	"df-build-server/internal/frontend"
 	"df-build-server/internal/k8s"
 	"df-build-server/internal/middleware"
 	"df-build-server/internal/model"
+	"df-build-server/internal/pipeline/stages"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/scheduler"
 	"df-build-server/internal/service"
@@ -1906,17 +1907,18 @@ func (h *BatchDeployHandler) ListLocalBrowser(c *gin.Context) {
 }
 
 type matchResult struct {
-	VueRole     string `json:"vueRole"`
-	AppCode     string `json:"appCode"`
-	UpdateUsed  bool   `json:"updateUsed"`
-	FileName    string `json:"fileName"`
-	AppName     string `json:"appName"`
-	AppType     string `json:"appType"`
-	AppID       uint   `json:"appId"`
-	Matched     bool   `json:"matched"`
-	Valid       bool   `json:"valid"`
-	Skipped     bool   `json:"skipped"`
-	MatchReason string `json:"matchReason"`
+	Regions     []frontend.Region `json:"regions,omitempty"`
+	VueRole     string            `json:"vueRole"`
+	AppCode     string            `json:"appCode"`
+	UpdateUsed  bool              `json:"updateUsed"`
+	FileName    string            `json:"fileName"`
+	AppName     string            `json:"appName"`
+	AppType     string            `json:"appType"`
+	AppID       uint              `json:"appId"`
+	Matched     bool              `json:"matched"`
+	Valid       bool              `json:"valid"`
+	Skipped     bool              `json:"skipped"`
+	MatchReason string            `json:"matchReason"`
 }
 
 // Match matches uploaded file names to applications and validates file integrity
@@ -1975,6 +1977,20 @@ func (h *BatchDeployHandler) Match(c *gin.Context) {
 			result.MatchReason = fmt.Sprintf("文件异常: %v", err)
 		} else {
 			result.Valid = true
+			if result.Matched && result.AppType == "vue" {
+				for _, app := range apps {
+					if app.ID == result.AppID {
+						regions, err := stages.InspectFrontendArtifact(filePath, app)
+						if err != nil {
+							result.Valid = false
+							result.MatchReason = err.Error()
+						} else {
+							result.Regions = regions
+						}
+						break
+					}
+				}
+			}
 		}
 		results = append(results, result)
 	}
@@ -2015,6 +2031,9 @@ func (h *BatchDeployHandler) matchFile(fileName string, apps []model.Application
 	ext := filepath.Ext(fileName)
 
 	for _, app := range apps {
+		if !app.Enabled || app.ValidateIdentity() != nil {
+			continue
+		}
 		switch {
 		case ext == ".jar" && app.AppType == "java":
 			if app.AppName == baseName {
@@ -2028,7 +2047,7 @@ func (h *BatchDeployHandler) matchFile(fileName string, apps []model.Application
 				return result
 			}
 		case ext == ".zip" && app.AppType == "vue":
-			if app.AppName == baseName && (app.VueRole == "main" || app.VueRole == "standalone") {
+			if app.AppName == baseName && (app.VueRole == "main" || app.VueRole == "standalone" || app.VueRole == "cdn") {
 				result.Matched = true
 				result.AppName = app.AppName
 				result.AppType = app.AppType
@@ -2126,7 +2145,7 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 	invalidate := func(app *model.Application, message string) {
 		errors = append(errors, message)
 		invalidApps[app.ID] = true
-		if app.AppType == "vue" && (app.VueRole == "main" || app.VueRole == "sub") {
+		if app.SharedFrontend() {
 			invalidSharedWeb = true
 		}
 	}
@@ -2179,7 +2198,7 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 			}
 			frontendSummary = append(frontendSummary, fmt.Sprintf("%s：%s；appCode=%s；制品=%s", role, app.AppName, app.AppCode, item.FileName))
 		}
-		if app.AppType == "vue" && (app.VueRole == "main" || app.VueRole == "sub") {
+		if app.SharedFrontend() {
 			key := app.VueRole
 			if app.VueRole == "sub" {
 				key += ":" + app.AppCode
@@ -2199,14 +2218,14 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 				invalidate(app, fmt.Sprintf("%s: 读取制品失败: %v", item.FileName, err))
 				continue
 			}
-			webArtifacts = append(webArtifacts, model.FrontendArtifact{FileName: item.FileName, Role: app.VueRole, AppCode: app.AppCode, SHA256: hash})
+			webArtifacts = append(webArtifacts, model.FrontendArtifact{AppID: app.ID, AppName: app.AppName, FileName: item.FileName, Role: app.VueRole, AppCode: app.AppCode, SHA256: hash})
 		}
 		if app.AppType == "vue" && app.VueRole == "main" {
 			webMainItem = &struct {
 				FileName string
 				AppID    uint
 			}{item.FileName, item.AppID}
-		} else if app.AppType == "vue" && app.VueRole == "sub" {
+		} else if app.AppType == "vue" && (app.VueRole == "sub" || app.VueRole == "cdn") {
 			subAppItems = append(subAppItems, struct {
 				FileName string
 				AppID    uint
@@ -2220,6 +2239,12 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 		}
 	}
 
+	if !invalidSharedWeb && len(webArtifacts) > 0 {
+		if err := stages.ValidateFrontendSelection(sourceDir, webArtifacts); err != nil {
+			invalidSharedWeb = true
+			errors = append(errors, err.Error())
+		}
+	}
 	// Each failed application is skipped without blocking other targets.
 	if invalidSharedWeb {
 		webMainItem, subAppItems, webArtifacts = nil, nil, nil
@@ -2314,6 +2339,19 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 		}
 		if target.shared {
 			p.FrontendArtifactsJSON = string(webArtifactsJSON)
+		} else if app.AppType == "vue" {
+			artifactPath, pathErr := resolveArtifactPath(sourceDir, target.refs[0].FileName)
+			if pathErr != nil {
+				errors = append(errors, pathErr.Error())
+				continue
+			}
+			_, hash, hashErr := fileSHA256(artifactPath)
+			if hashErr != nil {
+				errors = append(errors, hashErr.Error())
+				continue
+			}
+			data, _ := json.Marshal([]model.FrontendArtifact{{AppID: app.ID, AppName: app.AppName, FileName: target.refs[0].FileName, Role: app.VueRole, SHA256: hash}})
+			p.FrontendArtifactsJSON = string(data)
 		}
 		if err := h.pipelineRepo.Create(p); err != nil {
 			errors = append(errors, fmt.Sprintf("%s: 创建 Pipeline 失败: %v", targetLabel, err))
@@ -3802,6 +3840,12 @@ func safePathSegment(value string) string {
 }
 
 func validateExecuteArtifact(sourceDir, fileName string, app model.Application) error {
+	if !app.Enabled {
+		return fmt.Errorf("应用已停用")
+	}
+	if err := app.ValidateIdentity(); err != nil {
+		return err
+	}
 	fileName, err := safeArtifactFileName(fileName)
 	if err != nil {
 		return err
@@ -3817,6 +3861,9 @@ func validateExecuteArtifact(sourceDir, fileName string, app model.Application) 
 	result := (&BatchDeployHandler{}).matchFile(fileName, []model.Application{app})
 	if !result.Matched {
 		return fmt.Errorf("制品与应用不匹配")
+	}
+	if app.AppType == "vue" {
+		return stages.ValidateFrontendArtifact(filePath, app)
 	}
 	return nil
 }
@@ -3836,26 +3883,7 @@ func validateArtifact(filePath string) error {
 
 	switch ext {
 	case ".jar", ".zip":
-		// Both jar and zip use ZIP format - try to open and read entries
-		r, err := zip.OpenReader(filePath)
-		if err != nil {
-			return fmt.Errorf("无法解压 (文件损坏或格式错误)")
-		}
-		defer r.Close()
-
-		if len(r.File) == 0 {
-			return fmt.Errorf("压缩包内容为空")
-		}
-
-		// Try to read the first file entry to verify integrity
-		firstFile := r.File[0]
-		rc, err := firstFile.Open()
-		if err != nil {
-			return fmt.Errorf("压缩包内容无法读取")
-		}
-		rc.Close()
-
-		return nil
+		return frontend.ValidateArchive(filePath)
 	default:
 		return fmt.Errorf("不支持的文件格式: %s", ext)
 	}

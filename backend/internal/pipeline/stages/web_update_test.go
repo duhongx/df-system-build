@@ -21,7 +21,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 )
 
-func TestWebUpdatePreservesUnselectedChildrenAndReplacesSelectedDirectory(t *testing.T) {
+func TestWebUpdatePreservesUnselectedChildrenAndRetainsOldResources(t *testing.T) {
 	for _, withMain := range []bool{false, true} {
 		t.Run(map[bool]string{false: "children", true: "main_and_children"}[withMain], func(t *testing.T) {
 			root := t.TempDir()
@@ -35,7 +35,7 @@ func TestWebUpdatePreservesUnselectedChildrenAndReplacesSelectedDirectory(t *tes
 			writeTestZip(t, filepath.Join(root, "a.zip"), map[string]string{"dist/index.html": "a-new", "dist/new.js": "a-new-js"})
 			artifacts := []model.FrontendArtifact{{FileName: "a.zip", Role: "sub", AppCode: "a"}}
 			if withMain {
-				writeTestZip(t, filepath.Join(root, "main.zip"), map[string]string{"dist/index.html": "main-new", "dist/apps/b/leaked.js": "must-not-leak"})
+				writeTestZip(t, filepath.Join(root, "main.zip"), map[string]string{"dist/index.html": "main-new"})
 				artifacts = append(artifacts, model.FrontendArtifact{FileName: "main.zip", Role: "main"})
 			}
 			plan, err := prepareWebUpdate(root, filepath.Join(root, "inputs"), artifacts)
@@ -50,7 +50,7 @@ func TestWebUpdatePreservesUnselectedChildrenAndReplacesSelectedDirectory(t *tes
 				t.Fatal(preserved)
 			}
 			assertWebContent(t, filepath.Join(out, "apps/a/index.html"), "a-new")
-			assertMissing(t, filepath.Join(out, "apps/a/old.js"))
+			assertWebContent(t, filepath.Join(out, "apps/a/old.js"), "a-old-js")
 			assertMissing(t, filepath.Join(out, "apps/b/leaked.js"))
 			for _, code := range []string{"b", "unregistered"} {
 				before, _ := hashWebTree(filepath.Join(base, "apps", code))
@@ -60,7 +60,7 @@ func TestWebUpdatePreservesUnselectedChildrenAndReplacesSelectedDirectory(t *tes
 				}
 			}
 			if withMain {
-				assertMissing(t, filepath.Join(out, "old-main.js"))
+				assertWebContent(t, filepath.Join(out, "old-main.js"), "old")
 				assertWebContent(t, filepath.Join(out, "index.html"), "main-new")
 			}
 			assertWebContent(t, filepath.Join(base, "apps/a/index.html"), "a-old")
@@ -70,7 +70,7 @@ func TestWebUpdatePreservesUnselectedChildrenAndReplacesSelectedDirectory(t *tes
 
 func TestWebUpdateEmbeddedChildrenAndFirstDeployment(t *testing.T) {
 	root := t.TempDir()
-	writeTestZip(t, filepath.Join(root, "main.zip"), map[string]string{"index.html": "main", "apps/a/index.html": "a-new"})
+	writeTestZip(t, filepath.Join(root, "main.zip"), map[string]string{"index.html": "main", "apps/a/index.html": "a-new", ".df-release.json": `{"mode":"bundle","regions":[{"role":"main","appName":"web-main"},{"role":"sub","appCode":"a","appName":"web-alpha"}]}`})
 	plan, err := prepareWebUpdate(root, filepath.Join(root, "inputs"), []model.FrontendArtifact{{FileName: "main.zip", Role: "main"}})
 	if err != nil {
 		t.Fatal(err)

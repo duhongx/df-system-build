@@ -2,6 +2,7 @@ import request from './request'
 import type { FileItem } from './server-mgmt'
 
 export interface MatchResult {
+  regions?: {appName: string; role: string; appCode?: string; path: string}[]
   vueRole?: string
   appCode?: string
   updateUsed?: boolean

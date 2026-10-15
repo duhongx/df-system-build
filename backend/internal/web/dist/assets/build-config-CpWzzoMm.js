@@ -1,0 +1,1 @@
+import{r as u}from"./index-DCmBVNin.js";function e(){return u.get("/build-configs")}function o(i){return u.post("/build-configs",i)}function f(i,n){return u.put(`/build-configs/${i}`,n)}function s(i){return u.delete(`/build-configs/${i}`)}function l(){return u.get("/build-configs/defaults")}export{o as c,s as d,l as g,e as l,f as u};

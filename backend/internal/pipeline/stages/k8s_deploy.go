@@ -50,7 +50,7 @@ func resolvePlan(pCtx *types.PipelineContext) templatePlan {
 		plan.wantIngress = pCtx.IsGateway
 	case "vue":
 		switch pCtx.VueRole {
-		case "sub":
+		case "sub", "cdn":
 			plan.deploymentCode = "deployment-web"
 		case "main":
 			plan.deploymentCode = "deployment-web"
@@ -75,6 +75,9 @@ func resolvePlan(pCtx *types.PipelineContext) templatePlan {
 func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (result *types.StageResult, runErr error) {
 	phase := "precheck"
 	defer func() {
+		if pCtx.AppType == "vue" {
+			return
+		} // frontend runner records its own C/F submission boundaries.
 		if runErr == nil {
 			return
 		}
@@ -122,6 +125,9 @@ func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 	}
 
 	plan := resolvePlan(pCtx)
+	if pCtx.AppType == "vue" {
+		return s.runFrontendDeployment(ctx, cs, pCtx, namespace)
+	}
 
 	// Vue sub apps merge into web-main image and still need to roll web-main.
 	if plan.skipAll {

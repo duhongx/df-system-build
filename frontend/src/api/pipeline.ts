@@ -35,6 +35,14 @@ export interface Pipeline {
   batchId?: string
   imageName?: string
   deploymentProgress?: string
+  frontendRelease?: {
+    deploymentName: string
+    namespace: string
+    preparationImage?: string
+    newImage: string
+    assetsVerified?: boolean
+    regions: { appName: string; role: string; appCode?: string; path: string; current: Record<string, unknown>; retained?: Record<string, unknown> }[]
+  }
   deployMode?: string
   startTime?: string | null
   endTime?: string | null

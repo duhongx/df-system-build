@@ -23,6 +23,7 @@ const form = ref({
   vueRole: '' as string,
   isGateway: false,
   appCode: '',
+    adoptExistingDirectory: false,
   nodePort: 0,
   configMapContent: '',
   envTags: '',
@@ -99,6 +100,7 @@ function vueRoleLabel(app: Application) {
   if (app.vueRole === 'main') return '主应用'
   if (app.vueRole === 'sub') return app.appCode ? `子应用(${app.appCode})` : '子应用'
   if (app.vueRole === 'standalone') return '独立'
+  if (app.vueRole === 'cdn') return '公共资源'
   return ''
 }
 
@@ -119,6 +121,7 @@ function handleAdd() {
     vueRole: '',
     isGateway: false,
     appCode: '',
+    adoptExistingDirectory: false,
     nodePort: 0,
     configMapContent: '',
     envTags: '',
@@ -136,6 +139,7 @@ function handleEdit(app: Application) {
     vueRole: app.vueRole || '',
     isGateway: !!app.isGateway,
     appCode: app.appCode || '',
+    adoptExistingDirectory: !!app.adoptExistingDirectory,
     nodePort: app.nodePort || 0,
     configMapContent: app.configMapContent || '',
     envTags: app.envTags || '',
@@ -165,10 +169,6 @@ async function handleDelete(app: Application) {
 async function handleSave() {
   if (!form.value.appName.trim()) {
     ElMessage.warning('请输入应用名称')
-    return
-  }
-  if (settingsStore.showTaskList && !form.value.gitRepo.trim()) {
-    ElMessage.warning('请输入 Git 仓库地址')
     return
   }
   if (form.value.appType === 'vue' && !form.value.vueRole) {
@@ -201,7 +201,8 @@ async function handleSave() {
         gitRepo: form.value.gitRepo,
         vueRole: form.value.vueRole,
         isGateway: form.value.appType === 'java' ? form.value.isGateway : false,
-        appCode: form.value.appCode,
+        appCode: form.value.vueRole === 'sub' ? form.value.appCode : '',
+        adoptExistingDirectory: form.value.adoptExistingDirectory,
         nodePort: form.value.nodePort || undefined,
         ingressHost: firstHost || undefined,
         ingresses: ingressesJson || undefined,
@@ -216,7 +217,8 @@ async function handleSave() {
         gitRepo: form.value.gitRepo,
         vueRole: form.value.vueRole,
         isGateway: form.value.appType === 'java' ? form.value.isGateway : false,
-        appCode: form.value.appCode,
+        appCode: form.value.vueRole === 'sub' ? form.value.appCode : '',
+        adoptExistingDirectory: form.value.adoptExistingDirectory,
         nodePort: form.value.nodePort || undefined,
         ingressHost: firstHost || undefined,
         ingresses: ingressesJson || undefined,
@@ -337,7 +339,7 @@ function handleSizeChange(newSize: number) {
             <el-radio value="vue">Vue</el-radio>
           </el-radio-group>
         </el-form-item>
-        <el-form-item v-if="settingsStore.showTaskList" label="Git 仓库" required>
+        <el-form-item v-if="settingsStore.showTaskList" label="Git 仓库">
           <el-input v-model="form.gitRepo" placeholder="ssh://git@192.168.1.206/df-his-backend/..." />
         </el-form-item>
         <el-form-item label="网关服务" v-if="form.appType === 'java'">
@@ -348,10 +350,14 @@ function handleSizeChange(newSize: number) {
             <el-radio value="main">主应用</el-radio>
             <el-radio value="sub">子应用</el-radio>
             <el-radio value="standalone">独立应用</el-radio>
+            <el-radio value="cdn">公共资源</el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="应用编号" required v-if="form.appType === 'vue' && form.vueRole === 'sub'">
           <el-input v-model="form.appCode" placeholder="如 04、99、gymk" style="width: 160px;" />
+        </el-form-item>
+        <el-form-item v-if="form.appType === 'vue' && form.vueRole === 'sub'" label="目录归属">
+          <el-checkbox v-model="form.adoptExistingDirectory">接管已核对的线上同编号目录</el-checkbox>
         </el-form-item>
         <el-form-item label="NodePort" v-if="form.appType === 'java' || (form.appType === 'vue' && (form.vueRole === 'main' || form.vueRole === 'standalone'))">
           <el-input-number v-model="form.nodePort" :min="0" :max="32767" :step="1" placeholder="30000-32767" style="width: 160px;" />

@@ -68,7 +68,7 @@ func TestExtractWebZipFlattensSubAppDistIntoAppCodeDir(t *testing.T) {
 	assertMissing(t, filepath.Join(target, "dist", "index.html"))
 }
 
-func TestReplaceWebMainPackagePreservingAppsDeletesOldRootAndKeepsExistingApps(t *testing.T) {
+func TestMainUpdateRetainsOldAssetsAndKeepsExistingApps(t *testing.T) {
 	tmp := t.TempDir()
 	htmlDir := filepath.Join(tmp, "html")
 	dockerDir := filepath.Join(tmp, "docker-build")
@@ -79,10 +79,8 @@ func TestReplaceWebMainPackagePreservingAppsDeletesOldRootAndKeepsExistingApps(t
 
 	zipPath := filepath.Join(tmp, "web-main.zip")
 	writeTestZip(t, zipPath, map[string]string{
-		"dist/index.html":              "new-main",
-		"dist/assets/new-hash.js":      "new-hash",
-		"dist/apps/from-package/x.js":  "must-not-survive",
-		"dist/apps/from-package/y.css": "must-not-survive",
+		"dist/index.html":         "new-main",
+		"dist/assets/new-hash.js": "new-hash",
 	})
 
 	plan, err := prepareWebUpdate(tmp, filepath.Join(tmp, "inputs"), []model.FrontendArtifact{{FileName: "web-main.zip", Role: "main"}})
@@ -96,7 +94,7 @@ func TestReplaceWebMainPackagePreservingAppsDeletesOldRootAndKeepsExistingApps(t
 
 	assertFile(t, filepath.Join(htmlDir, "index.html"))
 	assertFile(t, filepath.Join(htmlDir, "assets", "new-hash.js"))
-	assertMissing(t, filepath.Join(htmlDir, "assets", "old-hash.js"))
+	assertWebContent(t, filepath.Join(htmlDir, "assets", "old-hash.js"), "old-hash")
 	assertFile(t, filepath.Join(htmlDir, "apps", "04", "old-sub.js"))
 	assertMissing(t, filepath.Join(htmlDir, "apps", "from-package", "x.js"))
 	assertMissing(t, filepath.Join(htmlDir, "dist", "index.html"))

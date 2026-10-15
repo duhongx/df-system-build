@@ -3,6 +3,7 @@ package stages
 import (
 	"archive/tar"
 	"archive/zip"
+	"df-build-server/internal/frontend"
 	"fmt"
 	"io"
 	"os"
@@ -13,16 +14,28 @@ import (
 // ZipDirectory creates a zip file containing the specified subdirectory
 // e.g. ZipDirectory("/workspace/source", "dist", "/workspace/source/app.zip")
 func ZipDirectory(baseDir, subDir, zipFilePath string) error {
+	return zipDirectory(baseDir, subDir, zipFilePath, false)
+}
+
+func zipDirectory(baseDir, subDir, zipFilePath string, excludeApps bool) (resultErr error) {
 	sourceDir := filepath.Join(baseDir, subDir)
 
 	zipFile, err := os.Create(zipFilePath)
 	if err != nil {
 		return fmt.Errorf("创建 zip 文件失败: %w", err)
 	}
-	defer zipFile.Close()
+	defer func() {
+		if err := zipFile.Close(); resultErr == nil {
+			resultErr = err
+		}
+	}()
 
 	w := zip.NewWriter(zipFile)
-	defer w.Close()
+	defer func() {
+		if err := w.Close(); resultErr == nil {
+			resultErr = err
+		}
+	}()
 
 	return filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -33,6 +46,15 @@ func ZipDirectory(baseDir, subDir, zipFilePath string) error {
 		relPath, err := filepath.Rel(baseDir, path)
 		if err != nil {
 			return err
+		}
+		if excludeApps && (relPath == "apps" || strings.HasPrefix(filepath.ToSlash(relPath), "apps/")) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			return fmt.Errorf("制品不允许链接或特殊文件: %s", relPath)
 		}
 
 		if info.IsDir() {
@@ -67,6 +89,9 @@ func ZipDirectory(baseDir, subDir, zipFilePath string) error {
 
 // Unzip extracts a zip file to a target directory
 func Unzip(zipPath, targetDir string) error {
+	if err := frontend.ValidateArchive(zipPath); err != nil {
+		return err
+	}
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return fmt.Errorf("打开 zip 文件失败: %w", err)

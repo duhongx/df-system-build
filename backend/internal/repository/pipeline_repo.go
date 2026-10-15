@@ -120,7 +120,7 @@ func (r *PipelineRepo) StartRollout(id uint) (bool, error) {
 
 func (r *PipelineRepo) SaveImageCheckpoint(p *model.Pipeline) error {
 	return DB.Model(&model.Pipeline{}).Where("id = ?", p.ID).Updates(map[string]any{
-		"image_name": p.ImageName, "frontend_baseline_json": p.FrontendBaselineJSON,
+		"image_name": p.ImageName, "frontend_baseline_json": p.FrontendBaselineJSON, "frontend_artifacts_json": p.FrontendArtifactsJSON,
 	}).Error
 }
 

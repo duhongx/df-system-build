@@ -410,9 +410,15 @@ data:
         # =========================
         # 静态资源缓存
         # =========================
-        location ~* \.(js|css|map|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
+        location ^~ /apps/cdn/ {
+            try_files $uri =404;
             expires 7d;
-            add_header Cache-Control "public, max-age=604800" always;
+            access_log off;
+        }
+
+        location ~* \.(js|mjs|css|map|wasm|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 7d;
+            add_header Cache-Control "public, max-age=604800";
             access_log off;
             try_files $uri =404;
         }
@@ -420,9 +426,16 @@ data:
         # =========================
         # 多应用入口
         # =========================
-        location ~ ^/apps/(([0-9]+)|(gymk))\d+ {
-            index index.html index.htm;
-            try_files $uri $uri/ /apps/$1/index.html;
+        location ~* \.(html|json)$ {
+            try_files $uri =404;
+            expires -1;
+            add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        }
+
+        location ~ ^/apps/(?<app_code>[a-z0-9][a-z0-9_-]*)/ {
+            if (!-f $document_root/apps/$app_code/index.html) { return 404; }
+            index index.html;
+            try_files $uri $uri/ /apps/$app_code/index.html;
             expires -1;
             add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0, s-maxage=0" always;
             add_header Pragma "no-cache" always;
@@ -479,6 +492,18 @@ data:
 
         root /usr/share/nginx/html;
 
+        location ~* \.(js|mjs|css|map|wasm|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            try_files $uri =404;
+            expires 7d;
+            access_log off;
+        }
+
+        location ~* \.(html|json)$ {
+            try_files $uri =404;
+            expires -1;
+            add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        }
+
         location / {
             try_files $uri $uri/ /index.html;
             error_page 405 =200 http://$host$request_uri;
@@ -492,7 +517,7 @@ data:
             add_header Access-Control-Allow-Headers 'DNT,X-Mx-ReqToken,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';
         }
 
-        location /api {
+        location ^~ /api {
             proxy_pass http://his-gateway:8080;
             rewrite ^/api/(.*)$ /$1 break;
             proxy_set_header Host              $http_host;
@@ -531,6 +556,18 @@ data:
 
         root /usr/share/nginx/html;
 
+        location ~* \.(js|mjs|css|map|wasm|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            try_files $uri =404;
+            expires 7d;
+            access_log off;
+        }
+
+        location ~* \.(html|json)$ {
+            try_files $uri =404;
+            expires -1;
+            add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        }
+
         location / {
             try_files $uri $uri/ /index.html;
             error_page 405 =200 http://$host$request_uri;
@@ -540,7 +577,7 @@ data:
             add_header Access-Control-Allow-Headers 'DNT,X-Mx-ReqToken,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';
         }
 
-        location /api {
+        location ^~ /api {
             proxy_pass http://his-gateway:8080;
             rewrite ^/api/(.*)$ /$1 break;
             proxy_set_header X-Original-URI    $uri;
@@ -550,7 +587,7 @@ data:
             error_page 405 =200 http://$host$request_uri;
         }
 
-        location /graphql {
+        location ^~ /graphql {
             proxy_pass ${skywalkingGraphqlUrl};
             proxy_set_header X-Original-URI    $uri;
             proxy_set_header X-Forwarded-Proto $scheme;

@@ -57,7 +57,7 @@ func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *typ
 	// Keep the existing shared web-main target serial through build, push,
 	// each execution step. Image preparation releases the lock; its persisted
 	// baseline is checked again at deployment time.
-	if pCtx.AppType == "vue" && (pCtx.VueRole == "main" || pCtx.VueRole == "sub") {
+	if pCtx.AppType == "vue" {
 		if pCtx.K8sNamespace == "" {
 			var err error
 			pCtx.K8sNamespace, err = k8s.GetDefaultNamespace()
@@ -65,7 +65,11 @@ func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *typ
 				return err
 			}
 		}
-		unlock, err := k8s.LockDeployment(ctx, pCtx.K8sNamespace, "web-main")
+		target := pCtx.AppName
+		if pCtx.VueRole != "standalone" {
+			target = "web-main"
+		}
+		unlock, err := k8s.LockDeployment(ctx, pCtx.K8sNamespace, target)
 		if err != nil {
 			return fmt.Errorf("等待 web-main 更新完成: %w", err)
 		}

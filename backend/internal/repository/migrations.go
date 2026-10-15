@@ -14,6 +14,7 @@ type Migration struct {
 // migrations is the ordered list of all schema migrations
 // Add new migrations at the end with incrementing version numbers
 var migrations = []Migration{
+	// Applied once to registrations that predate explicit ownership tracking.
 	{
 		Version:     1,
 		Description: "Remove legacy executor_id column from tasks table",
@@ -78,6 +79,7 @@ SET vue_role = 'main',
 WHERE app_name = 'web-main';
 `,
 	},
+	{Version: 6, Description: "Adopt existing frontend application directories", SQL: `UPDATE applications SET adopt_existing_directory = true WHERE app_type = 'vue' AND vue_role = 'sub';`},
 }
 
 // RunMigrations executes pending migrations based on the current schema version

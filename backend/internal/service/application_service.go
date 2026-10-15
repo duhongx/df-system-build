@@ -2,10 +2,30 @@ package service
 
 import (
 	"errors"
+	"fmt"
+	"sync"
 
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
 )
+
+var applicationIdentityMu sync.Mutex
+
+func validateApplicationIdentity(app *model.Application) error {
+	if err := app.ValidateIdentity(); err != nil {
+		return err
+	}
+	if app.AppType == "vue" && app.VueRole == "sub" {
+		var count int64
+		if err := repository.DB.Model(&model.Application{}).Where("app_type = ? AND vue_role = ? AND app_code = ? AND id <> ?", "vue", "sub", app.AppCode, app.ID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return fmt.Errorf("应用编号 %s 已被占用", app.AppCode)
+		}
+	}
+	return nil
+}
 
 type ApplicationService struct {
 	repo *repository.ApplicationRepo
@@ -18,32 +38,34 @@ func NewApplicationService() *ApplicationService {
 }
 
 type CreateAppRequest struct {
-	AppName          string `json:"appName" binding:"required"`
-	AppType          string `json:"appType" binding:"required"`
-	GitRepo          string `json:"gitRepo"`
-	VueRole          string `json:"vueRole"`
-	IsGateway        bool   `json:"isGateway"`
-	AppCode          string `json:"appCode"`
-	AppDesc          string `json:"appDesc"`
-	NodePort         int    `json:"nodePort"`
-	IngressHost      string `json:"ingressHost"`
-	Ingresses        string `json:"ingresses"`
-	ConfigMapContent string `json:"configMapContent"`
-	EnvTags          string `json:"envTags"`
+	AdoptExistingDirectory bool   `json:"adoptExistingDirectory"`
+	AppName                string `json:"appName" binding:"required"`
+	AppType                string `json:"appType" binding:"required"`
+	GitRepo                string `json:"gitRepo"`
+	VueRole                string `json:"vueRole"`
+	IsGateway              bool   `json:"isGateway"`
+	AppCode                string `json:"appCode"`
+	AppDesc                string `json:"appDesc"`
+	NodePort               int    `json:"nodePort"`
+	IngressHost            string `json:"ingressHost"`
+	Ingresses              string `json:"ingresses"`
+	ConfigMapContent       string `json:"configMapContent"`
+	EnvTags                string `json:"envTags"`
 }
 
 type UpdateAppRequest struct {
-	AppType          string `json:"appType"`
-	GitRepo          string `json:"gitRepo"`
-	VueRole          string `json:"vueRole"`
-	IsGateway        *bool  `json:"isGateway"`
-	AppCode          string `json:"appCode"`
-	AppDesc          string `json:"appDesc"`
-	NodePort         *int   `json:"nodePort"`
-	IngressHost      string `json:"ingressHost"`
-	Ingresses        string `json:"ingresses"`
-	ConfigMapContent string `json:"configMapContent"`
-	EnvTags          string `json:"envTags"`
+	AdoptExistingDirectory *bool  `json:"adoptExistingDirectory"`
+	AppType                string `json:"appType"`
+	GitRepo                string `json:"gitRepo"`
+	VueRole                string `json:"vueRole"`
+	IsGateway              *bool  `json:"isGateway"`
+	AppCode                string `json:"appCode"`
+	AppDesc                string `json:"appDesc"`
+	NodePort               *int   `json:"nodePort"`
+	IngressHost            string `json:"ingressHost"`
+	Ingresses              string `json:"ingresses"`
+	ConfigMapContent       string `json:"configMapContent"`
+	EnvTags                string `json:"envTags"`
 }
 
 func (s *ApplicationService) List(params repository.AppListParams) ([]model.Application, int64, error) {
@@ -59,6 +81,8 @@ func (s *ApplicationService) GetByID(id uint) (*model.Application, error) {
 }
 
 func (s *ApplicationService) Create(req *CreateAppRequest) (*model.Application, error) {
+	applicationIdentityMu.Lock()
+	defer applicationIdentityMu.Unlock()
 	// Validate unique name
 	if s.repo.ExistsByName(req.AppName) {
 		return nil, errors.New("应用名称已存在")
@@ -74,8 +98,8 @@ func (s *ApplicationService) Create(req *CreateAppRequest) (*model.Application, 
 		if req.VueRole == "" {
 			return nil, errors.New("Vue 项目必须指定应用角色")
 		}
-		if req.VueRole != "main" && req.VueRole != "sub" && req.VueRole != "standalone" {
-			return nil, errors.New("应用角色必须是 main/sub/standalone")
+		if req.VueRole != "main" && req.VueRole != "sub" && req.VueRole != "standalone" && req.VueRole != "cdn" {
+			return nil, errors.New("应用角色必须是 main/sub/standalone/cdn")
 		}
 		if req.VueRole == "sub" && req.AppCode == "" {
 			return nil, errors.New("子应用必须指定应用编号")
@@ -89,23 +113,27 @@ func (s *ApplicationService) Create(req *CreateAppRequest) (*model.Application, 
 	}
 
 	app := &model.Application{
-		AppName:          req.AppName,
-		AppType:          req.AppType,
-		GitRepo:          req.GitRepo,
-		VueRole:          req.VueRole,
-		IsGateway:        isGateway,
-		AppCode:          req.AppCode,
-		AppDesc:          req.AppDesc,
-		NodePort:         req.NodePort,
-		IngressHost:      req.IngressHost,
-		Ingresses:        req.Ingresses,
-		ConfigMapContent: req.ConfigMapContent,
-		EnvTags:          req.EnvTags,
-		Enabled:          true,
+		AdoptExistingDirectory: req.AdoptExistingDirectory,
+		AppName:                req.AppName,
+		AppType:                req.AppType,
+		GitRepo:                req.GitRepo,
+		VueRole:                req.VueRole,
+		IsGateway:              isGateway,
+		AppCode:                req.AppCode,
+		AppDesc:                req.AppDesc,
+		NodePort:               req.NodePort,
+		IngressHost:            req.IngressHost,
+		Ingresses:              req.Ingresses,
+		ConfigMapContent:       req.ConfigMapContent,
+		EnvTags:                req.EnvTags,
+		Enabled:                true,
 	}
 
 	// Derive artifact name
 	app.ArtifactName = app.DeriveArtifactName()
+	if err := validateApplicationIdentity(app); err != nil {
+		return nil, err
+	}
 
 	if err := s.repo.Create(app); err != nil {
 		return nil, err
@@ -114,9 +142,15 @@ func (s *ApplicationService) Create(req *CreateAppRequest) (*model.Application, 
 }
 
 func (s *ApplicationService) Update(id uint, req *UpdateAppRequest) (*model.Application, error) {
+	applicationIdentityMu.Lock()
+	defer applicationIdentityMu.Unlock()
 	app, err := s.repo.FindByID(id)
 	if err != nil {
 		return nil, errors.New("应用不存在")
+	}
+	oldType, oldRole, oldCode := app.AppType, app.VueRole, app.AppCode
+	if req.AdoptExistingDirectory != nil {
+		app.AdoptExistingDirectory = *req.AdoptExistingDirectory
 	}
 
 	if req.AppType != "" {
@@ -125,8 +159,16 @@ func (s *ApplicationService) Update(id uint, req *UpdateAppRequest) (*model.Appl
 	if req.GitRepo != "" {
 		app.GitRepo = req.GitRepo
 	}
-	app.VueRole = req.VueRole
-	app.AppCode = req.AppCode
+	if req.VueRole != "" {
+		app.VueRole = req.VueRole
+	}
+	if app.AppType == "java" {
+		app.VueRole, app.AppCode = "", ""
+	} else if app.VueRole != "sub" {
+		app.AppCode = ""
+	} else if req.AppCode != "" {
+		app.AppCode = req.AppCode
+	}
 	if req.IsGateway != nil {
 		app.IsGateway = *req.IsGateway
 	}
@@ -147,6 +189,18 @@ func (s *ApplicationService) Update(id uint, req *UpdateAppRequest) (*model.Appl
 
 	// Re-derive artifact name
 	app.ArtifactName = app.DeriveArtifactName()
+	if err := validateApplicationIdentity(app); err != nil {
+		return nil, err
+	}
+	if oldType != app.AppType || oldRole != app.VueRole || oldCode != app.AppCode {
+		var count int64
+		if err := repository.DB.Model(&model.Pipeline{}).Where("application_id = ?", id).Count(&count).Error; err != nil {
+			return nil, err
+		}
+		if count > 0 {
+			return nil, errors.New("应用已有流水线历史，不能直接修改类型、角色或编号；请通过配置迁移处理")
+		}
+	}
 
 	if err := s.repo.Update(app); err != nil {
 		return nil, err

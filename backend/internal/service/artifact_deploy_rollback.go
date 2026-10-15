@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -11,6 +12,10 @@ import (
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
 )
+
+type guardedDeploymentRollbacker interface {
+	RollbackDeploymentIfCurrent(ctx context.Context, namespace, deploymentName, expected string, pipelineID uint, image string) error
+}
 
 type DeploymentRollbacker interface {
 	RollbackDeployment(ctx context.Context, namespace, deploymentName, image string) error
@@ -63,13 +68,25 @@ func RollbackDeployBatch(ctx context.Context, deployBatchNo string, rollbacker D
 			}
 			continue
 		}
+		if err := validateRollbackSequence(group); err != nil {
+			failures = append(failures, group.key+": "+err.Error())
+			if saveErr := markRollbackGroupFailed(group.records, err.Error(), now); saveErr != nil {
+				failures = append(failures, saveErr.Error())
+			}
+			continue
+		}
 		for _, record := range group.records {
 			if err := repository.DB.Model(&model.ArtifactDeployRecord{}).Where("id = ?", record.ID).Updates(map[string]any{"rollback_status": "running", "status": "rolling_back"}).Error; err != nil {
 				return err
 			}
 		}
 		targetCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		rollbackErr := rollbacker.RollbackDeployment(targetCtx, group.namespace, group.deploymentName, group.image)
+		var rollbackErr error
+		if guarded, ok := rollbacker.(guardedDeploymentRollbacker); ok {
+			rollbackErr = guarded.RollbackDeploymentIfCurrent(targetCtx, group.namespace, group.deploymentName, group.records[0].AfterImage, group.records[0].PipelineID, compatibleRollbackImage(group))
+		} else {
+			rollbackErr = rollbacker.RollbackDeployment(targetCtx, group.namespace, group.deploymentName, group.image)
+		}
 		cancel()
 		if err := rollbackErr; err != nil {
 			msg := "回滚 Deployment 镜像失败: " + err.Error()
@@ -87,6 +104,9 @@ func RollbackDeployBatch(ctx context.Context, deployBatchNo string, rollbacker D
 				"rolled_back_at":  &now,
 			}
 			version, warning := readOptionalVersion(ctx, reader, record)
+			if record.AppType == "vue" && compatibleRollbackImage(group) == group.image {
+				warning = mergeRecordError(warning, "恢复历史原镜像；该版本可能不包含已打开新页面所需资源，请核对旧客户端兼容性")
+			}
 			updates["restored_business_version_json"] = version
 			updates["version_warning"] = mergeRecordError(record.VersionWarning, warning)
 			if err := repository.DB.Model(&model.ArtifactDeployRecord{}).Where("id = ?", record.ID).Updates(updates).Error; err != nil {
@@ -170,4 +190,40 @@ func markRollbackGroupFailed(records []model.ArtifactDeployRecord, errMsg string
 		}
 	}
 	return nil
+}
+
+func validateRollbackSequence(group rollbackRecordGroup) error {
+	var maxID uint
+	expected := group.records[0].AfterImage
+	for _, record := range group.records {
+		if record.ID > maxID {
+			maxID = record.ID
+		}
+		if record.AfterImage != expected {
+			return fmt.Errorf("同一目标的发布记录不一致，拒绝回滚")
+		}
+	}
+	var count int64
+	if err := repository.DB.Model(&model.ArtifactDeployRecord{}).Where("namespace = ? AND deployment_name = ? AND id > ? AND (deploy_status IN ? OR status IN ?)", group.namespace, group.deploymentName, maxID, []string{"deploying", "success", "failed"}, []string{"deployed", "rolling_back", "rolled_back"}).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("该目标已有后续发布，拒绝回滚历史批次；请创建基于最新基线的定向回退")
+	}
+	return nil
+}
+
+func compatibleRollbackImage(group rollbackRecordGroup) string {
+	var pipeline model.Pipeline
+	if group.records[0].PipelineID == 0 || repository.DB.First(&pipeline, group.records[0].PipelineID).Error != nil {
+		return group.image
+	}
+	var b struct {
+		PreparationImage string `json:"preparationImage"`
+		AssetsVerified   bool   `json:"assetsVerified"`
+	}
+	if json.Unmarshal([]byte(pipeline.FrontendBaselineJSON), &b) == nil && b.AssetsVerified && b.PreparationImage != "" {
+		return b.PreparationImage
+	}
+	return group.image
 }

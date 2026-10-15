@@ -9,6 +9,9 @@ import (
 
 func sourceArtifactDirectory(pCtx *types.PipelineContext) (string, error) {
 	dir := strings.TrimSpace(pCtx.ArtifactDir)
+	if pCtx.AppType == "vue" && pCtx.VueRole == "cdn" {
+		dir = "cdn"
+	}
 	if dir == "" {
 		dir = "build/libs"
 		if pCtx.AppType == "vue" {

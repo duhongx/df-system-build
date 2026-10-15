@@ -1,0 +1,41 @@
+[
+  {
+    "template": "web-main",
+    "nginxSyntax": true,
+    "httpChecks": [
+      "/index.html",
+      "/missing.js",
+      "/missing.css",
+      "/missing.json",
+      "/apps/04/missing.js",
+      "/apps/04/deep/route",
+      "/apps/gymk/deep/route",
+      "/apps/42/deep/route"
+    ],
+    "passed": true
+  },
+  {
+    "template": "web-cdr",
+    "nginxSyntax": true,
+    "httpChecks": [
+      "/index.html",
+      "/missing.js",
+      "/missing.css",
+      "/missing.json",
+      "/apps/04/missing.js"
+    ],
+    "passed": true
+  },
+  {
+    "template": "web-opm",
+    "nginxSyntax": true,
+    "httpChecks": [
+      "/index.html",
+      "/missing.js",
+      "/missing.css",
+      "/missing.json",
+      "/apps/04/missing.js"
+    ],
+    "passed": true
+  }
+]

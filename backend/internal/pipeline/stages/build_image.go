@@ -2,18 +2,20 @@ package stages
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"df-build-server/internal/docker"
+	"df-build-server/internal/frontend"
 	"df-build-server/internal/k8s"
 	"df-build-server/internal/pipeline/types"
 	"df-build-server/internal/repository"
+	"df-build-server/internal/service"
 	"df-build-server/pkg/logger"
 	"gorm.io/gorm"
 )
@@ -34,23 +36,17 @@ func (s *BuildImageStage) Run(ctx context.Context, pCtx *types.PipelineContext) 
 	}
 
 	// Determine build strategy based on app type and vue role
-	if pCtx.AppType == "vue" && (pCtx.VueRole == "main" || pCtx.VueRole == "sub") {
+	if pCtx.AppType == "vue" {
 		return s.buildWebMainImage(ctx, pCtx, settingsRepo, registryURL)
 	}
 
-	// Java apps and standalone Vue apps use the standard flow
+	// Java applications retain the existing standard flow
 	return s.buildStandardImage(ctx, pCtx, settingsRepo, registryURL)
 }
 
-// buildStandardImage handles Java apps and standalone Vue apps
+// buildStandardImage handles Java applications only.
 func (s *BuildImageStage) buildStandardImage(ctx context.Context, pCtx *types.PipelineContext, settingsRepo *repository.SettingsRepo, registryURL string) (*types.StageResult, error) {
-	// Get Dockerfile template based on app type
-	dockerfileCode := ""
-	if pCtx.AppType == "java" {
-		dockerfileCode = "dockerfile-java"
-	} else {
-		dockerfileCode = "dockerfile-web"
-	}
+	dockerfileCode := "dockerfile-java"
 
 	configRepo := repository.NewConfigItemRepo()
 	configItem, err := configRepo.GetByCode(dockerfileCode)
@@ -79,7 +75,6 @@ func (s *BuildImageStage) buildStandardImage(ctx context.Context, pCtx *types.Pi
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("目标镜像: %s", imageName), "stdout")
 
 	// Prepare build context
-	sourceDir := pCtx.Workspace.SourceDir()
 	dockerDir := pCtx.Workspace.PipelineDir() + "/docker-build"
 	if err := os.MkdirAll(dockerDir, 0755); err != nil {
 		return &types.StageResult{ExitCode: 1, Error: err.Error()}, fmt.Errorf("创建镜像构建目录 %s 失败: %w", dockerDir, err)
@@ -95,34 +90,12 @@ func (s *BuildImageStage) buildStandardImage(ctx context.Context, pCtx *types.Pi
 	}
 	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("Dockerfile 已生成；模板=%s；路径=%s", dockerfileCode, filepath.Join(dockerDir, "Dockerfile")), "stdout")
 
-	// Copy artifact
-	var artifactSrc string
-	if pCtx.AppType == "vue" {
-		webLogger(pCtx).printf("本流水线更新独立应用=%s；制品=%s；目标 Deployment=%s；不合并到 web-main", pCtx.AppName, pCtx.ArtifactName, pCtx.AppName)
-		// For Vue apps: extract dist directory into docker build context
-		artifactSrc = filepath.Join(sourceDir, pCtx.ArtifactName)
-		distDir := filepath.Join(dockerDir, "dist")
-		if err := os.MkdirAll(distDir, 0755); err != nil {
-			return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
-		}
-		if err := webFileStep(webLogger(pCtx), "解压独立应用制品", artifactSrc, distDir, func() error { return extractWebZip(pCtx, artifactSrc, distDir) }); err != nil {
-			errMsg := fmt.Sprintf("解压制品失败: %v", err)
-			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-			return &types.StageResult{ExitCode: 1, Error: errMsg}, err
-		}
-		logWebTree(webLogger(pCtx), "独立应用制品解压完成", distDir)
-	} else {
-		// For Java apps: copy jar file
-		artifactDir, err := sourceArtifactDirectory(pCtx)
-		if err != nil {
-			return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
-		}
-		artifactSrc = filepath.Join(artifactDir, pCtx.ArtifactName)
-		if err := copyFile(artifactSrc, filepath.Join(dockerDir, pCtx.ArtifactName)); err != nil {
-			errMsg := fmt.Sprintf("复制制品失败: %v", err)
-			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
-			return &types.StageResult{ExitCode: 1, Error: errMsg}, err
-		}
+	artifactDir, err := sourceArtifactDirectory(pCtx)
+	if err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
+	}
+	if err := copyFile(filepath.Join(artifactDir, pCtx.ArtifactName), filepath.Join(dockerDir, pCtx.ArtifactName)); err != nil {
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
 	}
 
 	// Copy scripts for Java
@@ -140,6 +113,10 @@ func (s *BuildImageStage) buildStandardImage(ctx context.Context, pCtx *types.Pi
 // buildWebMainImage assembles the exact uploaded regions over a verified live baseline.
 func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.PipelineContext, settingsRepo *repository.SettingsRepo, registryURL string) (*types.StageResult, error) {
 	log := webLogger(pCtx)
+	target := pCtx.AppName
+	if pCtx.VueRole != "standalone" {
+		target = "web-main"
+	}
 	fail := func(err error) (*types.StageResult, error) {
 		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
 	}
@@ -155,7 +132,8 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 		}
 		pCtx.K8sNamespace = namespace
 	}
-	log.printf("本流水线合并 %d 个制品到共享 Deployment=%s/web-main", len(artifacts), namespace)
+	pCtx.Pipeline.K8sNamespace = namespace
+	log.printf("本流水线更新 %d 个制品；Deployment=%s/%s；角色=%s", len(artifacts), namespace, target, pCtx.VueRole)
 	dockerDir := filepath.Join(pCtx.Workspace.PipelineDir(), "docker-build")
 	if err := webFileStep(log, "清空本地镜像构建工作目录", "本地工作空间", dockerDir, func() error { return os.RemoveAll(dockerDir) }); err != nil {
 		return fail(err)
@@ -172,37 +150,105 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 	if err != nil {
 		return fail(err)
 	}
+	artifacts = plan.inputs
 	baselineDir := filepath.Join(inputDir, "baseline")
-	baseline, err := s.copyFromPod(ctx, pCtx, namespace, baselineDir)
+	baseline, err := s.copyFromPod(ctx, pCtx, namespace, baselineDir, target)
 	if err != nil {
 		return fail(err)
 	}
 	htmlDir := filepath.Join(dockerDir, "html")
+	var required uint64
+	if baseline.Exists {
+		files, err := frontend.Inventory(baselineDir)
+		if err != nil {
+			return fail(err)
+		}
+		for _, file := range files {
+			required += uint64(file.Size) * 3
+		}
+	}
+	for _, artifact := range artifacts {
+		n, err := frontend.ExpandedSize(filepath.Join(pCtx.Workspace.SourceDir(), artifact.FileName))
+		if err != nil {
+			return fail(err)
+		}
+		required += n * 3
+	}
+	if err := frontend.RequireSpace(pCtx.Workspace.PipelineDir(), required); err != nil {
+		return fail(err)
+	}
 	updated, preserved, err := plan.assemble(baselineDir, htmlDir, !baseline.Exists)
 	if err != nil {
 		return fail(err)
 	}
 	pCtx.OnLog(pCtx.PipelineID, 0, "本次替换: "+strings.Join(updated, "、"), "stdout")
 	pCtx.OnLog(pCtx.PipelineID, 0, "保持不变: "+strings.Join(preserved, "、"), "stdout")
-	imageName, err := buildImageName(pCtx, registryURL, "web-main", time.Now())
+	imageName, err := buildImageName(pCtx, registryURL, target, time.Now())
 	if err != nil {
 		return fail(err)
 	}
-	baseline.NewImage = imageName
-	encoded, err := json.Marshal(baseline)
+	baseline.NewImage, baseline.FinalTag = imageName, imageName
+	baseline.PipelineID = pCtx.PipelineID
+	if err := validateFrontendRegistrations(pCtx, artifacts, plan, baselineDir); err != nil {
+		return fail(err)
+	}
+	// Validate selected entries and every locally referenced script/style against
+	// the assembled site, including explicitly declared shared CDN dependencies.
+	for _, region := range plan.regions {
+		if region.Role != "cdn" {
+			if _, err := frontend.ValidateReferences(htmlDir, region.Path); err != nil {
+				return fail(fmt.Errorf("%s: %w", region.Path, err))
+			}
+		}
+	}
+	baseline.Regions = plan.regions
+	if err := service.CreateFrontendRegionRecords(pCtx.Pipeline, plan.regions); err != nil {
+		return fail(err)
+	}
+	baseline.FinalSHA256, err = hashWebTree(htmlDir)
 	if err != nil {
 		return fail(err)
 	}
-	if pCtx.Pipeline == nil {
-		return fail(fmt.Errorf("缺少前端流水线上下文"))
-	}
-	pCtx.Pipeline.FrontendBaselineJSON = string(encoded)
 	dockerfile := webMainDockerfile(registryURL)
 	if err := os.WriteFile(filepath.Join(dockerDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 		return fail(err)
 	}
-	log.printf("Dockerfile 已写入=%s；基础镜像=%s/base/nginx:v1；先清空镜像静态目录，再复制 html/ 到 /usr/share/nginx/html/", filepath.Join(dockerDir, "Dockerfile"), strings.TrimRight(registryURL, "/"))
+	if baseline.Exists {
+		prepDir := filepath.Join(pCtx.Workspace.PipelineDir(), "docker-assets")
+		if err := os.RemoveAll(prepDir); err != nil {
+			return fail(err)
+		}
+		if err := prepareResourceSite(baselineDir, htmlDir, filepath.Join(prepDir, "html")); err != nil {
+			return fail(err)
+		}
+		baseline.PreparationSHA256, err = hashWebTree(filepath.Join(prepDir, "html"))
+		if err != nil {
+			return fail(err)
+		}
+		if baseline.PreparationSHA256 != baseline.ContentSHA256 && baseline.PreparationSHA256 != baseline.FinalSHA256 {
+			if err := os.WriteFile(filepath.Join(prepDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
+				return fail(err)
+			}
+			baseline.PreparationImage = preparationImageName(imageName)
+			baseline.PreparationTag = baseline.PreparationImage
+			if _, err := s.execDockerBuild(ctx, pCtx, prepDir, baseline.PreparationImage); err != nil {
+				return fail(err)
+			}
+		}
+	}
+	if err := saveWebBaseline(pCtx, baseline); err != nil {
+		return fail(err)
+	}
 	return s.execDockerBuild(ctx, pCtx, dockerDir, imageName)
+}
+
+func preparationImageName(image string) string {
+	at := strings.LastIndex(image, ":")
+	tag := image[at+1:]
+	if len(tag) > 121 {
+		tag = strings.TrimLeft(tag[len(tag)-121:], ".-")
+	}
+	return image[:at+1] + tag + "-assets"
 }
 
 func webMainDockerfile(registryURL string) string {
@@ -218,6 +264,10 @@ func extractWebZip(pCtx *types.PipelineContext, zipPath, targetDir string, logs 
 	if len(logs) > 0 {
 		log = logs[0]
 	}
+	return extractFrontendZip(zipPath, targetDir, false, log)
+}
+
+func extractFrontendZip(zipPath, targetDir string, resourceOnly bool, log webLog) error {
 	parent := filepath.Dir(targetDir)
 	if err := os.MkdirAll(parent, 0755); err != nil {
 		return err
@@ -227,6 +277,13 @@ func extractWebZip(pCtx *types.PipelineContext, zipPath, targetDir string, logs 
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
+	expanded, err := frontend.ExpandedSize(zipPath)
+	if err != nil {
+		return err
+	}
+	if err := frontend.RequireSpace(parent, expanded*3); err != nil {
+		return err
+	}
 
 	log.printf("开始解压 ZIP；来源=%s；临时目录=%s", zipPath, tmpDir)
 	if err := Unzip(zipPath, tmpDir); err != nil {
@@ -236,11 +293,21 @@ func extractWebZip(pCtx *types.PipelineContext, zipPath, targetDir string, logs 
 	sourceDir := tmpDir
 	distDir := filepath.Join(tmpDir, "dist")
 	if info, err := os.Stat(distDir); err == nil && info.IsDir() {
+		if _, err := os.Lstat(filepath.Join(tmpDir, "index.html")); err == nil {
+			return fmt.Errorf("制品同时包含根入口和 dist 入口，无法确定应用范围")
+		}
+		entries, err := os.ReadDir(tmpDir)
+		if err != nil {
+			return err
+		}
+		if len(entries) != 1 {
+			return fmt.Errorf("dist 包外包含额外内容，制品目录存在歧义")
+		}
 		sourceDir = distDir
 	}
 
 	log.printf("ZIP 解压完成；识别站点根目录=%s；将其内容写入=%s", sourceDir, targetDir)
-	if err := requireWebIndex(sourceDir); err != nil {
+	if err := requireWebIndex(sourceDir); err != nil && !resourceOnly {
 		return err
 	}
 	nextDir, err := os.MkdirTemp(parent, ".webcopy-*")
@@ -402,10 +469,21 @@ func renderTemplate(content string, vars map[string]string) string {
 }
 
 // copyFile copies a file from src to dst
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
+func copyFile(src, dst string) (resultErr error) {
+	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("读取源文件失败: %w", err)
 	}
-	return os.WriteFile(dst, data, 0644)
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := out.Close(); resultErr == nil {
+			resultErr = err
+		}
+	}()
+	_, err = io.Copy(out, in)
+	return err
 }

@@ -18,6 +18,9 @@ type RuntimeVersionReader interface {
 
 // Version metadata is informational and never gates deployment or rollback.
 func readOptionalVersion(ctx context.Context, reader RuntimeVersionReader, record model.ArtifactDeployRecord) (string, string) {
+	if record.AppType == "vue" && record.VueRole == "cdn" {
+		return "", ""
+	}
 	if reader == nil {
 		return "", ""
 	}
@@ -57,7 +60,7 @@ func CaptureBeforeDeployImages(ctx context.Context, pipelineID uint, deploymentN
 	return updateDeployBatchCountersByRecords(records)
 }
 
-func CaptureAfterDeployVersions(ctx context.Context, pipelineID uint, deploymentName, afterImage string, reader RuntimeVersionReader) error {
+func CaptureAfterDeployVersions(ctx context.Context, pipelineID uint, deploymentName, afterImage string, reader RuntimeVersionReader, technicalVerified ...bool) error {
 	records, err := deployRecordsForPipelineDeployment(pipelineID, deploymentName)
 	if err != nil {
 		return err
@@ -70,6 +73,9 @@ func CaptureAfterDeployVersions(ctx context.Context, pipelineID uint, deployment
 			"status": "deployed", "verify_status": "skipped",
 			"after_business_version_json": version,
 			"version_warning":             mergeRecordError(record.VersionWarning, warning),
+		}
+		if len(technicalVerified) > 0 && technicalVerified[0] {
+			updates["verify_status"] = "success"
 		}
 		if err := repository.DB.Model(&model.ArtifactDeployRecord{}).Where("id = ?", record.ID).Updates(updates).Error; err != nil {
 			return err
@@ -89,6 +95,17 @@ func RecordDeploymentProgress(pipelineID uint, phase, image string) error {
 		if phase == "completed" || phase == "verifying" {
 			updates["deploy_status"] = "success"
 			updates["verify_status"] = "skipped"
+			var p model.Pipeline
+			if err := tx.Select("frontend_baseline_json").First(&p, pipelineID).Error; err != nil {
+				return err
+			}
+			if p.FrontendBaselineJSON != "" {
+				if phase == "completed" {
+					updates["verify_status"] = "success"
+				} else {
+					updates["verify_status"] = "running"
+				}
+			}
 		}
 		return tx.Model(&model.ArtifactDeployRecord{}).Where("pipeline_id = ?", pipelineID).Updates(updates).Error
 	})
@@ -133,7 +150,9 @@ func MarkPipelineFailed(pipelineID uint, errMsg string, deploymentProgress ...st
 		if completed {
 			updates["build_status"] = "success"
 			updates["deploy_status"] = "success"
-			updates["verify_status"] = "skipped"
+			if record.VerifyStatus != "success" {
+				updates["verify_status"] = "skipped"
+			}
 		} else if record.DeployStatus == "deploying" {
 			updates["build_status"] = "success"
 			updates["deploy_status"] = "failed"

@@ -56,6 +56,10 @@ func AutoMigrate() error {
 	if err != nil {
 		return err
 	}
+	// Include disabled applications: disabling does not release directory ownership.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_sub_code ON applications (app_code) WHERE app_type = 'vue' AND vue_role = 'sub' AND app_code <> ''`).Error; err != nil {
+		return err
+	}
 
 	// Identity applies to active release files; deleted revisions retain their audit history.
 	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sql_change_files_active_identity ON sql_change_files (version, file_name, schema_name) WHERE is_deleted = false AND file_name <> ''`).Error; err != nil {

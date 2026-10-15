@@ -97,6 +97,9 @@ func TestBuildContextRestoresPersistedImageName(t *testing.T) {
 
 func TestCreateAndEnqueueUsesEnvironmentNamespaceDespiteLegacyTaskOverride(t *testing.T) {
 	setupSchedulerTestDB(t)
+	if err := repository.NewSettingsRepo().Set("customer_env", "本地"); err != nil {
+		t.Fatal(err)
+	}
 	Init()
 	DefaultScheduler.SetConcurrency(0)
 

@@ -438,7 +438,7 @@ func (s *BuildScheduler) buildContext(p *model.Pipeline) *types.PipelineContext 
 			logger.Log.Errorf("Pipeline %d frontend artifact manifest is invalid", p.ID)
 			return nil
 		}
-		vueRole, appCode = "sub", artifacts[0].AppCode
+		vueRole, appCode = artifacts[0].Role, artifacts[0].AppCode
 		for _, artifact := range artifacts {
 			if artifact.Role == "main" {
 				vueRole, appCode = "main", ""

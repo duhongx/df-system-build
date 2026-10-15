@@ -165,6 +165,12 @@ function statusLabel(status: string) {
 
 const deploymentRecordError = computed(() => !!task.value && hasCompletedDeploymentError(task.value))
 
+const frontendPhase = computed(() => ({
+  preparing: '发布预检', assets_submitting: '提交资源镜像', assets_submitted: '资源镜像滚动中',
+  assets_ready: '资源已就绪', submitting: '提交正式镜像', submitted: '正式镜像滚动中',
+  verifying: '验证全部副本', completed: '技术验证完成',
+} as Record<string, string>)[task.value?.deploymentProgress || ''] || '镜像准备')
+
 const activeStage = computed(() => {
   if (!task.value) return null
   return (task.value.stages || []).find(s => s.id === activeStageId.value) || null
@@ -209,6 +215,21 @@ const activeStage = computed(() => {
           <div class="stage-connector" v-if="idx < (task.stages?.length || 0) - 1" :style="{ background: stageStatusColor(stage.status) }"></div>
         </div>
       </div>
+
+      <el-collapse v-if="task.frontendRelease" style="margin-bottom: 12px; background: var(--el-bg-color); padding: 0 16px;">
+        <el-collapse-item name="scope">
+          <template #title>
+            <span>{{ task.frontendRelease.namespace }}/{{ task.frontendRelease.deploymentName }}</span>
+            <el-tag size="small" style="margin-left: 12px;">{{ frontendPhase }}</el-tag>
+          </template>
+          <el-table :data="task.frontendRelease.regions" size="small">
+            <el-table-column prop="appName" label="应用" min-width="180" />
+            <el-table-column prop="path" label="更新目录" min-width="160" />
+            <el-table-column label="本次文件" width="100"><template #default="{ row }">{{ Object.keys(row.current || {}).length }}</template></el-table-column>
+            <el-table-column label="保留旧文件" width="110"><template #default="{ row }">{{ Object.keys(row.retained || {}).length }}</template></el-table-column>
+          </el-table>
+        </el-collapse-item>
+      </el-collapse>
 
       <div class="log-panel">
         <div class="log-panel-header">

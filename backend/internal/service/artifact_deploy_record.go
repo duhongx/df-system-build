@@ -126,6 +126,9 @@ func CreateArtifactDeployRecords(input ArtifactDeployRecordInput) error {
 }
 
 func DeploymentNameForApplication(app model.Application) string {
+	if app.SharedFrontend() {
+		return "web-main"
+	}
 	if app.AppType == "vue" && app.VueRole == "sub" {
 		return "web-main"
 	}

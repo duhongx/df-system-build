@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"strconv"
 
 	"df-build-server/internal/middleware"
@@ -69,6 +70,18 @@ func (h *PipelineHandler) Get(c *gin.Context) {
 	if err != nil {
 		response.Fail(c, 10302, "流水线不存在")
 		return
+	}
+	if p.FrontendBaselineJSON != "" {
+		var baseline map[string]json.RawMessage
+		if json.Unmarshal([]byte(p.FrontendBaselineJSON), &baseline) == nil {
+			public := map[string]json.RawMessage{}
+			for _, key := range []string{"deploymentName", "namespace", "image", "newImage", "preparationImage", "assetsVerified", "contentSha256", "finalSha256", "regions"} {
+				if value, ok := baseline[key]; ok {
+					public[key] = value
+				}
+			}
+			p.FrontendRelease, _ = json.Marshal(public)
+		}
 	}
 	response.OK(c, p)
 }

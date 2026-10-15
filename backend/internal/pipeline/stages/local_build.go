@@ -21,6 +21,10 @@ func (s *LocalBuildStage) Run(ctx context.Context, pCtx *types.PipelineContext) 
 	if err := repository.RequireSourceBuild(); err != nil {
 		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
 	}
+	if pCtx.AppType == "vue" && pCtx.VueRole == "cdn" {
+		pCtx.OnLog(pCtx.PipelineID, 0, "公共资源任务使用仓库 cdn 目录，跳过 Vue 编译", "stdout")
+		return &types.StageResult{}, nil
+	}
 	if pCtx.BuildConfig == nil || pCtx.BuildConfig.Status != "online" {
 		err := fmt.Errorf("编译配置不可用，请配置本机编译工具和命令后启用")
 		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err

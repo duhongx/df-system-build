@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -131,6 +132,22 @@ func (c *Client) BuildImageWithAuth(ctx context.Context, contextDir string, auth
 // PushImage pushes a Docker image to a registry
 func (c *Client) PushImage(ctx context.Context, imageName string) (*CmdReader, error) {
 	return c.PushImageWithAuth(ctx, imageName, "e30=")
+}
+
+func (c *Client) ResolveImageDigest(ctx context.Context, imageName, auth string) (string, error) {
+	remote, err := c.cli.DistributionInspect(ctx, imageName, auth)
+	if err != nil {
+		return "", err
+	}
+	digest := remote.Descriptor.Digest.String()
+	if !strings.HasPrefix(digest, "sha256:") || len(digest) != 71 {
+		return "", fmt.Errorf("仓库返回无效镜像 digest")
+	}
+	repo := strings.Split(imageName, "@")[0]
+	if colon, slash := strings.LastIndex(repo, ":"), strings.LastIndex(repo, "/"); colon > slash {
+		repo = repo[:colon]
+	}
+	return repo + "@" + digest, nil
 }
 
 // PushImageWithAuth pushes a Docker image with explicit auth

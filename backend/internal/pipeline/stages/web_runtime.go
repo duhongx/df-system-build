@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"df-build-server/internal/frontend"
 	"df-build-server/internal/k8s"
 	"df-build-server/internal/pipeline/types"
 	appsv1 "k8s.io/api/apps/v1"
@@ -21,6 +22,20 @@ import (
 )
 
 type webBaseline struct {
+	PipelineID         uint              `json:"pipelineId,omitempty"`
+	PreparedGeneration int64             `json:"preparedGeneration,omitempty"`
+	AssetsVerified     bool              `json:"assetsVerified,omitempty"`
+	FinalGeneration    int64             `json:"finalGeneration,omitempty"`
+	DeploymentName     string            `json:"deploymentName,omitempty"`
+	ResourceVersion    string            `json:"resourceVersion,omitempty"`
+	PreparationImage   string            `json:"preparationImage,omitempty"`
+	PreparationTag     string            `json:"preparationTag,omitempty"`
+	FinalTag           string            `json:"finalTag,omitempty"`
+	PreparationSHA256  string            `json:"preparationSha256,omitempty"`
+	FinalSHA256        string            `json:"finalSha256,omitempty"`
+	Regions            []frontend.Region `json:"regions,omitempty"`
+	ConfigMaps         map[string]string `json:"configMaps,omitempty"`
+
 	Exists        bool   `json:"exists"`
 	Cluster       string `json:"cluster"`
 	Namespace     string `json:"namespace"`
@@ -31,8 +46,12 @@ type webBaseline struct {
 	ContentSHA256 string `json:"contentSha256"`
 }
 
-func readWebDeployment(ctx context.Context, cs kubernetes.Interface, namespace string) (*appsv1.Deployment, error) {
-	dep, err := cs.AppsV1().Deployments(namespace).Get(ctx, "web-main", metav1.GetOptions{})
+func readWebDeployment(ctx context.Context, cs kubernetes.Interface, namespace string, targets ...string) (*appsv1.Deployment, error) {
+	target := "web-main"
+	if len(targets) > 0 {
+		target = targets[0]
+	}
+	dep, err := cs.AppsV1().Deployments(namespace).Get(ctx, target, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil
 	}
@@ -48,7 +67,7 @@ func readWebDeployment(ctx context.Context, cs kubernetes.Interface, namespace s
 func webContainerImage(dep *appsv1.Deployment) string {
 	if dep != nil {
 		for _, c := range dep.Spec.Template.Spec.Containers {
-			if c.Name == "web-main" {
+			if c.Name == frontendDeploymentName(dep) {
 				return c.Image
 			}
 		}
@@ -56,9 +75,13 @@ func webContainerImage(dep *appsv1.Deployment) string {
 	return ""
 }
 
-func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineContext, namespace, destination string) (*webBaseline, error) {
+func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineContext, namespace, destination string, targets ...string) (*webBaseline, error) {
+	target := "web-main"
+	if len(targets) > 0 {
+		target = targets[0]
+	}
 	log := webLogger(pCtx)
-	log.printf("开始读取运行中的前端；命名空间=%s；Deployment=web-main；导出目标=%s", namespace, destination)
+	log.printf("开始读取运行中的前端；命名空间=%s；Deployment=%s；导出目标=%s", namespace, target, destination)
 	cs, err := k8s.GetClient()
 	if err != nil {
 		return nil, err
@@ -67,17 +90,18 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 	if err != nil {
 		return nil, err
 	}
-	dep, err := readWebDeployment(ctx, cs, namespace)
+	dep, err := readWebDeployment(ctx, cs, namespace, target)
 	if err != nil {
 		return nil, err
 	}
-	baseline := &webBaseline{Exists: dep != nil, Cluster: cfg.Host, Namespace: namespace}
+	baseline := &webBaseline{Exists: dep != nil, Cluster: cfg.Host, Namespace: namespace, DeploymentName: target, ConfigMaps: map[string]string{}}
 	if dep == nil {
-		log.printf("Deployment=%s/web-main 不存在，本次无线上目录可复制，按首次部署校验制品", namespace)
+		log.printf("Deployment=%s/%s 不存在，按首次部署校验制品", namespace, target)
 		return baseline, nil
 	}
+	baseline.ResourceVersion = dep.ResourceVersion
 	baseline.UID, baseline.Generation, baseline.Image = string(dep.UID), dep.Generation, webContainerImage(dep)
-	log.printf("当前 Deployment=%s/web-main；UID=%s；generation=%d；镜像=%s", namespace, baseline.UID, baseline.Generation, baseline.Image)
+	log.printf("当前 Deployment=%s/%s；UID=%s；generation=%d；镜像=%s", namespace, target, baseline.UID, baseline.Generation, baseline.Image)
 	replicas := int32(1)
 	if dep.Spec.Replicas != nil {
 		replicas = *dep.Spec.Replicas
@@ -88,38 +112,24 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 	if dep.Spec.Selector == nil {
 		return nil, fmt.Errorf("web-main 缺少 Pod selector")
 	}
-	selector, err := metav1.LabelSelectorAsSelector(dep.Spec.Selector)
+	owned, err := currentDeploymentPods(ctx, cs, namespace, dep)
 	if err != nil {
 		return nil, err
 	}
-	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
-	if err != nil {
-		return nil, fmt.Errorf("读取 web-main Pod 失败: %w", err)
-	}
-	// A label match alone does not establish ownership. Resolve ReplicaSets too.
-	sets, err := cs.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
-	if err != nil {
-		return nil, fmt.Errorf("读取 web-main ReplicaSet 失败: %w", err)
-	}
-	owners := map[string]bool{}
-	for _, set := range sets.Items {
-		owner := metav1.GetControllerOf(&set)
-		if owner != nil && owner.Kind == "Deployment" && owner.UID == dep.UID {
-			owners[string(set.UID)] = true
-		}
-	}
-	var owned []corev1.Pod
-	for _, pod := range pods.Items {
-		owner := metav1.GetControllerOf(&pod)
-		if owner != nil && owner.Kind == "ReplicaSet" && owners[string(owner.UID)] {
-			owned = append(owned, pod)
+	for _, volume := range dep.Spec.Template.Spec.Volumes {
+		if volume.ConfigMap != nil {
+			cm, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, volume.ConfigMap.Name, metav1.GetOptions{})
+			if err != nil {
+				return nil, err
+			}
+			baseline.ConfigMaps[cm.Name] = cm.ResourceVersion
 		}
 	}
 	pod, ok := selectReadyPodForDeployment(dep, owned)
 	if !ok {
 		return nil, fmt.Errorf("web-main 没有运行当前镜像且容器 Ready 的 Pod，停止更新")
 	}
-	log.printf("开始复制运行中的 web-main；Pod=%s/%s；容器=web-main；来源=/usr/share/nginx/html；本地目标=%s；命令=tar cf - -C /usr/share/nginx/html .", namespace, pod.Name, destination)
+	log.printf("开始复制运行中的前端；Pod=%s/%s；容器=%s；来源=/usr/share/nginx/html；本地目标=%s", namespace, pod.Name, target, destination)
 	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
 		return nil, err
 	}
@@ -129,7 +139,7 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 	}
 	defer os.RemoveAll(temporary)
 	request := cs.CoreV1().RESTClient().Post().Resource("pods").Name(pod.Name).Namespace(namespace).SubResource("exec").
-		Param("container", "web-main").Param("command", "tar").Param("command", "cf").Param("command", "-").
+		Param("container", target).Param("command", "tar").Param("command", "cf").Param("command", "-").
 		Param("command", "-C").Param("command", "/usr/share/nginx/html").Param("command", ".").Param("stdout", "true").Param("stderr", "true")
 	executor, err := remotecommand.NewSPDYExecutor(cfg, "POST", request.URL())
 	if err != nil {
@@ -178,7 +188,39 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 	if err := os.Rename(temporary, destination); err != nil {
 		return nil, err
 	}
-	logWebTree(log, "线上前端目录复制完成，主应用和子应用入口校验通过", destination)
+	baseline.ContentSHA256, err = hashWebTree(destination)
+	if err != nil {
+		return nil, err
+	}
+	after, err := readWebDeployment(ctx, cs, namespace, target)
+	if err != nil {
+		return nil, err
+	}
+	if err := baseline.validate(after, cfg.Host, namespace); err != nil {
+		return nil, fmt.Errorf("导出期间基线改变: %w", err)
+	}
+	currentPod, err := cs.CoreV1().Pods(namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if currentPod.UID != pod.UID {
+		return nil, fmt.Errorf("导出期间 Pod 已替换")
+	}
+	if _, ok := selectReadyPodForDeployment(after, []corev1.Pod{*currentPod}); !ok {
+		return nil, fmt.Errorf("导出期间 Pod 已失去 Ready 或镜像改变")
+	}
+	for _, volume := range dep.Spec.Template.Spec.Volumes {
+		if volume.ConfigMap != nil {
+			cm, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, volume.ConfigMap.Name, metav1.GetOptions{})
+			if err != nil {
+				return nil, err
+			}
+			if baseline.ConfigMaps[cm.Name] != cm.ResourceVersion {
+				return nil, fmt.Errorf("导出期间 ConfigMap %s 已变化", cm.Name)
+			}
+		}
+	}
+	logWebTree(log, "线上前端目录复制完成，基线内容摘要已固定", destination)
 	return baseline, nil
 }
 
@@ -206,7 +248,7 @@ func selectReadyPodForDeployment(dep *appsv1.Deployment, pods []corev1.Pod) (*co
 		}
 		specMatches := false
 		for _, c := range pod.Spec.Containers {
-			if c.Name == "web-main" && c.Image == webContainerImage(dep) {
+			if c.Name == frontendDeploymentName(dep) && c.Image == webContainerImage(dep) {
 				specMatches = true
 			}
 		}
@@ -214,7 +256,7 @@ func selectReadyPodForDeployment(dep *appsv1.Deployment, pods []corev1.Pod) (*co
 			continue
 		}
 		for _, c := range pod.Status.ContainerStatuses {
-			if c.Name == "web-main" && c.Ready && c.Image == webContainerImage(dep) {
+			if c.Name == frontendDeploymentName(dep) && c.Ready && containerStatusMatches(c, webContainerImage(dep)) {
 				return pod, true
 			}
 		}
@@ -243,7 +285,14 @@ func (b *webBaseline) validate(dep *appsv1.Deployment, cluster, namespace string
 	if b.Exists != (dep != nil) {
 		return fmt.Errorf("web-main 已创建或删除，原构建基线已失效，请重新构建")
 	}
-	if dep != nil && (string(dep.UID) != b.UID || dep.Generation != b.Generation || webContainerImage(dep) != b.Image) {
+	expectedGeneration, expectedImage := b.Generation, b.Image
+	if b.PreparedGeneration > 0 {
+		expectedGeneration, expectedImage = b.PreparedGeneration, b.PreparationImage
+		if dep == nil || dep.Annotations["df-build-system/pipeline"] != fmt.Sprint(b.PipelineID) {
+			return fmt.Errorf("资源准备阶段的发布归属已变化")
+		}
+	}
+	if dep != nil && (string(dep.UID) != b.UID || dep.Generation != expectedGeneration || webContainerImage(dep) != expectedImage) {
 		return fmt.Errorf("web-main 已发生更新，当前镜像基于旧版本构建，请重新构建后再部署")
 	}
 	return nil
@@ -258,9 +307,52 @@ func validateWebBaseline(ctx context.Context, cs kubernetes.Interface, pCtx *typ
 	if err != nil {
 		return err
 	}
-	dep, err := readWebDeployment(ctx, cs, namespace)
+	dep, err := readWebDeployment(ctx, cs, namespace, baseline.target())
 	if err != nil {
 		return err
 	}
-	return baseline.validate(dep, cfg.Host, namespace)
+	if err := baseline.validate(dep, cfg.Host, namespace); err != nil {
+		return err
+	}
+	for name, version := range baseline.ConfigMaps {
+		cm, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if cm.ResourceVersion != version {
+			return fmt.Errorf("ConfigMap %s 已改变，请重新构建", name)
+		}
+	}
+	return nil
+}
+
+func frontendDeploymentName(dep *appsv1.Deployment) string {
+	if dep == nil || dep.Name == "" {
+		return "web-main"
+	}
+	return dep.Name
+}
+func (b *webBaseline) target() string {
+	if b.DeploymentName == "" {
+		return "web-main"
+	}
+	return b.DeploymentName
+}
+func saveWebBaseline(pCtx *types.PipelineContext, b *webBaseline) error {
+	if pCtx.Pipeline == nil {
+		return fmt.Errorf("缺少前端流水线上下文")
+	}
+	data, err := json.Marshal(b)
+	if err != nil {
+		return err
+	}
+	pCtx.Pipeline.FrontendBaselineJSON = string(data)
+	return nil
+}
+
+func containerStatusMatches(c corev1.ContainerStatus, image string) bool {
+	if at := strings.Index(image, "@sha256:"); at >= 0 {
+		return strings.Contains(c.ImageID, image[at+1:])
+	}
+	return c.Image == image
 }

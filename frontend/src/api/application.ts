@@ -9,8 +9,9 @@ export interface Application {
   id: number
   appName: string
   appType: 'java' | 'vue'
-  vueRole?: 'main' | 'sub' | 'standalone' | ''
+  vueRole?: 'main' | 'sub' | 'standalone' | 'cdn' | ''
   isGateway?: boolean
+  adoptExistingDirectory?: boolean
   appCode?: string
   appDesc?: string
   gitRepo: string
@@ -55,6 +56,7 @@ export interface CreateAppRequest {
   gitRepo: string
   vueRole?: string
   isGateway?: boolean
+  adoptExistingDirectory?: boolean
   appCode?: string
   appDesc?: string
   nodePort?: number
