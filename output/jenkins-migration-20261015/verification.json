@@ -1,0 +1,22 @@
+{
+  "sourceJobs": 101,
+  "nativeTaskMappings": 97,
+  "newTasks": 96,
+  "reusedTasks": 1,
+  "totalPlatformTasks": 98,
+  "readyMigratedTasks": 94,
+  "disabledMigratedTasks": 3,
+  "archivedSpecialTasks": 4,
+  "newApplications": 4,
+  "totalPlatformApplications": 108,
+  "sourceBranchRefsVerified": 95,
+  "originalTaskHistoryPreserved": true,
+  "jenkinsConfigsUnchanged": true,
+  "jenkinsPidUnchanged": true,
+  "pipelineCountUnchanged": true,
+  "clusterImagesUnchanged": true,
+  "settingsUnchanged": true,
+  "imageOnlyTasks": 1,
+  "serviceCommit": "f0fd4c3",
+  "migrationToolCommit": "6035648"
+}
