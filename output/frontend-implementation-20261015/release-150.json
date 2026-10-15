@@ -1,0 +1,36 @@
+{
+  "commit": "5d0604e",
+  "deployed": true,
+  "deployed_at": "2026-10-15T11:57:00.937873",
+  "health": {
+    "database": "healthy",
+    "service": "df-build-server",
+    "status": "ok"
+  },
+  "backup": "/opt/df-build-server/backups/devops-5d0604e-20261015T115650",
+  "production_frontends_unchanged": true,
+  "jenkins_state": "active",
+  "jenkins_enabled": "disabled",
+  "staticFiles": [
+    {
+      "path": "index.html",
+      "status": 200,
+      "sha256": "1da92fa7e4ad48e6d0f6cbf04f194e754123f15e6f2de4d02ec5e3a72c82639a"
+    },
+    {
+      "path": "assets/AppListView-ByqiEwRf.js",
+      "status": 200,
+      "sha256": "56b307cbdd0989b141fc99a55b2c4fca982261c054efdda4e31a179a2709fe22"
+    },
+    {
+      "path": "assets/PipelineDetailView-Rlo979I6.js",
+      "status": 200,
+      "sha256": "f6f9514367722ee0c08f44d568126b5ed0440318ab3673636ff90934f436af7c"
+    }
+  ],
+  "databaseMigration": {
+    "migration": 6,
+    "subCodeIndex": 1,
+    "adoptedSubDirectories": 28
+  }
+}
