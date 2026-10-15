@@ -361,9 +361,10 @@ onMounted(() => {
 
 <template>
   <div class="settings-environment" v-loading="loading">
+    <div class="environment-grid">
 
     <!-- 镜像仓库设置 -->
-    <el-card shadow="never" style="margin-bottom: 20px;">
+    <el-card class="environment-card" shadow="never">
       <template #header>
         <div class="section-header">
           <span class="section-title">镜像仓库设置</span>
@@ -375,7 +376,7 @@ onMounted(() => {
           >保存并测试</el-button>
         </div>
       </template>
-      <el-form label-width="160px">
+      <el-form label-width="128px">
         <el-form-item label="仓库地址">
           <el-input v-model="form.docker_registry_url" placeholder="如 192.168.199.102:8888" />
         </el-form-item>
@@ -392,7 +393,7 @@ onMounted(() => {
     </el-card>
 
     <!-- K8s 设置 -->
-    <el-card shadow="never" style="margin-bottom: 20px;">
+    <el-card class="environment-card" shadow="never">
       <template #header>
         <div class="section-header">
           <span class="section-title">K8s 设置</span>
@@ -404,7 +405,7 @@ onMounted(() => {
           >保存并测试</el-button>
         </div>
       </template>
-      <el-form label-width="160px">
+      <el-form label-width="128px">
         <el-form-item label="配置方式">
           <el-radio-group v-model="k8sInputMode">
             <el-radio value="path">服务器路径</el-radio>
@@ -412,8 +413,8 @@ onMounted(() => {
           </el-radio-group>
         </el-form-item>
         <el-form-item label="kubeconfig 路径" v-if="k8sInputMode === 'path'">
-          <div style="display: flex; gap: 8px; width: 100%;">
-            <el-input v-model="form.k8s_kubeconfig_path" placeholder="/root/.kube/config" style="flex: 1;" />
+          <div class="field-actions">
+            <el-input v-model="form.k8s_kubeconfig_path" placeholder="/root/.kube/config" />
             <el-button :loading="k8sReadingConfig" @click="handleReadKubeconfig">读取</el-button>
           </div>
         </el-form-item>
@@ -427,8 +428,8 @@ onMounted(() => {
           />
         </el-form-item>
         <el-form-item label="命名空间">
-          <div style="display: flex; gap: 8px; width: 100%;">
-            <el-select v-model="form.k8s_namespace" filterable allow-create style="flex: 1;" placeholder="选择或输入命名空间">
+          <div class="field-actions">
+            <el-select v-model="form.k8s_namespace" filterable allow-create placeholder="选择或输入命名空间">
               <el-option v-for="ns in k8sNamespaces" :key="ns" :label="ns" :value="ns" />
             </el-select>
             <el-button :loading="k8sLoadingNs" @click="handleLoadNamespaces">获取命名空间</el-button>
@@ -438,7 +439,7 @@ onMounted(() => {
     </el-card>
 
     <!-- Nacos -->
-    <el-card shadow="never" style="margin-bottom: 20px;">
+    <el-card class="environment-card" shadow="never">
       <template #header>
         <div class="section-header">
           <span class="section-title">Nacos</span>
@@ -450,7 +451,7 @@ onMounted(() => {
           >保存并测试</el-button>
         </div>
       </template>
-      <el-form label-width="160px">
+      <el-form label-width="128px">
         <el-form-item label="地址">
           <el-input v-model="form.nacos_url" placeholder="如 http://192.168.199.101:8848/nacos" />
         </el-form-item>
@@ -464,7 +465,7 @@ onMounted(() => {
     </el-card>
 
     <!-- SkyWalking -->
-    <el-card shadow="never" style="margin-bottom: 20px;">
+    <el-card class="environment-card" shadow="never">
       <template #header>
         <div class="section-header">
           <span class="section-title">SkyWalking</span>
@@ -476,7 +477,7 @@ onMounted(() => {
           >保存并测试</el-button>
         </div>
       </template>
-      <el-form label-width="160px">
+      <el-form label-width="128px">
         <el-form-item label="OAP 地址">
           <el-input v-model="form.skywalking_oap_url" placeholder="192.168.1.150:11800" />
         </el-form-item>
@@ -487,7 +488,7 @@ onMounted(() => {
     </el-card>
 
     <!-- 软件包下载服务器 -->
-    <el-card shadow="never" style="margin-bottom: 20px;">
+    <el-card class="environment-card" shadow="never">
       <template #header>
         <div class="section-header">
           <span class="section-title">软件包下载服务器</span>
@@ -499,7 +500,7 @@ onMounted(() => {
           >保存并测试</el-button>
         </div>
       </template>
-      <el-form label-width="160px">
+      <el-form label-width="128px">
         <el-form-item label="服务器地址">
           <el-input v-model="form.package_download_host" placeholder="如 192.168.199.100 或 192.168.199.100:22" />
         </el-form-item>
@@ -524,7 +525,7 @@ onMounted(() => {
     </el-card>
 
     <!-- PostgreSQL -->
-    <el-card shadow="never" style="margin-bottom: 20px;">
+    <el-card class="environment-card" shadow="never">
       <template #header>
         <div class="section-header">
           <span class="section-title">PostgreSQL</span>
@@ -536,7 +537,7 @@ onMounted(() => {
           >保存并测试</el-button>
         </div>
       </template>
-      <el-form label-width="160px">
+      <el-form label-width="128px">
         <el-form-item label="主机">
           <el-input v-model="form.postgresql_host" placeholder="如 192.168.1.100" />
         </el-form-item>
@@ -556,7 +557,7 @@ onMounted(() => {
           </el-radio-group>
         </el-form-item>
         <el-form-item v-if="form.postgresql_password_mode === 'shared'" label="业务密码">
-          <div style="display: flex; gap: 12px; width: 100%;">
+          <div class="field-actions">
             <el-input v-model="form.postgresql_password" type="password" show-password :disabled="!!pgAccountBusy" placeholder="df_ 业务账号共用的密码" />
             <el-button type="primary" :loading="pgAccountBusy === '__shared__'" :disabled="!!pgAccountBusy || !form.postgresql_password" @click="savePostgreSQLSharedPassword">保存并应用全部账号</el-button>
           </div>
@@ -567,6 +568,8 @@ onMounted(() => {
         </el-form-item>
       </el-form>
     </el-card>
+
+    </div>
 
     <el-dialog v-model="pgPasswordDialog" title="业务用户密码配置" width="1000px" style="max-width: calc(100vw - 48px);" :close-on-click-modal="!pgAccountBusy" :close-on-press-escape="!pgAccountBusy" :show-close="!pgAccountBusy" @closed="closePostgreSQLPasswords">
       <div class="section-header" style="margin-bottom: 14px;">
@@ -634,7 +637,47 @@ onMounted(() => {
 
 .settings-environment {
   width: 100%;
-  max-width: 1080px;
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.environment-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 20px;
+}
+
+.environment-card { min-width: 0; }
+
+.field-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.field-actions > .el-input,
+.field-actions > .el-select {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.field-actions > .el-button { flex-shrink: 0; margin-left: 0; }
+
+@container (min-width: 1120px) {
+  .environment-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@container (max-width: 520px) {
+  .environment-card :deep(.el-form-item) { display: block; }
+  .environment-card :deep(.el-form-item__label) {
+    width: 100% !important;
+    justify-content: flex-start;
+    padding: 0;
+  }
+  .environment-card :deep(.el-form-item__content) { margin-left: 0 !important; }
 }
 
 .section-header {
