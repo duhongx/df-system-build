@@ -1,0 +1,68 @@
+[
+  {
+    "width": 2048,
+    "columns": 2,
+    "availableWidth": 1754,
+    "sixCardsFillWidth": true,
+    "pathAndContentModesFit": true,
+    "noHorizontalOverflow": true,
+    "pageErrors": [],
+    "liveMutationRequests": [],
+    "mockSaveTests": 0
+  },
+  {
+    "width": 1440,
+    "columns": 2,
+    "availableWidth": 1146,
+    "sixCardsFillWidth": true,
+    "pathAndContentModesFit": true,
+    "noHorizontalOverflow": true,
+    "pageErrors": [],
+    "liveMutationRequests": [],
+    "mockSaveTests": 0
+  },
+  {
+    "width": 1280,
+    "columns": 1,
+    "availableWidth": 986,
+    "sixCardsFillWidth": true,
+    "pathAndContentModesFit": true,
+    "noHorizontalOverflow": true,
+    "pageErrors": [],
+    "liveMutationRequests": [],
+    "mockSaveTests": 0
+  },
+  {
+    "width": 1024,
+    "columns": 1,
+    "availableWidth": 902,
+    "sixCardsFillWidth": true,
+    "pathAndContentModesFit": true,
+    "noHorizontalOverflow": true,
+    "pageErrors": [],
+    "liveMutationRequests": [],
+    "mockSaveTests": 0
+  },
+  {
+    "width": 768,
+    "columns": 1,
+    "availableWidth": 646,
+    "sixCardsFillWidth": true,
+    "pathAndContentModesFit": true,
+    "noHorizontalOverflow": true,
+    "pageErrors": [],
+    "liveMutationRequests": [],
+    "mockSaveTests": 0
+  },
+  {
+    "width": 390,
+    "columns": 1,
+    "availableWidth": 284,
+    "sixCardsFillWidth": true,
+    "pathAndContentModesFit": true,
+    "noHorizontalOverflow": true,
+    "pageErrors": [],
+    "liveMutationRequests": [],
+    "mockSaveTests": 0
+  }
+]
