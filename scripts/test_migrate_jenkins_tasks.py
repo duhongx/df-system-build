@@ -1,7 +1,7 @@
 import copy
 import json
 import unittest
-from migrate_jenkins_tasks import build_plan, canonical_repo, frontend_codes
+from migrate_jenkins_tasks import build_plan, canonical_repo, frontend_codes, verify_import
 
 
 class JenkinsMigrationTests(unittest.TestCase):
@@ -51,6 +51,10 @@ if app_name == 'web-bui':
         self.assertTrue(all(not task['enabled'] for task in plan['tasks']))
         self.assertTrue(all(task['reasons'] for task in plan['tasks']))
 
+    def test_successful_command_without_database_writes_is_rejected(self):
+        fixture = self.fixture()
+        with self.assertRaises(ValueError): verify_import(build_plan(**fixture), fixture['state'])
+
     def test_replanning_preserves_existing_task_history(self):
         fixture = self.fixture()
         first = build_plan(**fixture)
@@ -63,6 +67,7 @@ if app_name == 'web-bui':
         for index,task in enumerate(first['tasks']):
             app=next(row for row in state['applications'] if row['app_name']==task['app'])
             state['tasks'].append({'id':index+1,'task_name':task['taskName'],'application_id':app['id'],'git_branch':task['branch'],'deploy_mode':task['mode'],'enabled':task['enabled'],'build_config_id':task['buildConfigId'],'last_status':'SUCCESS'})
+        verify_import(first,state)
         second=build_plan(**fixture)
         self.assertTrue(all(task['existingId'] for task in second['tasks']))
         self.assertEqual(second['applications'],[])

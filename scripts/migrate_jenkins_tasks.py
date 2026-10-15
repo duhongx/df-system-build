@@ -143,6 +143,20 @@ def build_plan(inventory, legacy_apps, verification, state, codes, namespace, ru
     return {'namespace': namespace, 'applications': list(app_changes.values()), 'tasks': tasks, 'archives': archives}
 
 
+def verify_import(plan, state):
+    apps = {row['app_name']: row for row in state['applications']}
+    tasks = {row['task_name']: row for row in state['tasks']}
+    for change in plan['applications']:
+        name = change['values'].get('app_name') or change['before']['app_name']
+        if name not in apps or any(apps[name].get(key) != value for key, value in change['values'].items()):
+            raise ValueError('Application write verification failed: '+name)
+    for expected in plan['tasks']:
+        actual = tasks.get(expected['taskName'])
+        app = apps.get(expected['app'])
+        if not actual or not app or actual['application_id'] != app['id'] or actual['git_branch'] != expected['branch'] or actual['deploy_mode'] != expected['mode'] or actual['enabled'] != expected['enabled']:
+            raise ValueError('Task write verification failed: '+expected['job'])
+
+
 def quote(value):
     if value is None:
         return 'NULL'
@@ -164,7 +178,7 @@ def main():
     os.umask(0o077)
     folder = args.snapshot_dir.resolve()
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-    pg = ['docker', 'exec', args.container, 'psql', '-X', '-U', args.db_user, '-d', args.database, '-At', '-v', 'ON_ERROR_STOP=1']
+    pg = ['docker', 'exec', '-i', args.container, 'psql', '-X', '-U', args.db_user, '-d', args.database, '-At', '-v', 'ON_ERROR_STOP=1']
     def read(sql):
         return subprocess.check_output(pg+['-c', sql], text=True).strip()
     state = {table: json.loads(read("SELECT COALESCE(json_agg(t),'[]') FROM (SELECT * FROM "+table+" ORDER BY id) t")) for table in ['applications','tasks','build_configs']}
@@ -219,6 +233,8 @@ def main():
             result = subprocess.run(pg+['-f','-'], input='\n'.join(sql), text=True, stdout=log, stderr=subprocess.STDOUT)
         if result.returncode:
             raise RuntimeError('Migration transaction rolled back; see protected apply.log')
+        actual = {table: json.loads(read("SELECT COALESCE(json_agg(t),'[]') FROM (SELECT * FROM "+table+" ORDER BY id) t")) for table in ['applications','tasks']}
+        verify_import(plan, actual)
         summary['applied'] = True
     (folder/'migration-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2)+'\n')
     print(json.dumps(summary, ensure_ascii=False, indent=2))
