@@ -226,7 +226,7 @@ func TestImageOnlyWorkflowNeverDeploysInLocalEnvironment(t *testing.T) {
 	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.DB.AutoMigrate(&model.Pipeline{}, &model.PipelineStage{}, &model.StageLog{}); err != nil {
+	if err := repository.DB.AutoMigrate(&model.Pipeline{}, &model.PipelineStage{}, &model.StageLog{}, &model.ArtifactDeployRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, appType := range []string{"java", "vue"} {
