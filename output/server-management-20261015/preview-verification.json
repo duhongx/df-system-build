@@ -1,0 +1,42 @@
+[
+  {
+    "width": 2048,
+    "rows": 6,
+    "buttonsPerRow": 7,
+    "singleLine": true,
+    "allButtonsFit": true,
+    "collectionEntryRemoved": true,
+    "pageErrors": [],
+    "mutationRequests": []
+  },
+  {
+    "width": 1440,
+    "rows": 6,
+    "buttonsPerRow": 7,
+    "singleLine": true,
+    "allButtonsFit": true,
+    "collectionEntryRemoved": true,
+    "pageErrors": [],
+    "mutationRequests": []
+  },
+  {
+    "width": 1280,
+    "rows": 6,
+    "buttonsPerRow": 7,
+    "singleLine": true,
+    "allButtonsFit": true,
+    "collectionEntryRemoved": true,
+    "pageErrors": [],
+    "mutationRequests": []
+  },
+  {
+    "width": 1024,
+    "rows": 6,
+    "buttonsPerRow": 7,
+    "singleLine": true,
+    "allButtonsFit": true,
+    "collectionEntryRemoved": true,
+    "pageErrors": [],
+    "mutationRequests": []
+  }
+]
