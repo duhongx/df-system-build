@@ -65,15 +65,15 @@ func TestArtifactUpdateClaimsPersistAndAreAtomic(t *testing.T) {
 
 func TestArtifactUploadExecuteOnceAndReupload(t *testing.T) {
 	setupArtifactVersionTestDB(t)
+	if err := repository.DB.AutoMigrate(&model.Pipeline{}, &model.PipelineStage{}, &model.Settings{}); err != nil {
+		t.Fatal(err)
+	}
 	// Offline customers can upload and queue image preparation without source capability.
 	if err := repository.NewSettingsRepo().Set("customer_env", "浙江"); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.RequireSourceBuild(); err == nil {
 		t.Fatal("expected source builds to be disabled")
-	}
-	if err := repository.DB.AutoMigrate(&model.Pipeline{}, &model.PipelineStage{}); err != nil {
-		t.Fatal(err)
 	}
 	t.Chdir(t.TempDir()) // Pipeline copies are isolated; no real build worker runs.
 	original := scheduler.DefaultScheduler
