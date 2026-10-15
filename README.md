@@ -96,6 +96,7 @@ go test ./...
 - [前端页面与开发](frontend/README.md)
 - [部署管理](docs/deployment-management.md)
 - [Vue 构建与微前端更新](docs/vue-app-build-flow.md)
+- [前端主应用、子应用和独立应用更新规则](docs/frontend-update-rules.md)
 - [PostgreSQL 当前功能](docs/postgresql.md)
 - [机房与客户现场使用场景](docs/usage-scenarios.md)
 
