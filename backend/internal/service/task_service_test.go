@@ -18,6 +18,9 @@ func setupTaskServiceTestDB(t *testing.T) {
 	if err := repository.AutoMigrate(); err != nil {
 		t.Fatalf("migrate db: %v", err)
 	}
+	if err := repository.NewSettingsRepo().Set("customer_env", "本地"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestUpdateTaskPreservesLegacyNamespaceWithoutAcceptingOverrides(t *testing.T) {

@@ -2,10 +2,8 @@
 import { computed, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getDashboardStats, getRecentBuilds, type Pipeline, type DashboardStats } from '../api/pipeline'
-import { useSettingsStore } from '../stores/settings'
 
 const router = useRouter()
-const settings = useSettingsStore()
 const stats = ref<Partial<DashboardStats>>({})
 const recentTasks = ref<Pipeline[]>([])
 const loading = ref(true)
@@ -27,8 +25,8 @@ const metrics = computed(() => [
   { label: '今日失败', value: stats.value.failedCount, icon: 'CircleClose', color: 'rose' },
 ])
 const quickActions = computed(() => [
-  ...(settings.showBatchDeploy ? [{ icon: 'VideoPlay', label: '新增更新任务', path: '/batch-deploy', color: 'blue' }] : []),
-  { icon: 'Box', label: '制品导入', path: '/artifacts/import', color: 'cyan' },
+  { icon: 'VideoPlay', label: '新增更新任务', path: '/batch-deploy', color: 'blue' },
+  { icon: 'Box', label: '更新版本', path: '/artifacts/versions', color: 'cyan' },
   { icon: 'Files', label: '日志收集', path: '/log-collection', color: 'violet' },
   { icon: 'Coin', label: 'SQL 执行', path: '/postgresql/sql-execution', color: 'green' },
   { icon: 'Platform', label: '服务器管理', path: '/servers', color: 'blue' },

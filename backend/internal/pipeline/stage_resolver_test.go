@@ -77,9 +77,12 @@ func TestSourceImageBuildIncludesSeparateRolloutStages(t *testing.T) {
 }
 
 func TestArtifactDeploySkipsSourceBuildAndDeploysImage(t *testing.T) {
-	stages := ResolveStagesWithMode("vue", "artifact_image")
-	expectedCodes := []string{"BUILD_IMAGE", "PUSH_IMAGE", "K8S_DEPLOY", "NOTIFY"}
-	assertStageCodes(t, stages, expectedCodes)
+	for _, appType := range []string{"java", "vue"} {
+		t.Run(appType, func(t *testing.T) {
+			stages := ResolveStagesWithMode(appType, "artifact_image")
+			assertStageCodes(t, stages, []string{"BUILD_IMAGE", "PUSH_IMAGE", "K8S_DEPLOY", "NOTIFY"})
+		})
+	}
 }
 
 func assertStageCodes(t *testing.T, stages []StageDefinition, expected []string) {

@@ -60,9 +60,9 @@ func (h *SettingsHandler) GetAll(c *gin.Context) {
 	// Convert to map for easier frontend consumption
 	result := make(map[string]string)
 	for _, s := range list {
-		if s.Key == "postgresql_user" {
+		if s.Key == "postgresql_user" || s.Key == "deploy_source" {
 			continue
-		} // retired single business account
+		} // Retired single business account and source-mode switch.
 		result[s.Key] = s.Value
 	}
 	response.OK(c, result)
@@ -74,10 +74,7 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 		response.Fail(c, 10902, "参数错误")
 		return
 	}
-	if mode, ok := req["deploy_source"]; ok && mode != "both" && mode != "artifact" && mode != "source" {
-		response.Fail(c, 10902, "使用场景必须为机房或客户现场")
-		return
-	}
+	delete(req, "deploy_source") // Retired; customer_env controls source builds.
 	delete(req, "postgresql_user")
 	if mode, ok := req["postgresql_password_mode"]; ok && mode != "shared" && mode != "individual" {
 		response.Fail(c, 10902, "请选择有效的业务密码方式")

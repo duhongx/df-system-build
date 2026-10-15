@@ -125,7 +125,6 @@ func SeedCoreData() {
 		{Key: "log_retention_days", Value: "30", Description: "日志保留天数"},
 		{Key: "default_upload_path", Value: "/root/DFHIS/his-release", Description: "默认上传路径"},
 		{Key: "clean_workspace_after_build", Value: "true", Description: "构建后清理工作区"},
-		{Key: "deploy_source", Value: "artifact", Description: "使用场景: artifact(客户现场仅制品) / both(机房源码及制品)"},
 		{Key: "deploy_mode", Value: "deploy", Description: "部署模式: deploy(编译+部署)"},
 		{Key: "customer_env", Value: "本地", Description: "客户环境"},
 		{Key: "docker_registry_url", Value: "192.168.199.102:8888", Description: "Docker 镜像仓库地址"},

@@ -2349,7 +2349,7 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 		pipelines = append(pipelines, gin.H{"id": p.ID, "no": p.PipelineNo, "app": app.AppName, "note": target.note})
 	}
 
-	response.OKWithMessage(c, fmt.Sprintf("已创建 %d 个构建任务", len(pipelines)), gin.H{
+	response.OKWithMessage(c, fmt.Sprintf("已创建 %d 个制品更新任务", len(pipelines)), gin.H{
 		"pipelines":     pipelines,
 		"errors":        errors,
 		"consumedFiles": consumedFiles,

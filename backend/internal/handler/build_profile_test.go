@@ -36,6 +36,7 @@ func TestBuildProfilesEnforceCustomerBoundaryAndHostConfigAPI(t *testing.T) {
 	NewBuildConfigHandler().RegisterRoutes(api)
 	NewTaskHandler().RegisterRoutes(api)
 	NewApplicationHandler().RegisterRoutes(api)
+	NewSettingsHandler().RegisterRoutes(api)
 	request := func(method, path, body string) (int, map[string]any) {
 		r := httptest.NewRequest(method, path, bytes.NewBufferString(body))
 		r.Header.Set("Content-Type", "application/json")
@@ -49,16 +50,25 @@ func TestBuildProfilesEnforceCustomerBoundaryAndHostConfigAPI(t *testing.T) {
 		return w.Code, data
 	}
 	settings := repository.NewSettingsRepo()
-	if err := settings.Set("deploy_source", "artifact"); err != nil {
+	if err := settings.Set("deploy_source", "both"); err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.Set("customer_env", "浙江"); err != nil {
 		t.Fatal(err)
 	}
 	for _, route := range []struct{ method, path string }{
-		{"DELETE", "/api/tasks/1"}, {"POST", "/api/tasks"}, {"POST", "/api/tasks/1/execute"}, {"POST", "/api/tasks/batch-execute"},
+		{"DELETE", "/api/tasks/1"}, {"PUT", "/api/tasks/1"}, {"POST", "/api/tasks"}, {"POST", "/api/tasks/1/execute"}, {"POST", "/api/tasks/batch-execute"},
 		{"POST", "/api/build-configs"}, {"PUT", "/api/build-configs/1"}, {"DELETE", "/api/build-configs/1"},
 	} {
 		status, body := request(route.method, route.path, `{}`)
-		if status != http.StatusForbidden || !strings.Contains(body["message"].(string), "客户现场") {
+		if status != http.StatusForbidden || !strings.Contains(body["message"].(string), "非本地") {
 			t.Fatalf("%s not blocked: %d %+v", route.path, status, body)
+		}
+	}
+	for _, path := range []string{"/api/tasks", "/api/build-configs"} {
+		status, body := request("GET", path, "")
+		if status != 200 || body["code"] != float64(0) {
+			t.Fatalf("read-only history blocked: %s %d %+v", path, status, body)
 		}
 	}
 	for _, runner := range []types.StageRunner{&stages.GitCloneStage{}, &stages.LocalBuildStage{}} {
@@ -75,8 +85,14 @@ func TestBuildProfilesEnforceCustomerBoundaryAndHostConfigAPI(t *testing.T) {
 	if count != 0 {
 		t.Fatal("blocked requests created source tasks")
 	}
-	if err := settings.Set("deploy_source", "both"); err != nil {
-		t.Fatal(err)
+	// Legacy clients cannot override the environment using the retired field.
+	status, body = request("PUT", "/api/settings", `{"customer_env":"本地","deploy_source":"artifact"}`)
+	if status != 200 || body["code"] != float64(0) {
+		t.Fatalf("save environment: %d %+v", status, body)
+	}
+	_, result := request("GET", "/api/settings", "")
+	if _, exists := result["data"].(map[string]any)["deploy_source"]; exists {
+		t.Fatal("retired mode exposed")
 	}
 	status, body = request("POST", "/api/build-configs", `{"name":"host-tools","category":"java","buildCommand":"gradle build","artifactDir":"build/libs"}`)
 	if status != 200 || body["code"] != float64(0) {

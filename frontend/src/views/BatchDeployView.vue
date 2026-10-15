@@ -256,7 +256,7 @@ async function executeDeploy() {
       try {
         await ElMessageBox.confirm(
           buildDeployConfirmation(deployableResults.value, settingsStore.autoRollout),
-          settingsStore.autoRollout ? '确认构建与滚动更新范围' : '确认镜像制作范围', { customClass: 'deploy-scope-confirm', type: 'warning', confirmButtonText: settingsStore.autoRollout ? '构建并滚动更新' : '制作镜像', cancelButtonText: '取消' },
+          settingsStore.autoRollout ? '确认镜像制作与更新范围' : '确认镜像制作范围', { customClass: 'deploy-scope-confirm', type: 'warning', confirmButtonText: settingsStore.autoRollout ? '制作镜像并滚动更新' : '制作镜像', cancelButtonText: '取消' },
         )
       } catch { return }
     }
@@ -275,7 +275,7 @@ async function executeDeploy() {
         { type: 'warning', confirmButtonText: '查看已创建任务' },
       ).catch(() => {})
     } else {
-      ElMessage.success(`已创建 ${result.pipelines?.length || 0} 个构建任务`)
+      ElMessage.success(`已创建 ${result.pipelines?.length || 0} 个制品更新任务`)
     }
     if (result.pipelines?.length) router.push('/build-queue')
   } finally {
@@ -589,7 +589,7 @@ function formatDownloadSize(size?: number) {
         <el-segmented
           v-model="sourceMode"
           :options="[
-            { label: '本地上传', value: 'upload' },
+            { label: '离线上传', value: 'upload' },
             { label: '服务器下载', value: 'download' },
             { label: '选择更新版本', value: 'existing' },
           ]"
@@ -805,10 +805,10 @@ function formatDownloadSize(size?: number) {
 
     <section class="action-bar">
       <div class="deploy-options">
-        <strong>{{ settingsStore.autoRollout ? '构建与滚动更新' : '第一步：上传并制作镜像' }}</strong>
+        <strong>{{ settingsStore.autoRollout ? '镜像制作与更新' : '第一步：上传并制作镜像' }}</strong>
       </div>
       <el-button type="primary" :disabled="deployableResults.length === 0" :loading="executing" @click="executeDeploy">
-        {{ matchResults.length > 0 && matchResults.every(item => item.updateUsed || !item.matched || !item.valid || item.skipped) ? '无可用制品' : `${settingsStore.autoRollout ? '构建并滚动更新' : '制作镜像'}（${deployableResults.length} 个制品）` }}
+        {{ matchResults.length > 0 && matchResults.every(item => item.updateUsed || !item.matched || !item.valid || item.skipped) ? '无可用制品' : `${settingsStore.autoRollout ? '制作镜像并滚动更新' : '制作镜像'}（${deployableResults.length} 个制品）` }}
       </el-button>
     </section>
   </div>

@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { useSettingsStore } from '../stores/settings'
 import { listArtifacts, type Artifact } from '../api/pipeline'
 import { formatTime } from '../utils/time'
+
+const router = useRouter()
+const settingsStore = useSettingsStore()
 
 const artifacts = ref<Artifact[]>([])
 const loading = ref(true)
@@ -58,7 +63,7 @@ function sourceLabel(sourceType?: string) {
   <div class="artifact-management-page viewport-table-page">
     <div class="page-header">
       <div>
-        <h4>最新制品库</h4>
+        <h4>制品库</h4>
       </div>
     </div>
 
@@ -70,7 +75,7 @@ function sourceLabel(sourceType?: string) {
         <el-switch
           v-model="onlyLatest"
           active-text="仅最新"
-          inactive-text="历史"
+          inactive-text="全部"
           @change="handleLatestChange"
         />
       </div>
@@ -89,9 +94,14 @@ function sourceLabel(sourceType?: string) {
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column prop="batchId" label="版本" min-width="130" show-overflow-tooltip />
-        <el-table-column prop="gitBranch" label="分支" min-width="140" show-overflow-tooltip />
-        <el-table-column label="Git SHA" width="100">
+        <el-table-column label="更新版本" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            <el-button v-if="row.batchId" link type="primary" @click="router.push(`/artifacts/versions/${encodeURIComponent(row.batchId)}`)">{{ row.batchId }}</el-button>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="settingsStore.isLocal" prop="gitBranch" label="分支" min-width="140" show-overflow-tooltip />
+        <el-table-column v-if="settingsStore.isLocal" label="Git SHA" width="100">
           <template #default="{ row }">{{ row.gitCommitHash?.slice(0, 8) || '-' }}</template>
         </el-table-column>
         <el-table-column label="SHA256" width="100">

@@ -1,9 +1,9 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import DefaultLayout from '../layouts/DefaultLayout.vue'
 import { getToken } from '../api/request'
 import { useSettingsStore } from '../stores/settings'
 
-const routes = [
+const routes: RouteRecordRaw[] = [
   {
     path: '/login',
     name: 'Login',
@@ -24,9 +24,9 @@ const routes = [
       { path: 'release', name: 'ReleaseList', component: () => import('../views/ReleaseListView.vue'), meta: { title: '构建历史', fillViewport: true } },
       { path: 'release/:id', name: 'PipelineDetail', component: () => import('../views/PipelineDetailView.vue'), meta: { title: '构建详情' } },
       { path: 'artifacts', redirect: '/artifacts/latest' },
-      { path: 'artifacts/import', name: 'ArtifactImport', component: () => import('../views/ArtifactCollectView.vue'), meta: { title: '制品导入' } },
+      { path: 'artifacts/import', redirect: to => ({ path: '/batch-deploy', query: to.query }) },
       { path: 'artifacts/versions', name: 'ArtifactVersions', component: () => import('../views/ArtifactBatchesView.vue'), meta: { title: '更新版本', fillViewport: true } },
-      { path: 'artifacts/latest', name: 'ArtifactList', component: () => import('../views/ArtifactListView.vue'), meta: { title: '最新制品库', fillViewport: true } },
+      { path: 'artifacts/latest', name: 'ArtifactList', component: () => import('../views/ArtifactListView.vue'), meta: { title: '制品库', fillViewport: true } },
       { path: 'artifacts/versions/:versionNo', name: 'ArtifactVersionDetail', component: () => import('../views/ArtifactVersionDetailView.vue'), meta: { title: '更新版本详情' } },
       { path: 'servers', name: 'ServerMgmt', component: () => import('../views/ServerMgmtView.vue'), meta: { title: '服务器管理', fillViewport: true } },
       { path: 'log-collection', name: 'LogCollection', component: () => import('../views/LogCollectionView.vue'), meta: { title: '日志收集' } },

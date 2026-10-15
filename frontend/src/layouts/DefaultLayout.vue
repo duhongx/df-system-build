@@ -288,7 +288,7 @@ async function handleSaveProfile() {
             <span>任务中心</span>
           </template>
           <el-menu-item v-if="settingsStore.showTaskList" index="/tasks">任务列表</el-menu-item>
-          <el-menu-item v-if="settingsStore.showBatchDeploy" index="/batch-deploy">新增更新任务</el-menu-item>
+          <el-menu-item index="/batch-deploy">新增更新任务</el-menu-item>
           <el-menu-item index="/build-queue">构建队列</el-menu-item>
           <el-menu-item index="/release">构建历史</el-menu-item>
         </el-sub-menu>
@@ -298,9 +298,8 @@ async function handleSaveProfile() {
             <el-icon><Box /></el-icon>
             <span>制品管理</span>
           </template>
-          <el-menu-item index="/artifacts/import">制品导入</el-menu-item>
           <el-menu-item index="/artifacts/versions">更新版本</el-menu-item>
-          <el-menu-item index="/artifacts/latest">最新制品库</el-menu-item>
+          <el-menu-item index="/artifacts/latest">制品库</el-menu-item>
         </el-sub-menu>
 
         <el-sub-menu index="postgresql-center">

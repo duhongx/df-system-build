@@ -63,7 +63,7 @@ func TestTaskAutomaticallyUsesGradleAndNodeDefaults(t *testing.T) {
 	if _, err := service.Create(&CreateTaskRequest{TaskName: "disabled-web", ApplicationID: web.ID, GitBranch: "main"}); err == nil {
 		t.Fatal("disabled toolchain should fail")
 	}
-	for _, env := range []string{"浙江", "新疆", "local"} {
+	for _, env := range []string{"浙江", "新疆", "local", "", "  "} {
 		if err := settings.Set("customer_env", env); err != nil {
 			t.Fatal(err)
 		}

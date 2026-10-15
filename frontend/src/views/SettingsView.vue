@@ -19,7 +19,6 @@ const generalForm = ref({
   log_retention_days: '30',
   default_upload_path: '/root/DFHIS/his-release',
   customer_env: '本地',
-  deploy_source: 'artifact',
 })
 
 async function loadGeneral() {
@@ -30,8 +29,7 @@ async function loadGeneral() {
       build_timeout_seconds: s.build_timeout_seconds || '1800',
       log_retention_days: s.log_retention_days || '30',
       default_upload_path: s.default_upload_path || '/root/DFHIS/his-release',
-      customer_env: s.customer_env || '本地',
-      deploy_source: s.deploy_source === 'both' || s.deploy_source === 'source' ? 'both' : 'artifact',
+      customer_env: (s.customer_env || '').trim(),
     }
   } catch (e) { /* ignore */ }
 }
@@ -139,12 +137,6 @@ onMounted(() => {
               <el-option label="甘肃" value="甘肃" />
               <el-option label="陕西" value="陕西" />
             </el-select>
-          </el-form-item>
-          <el-form-item label="使用场景">
-            <el-radio-group v-model="generalForm.deploy_source">
-              <el-radio value="both">机房：源码编译与制品更新</el-radio>
-              <el-radio value="artifact">客户现场：仅制品更新</el-radio>
-            </el-radio-group>
           </el-form-item>
           <el-divider />
           <el-form-item label="并发上限（重启生效）">

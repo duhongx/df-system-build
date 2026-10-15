@@ -6,18 +6,42 @@ import (
 	"testing"
 )
 
-func TestSourceBuildProfiles(t *testing.T) {
+func TestSourceBuildRequiresLocalEnvironment(t *testing.T) {
+	originalDB := DB
+	t.Cleanup(func() { DB = originalDB })
+	DB = testutil.OpenGormPostgres(t)
+	if err := DB.AutoMigrate(&model.Settings{}); err != nil {
+		t.Fatal(err)
+	}
+	settings := NewSettingsRepo()
+	if err := DB.Where("key = ?", "customer_env").Delete(&model.Settings{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := RequireSourceBuild(); err == nil {
+		t.Fatal("missing environment enabled source builds")
+	}
 	for _, tc := range []struct {
-		mode    string
-		enabled bool
-		valid   bool
+		environment string
+		legacyMode  string
+		enabled     bool
 	}{
-		{"both", true, true}, {"source", true, true}, {"", true, true}, {"artifact", false, true}, {"invalid", false, false},
+		{"本地", "artifact", true}, {" 本地 ", "invalid", true}, {"本地", "", true},
+		{"浙江", "both", false}, {"新疆", "source", false}, {"local", "both", false},
+		{"", "both", false}, {"  ", "both", false},
 	} {
-		got, err := sourceBuildEnabled(tc.mode)
-		if got != tc.enabled || (err == nil) != tc.valid {
-			t.Fatalf("%q: %t %v", tc.mode, got, err)
+		if err := settings.Set("customer_env", tc.environment); err != nil {
+			t.Fatal(err)
 		}
+		if err := settings.Set("deploy_source", tc.legacyMode); err != nil {
+			t.Fatal(err)
+		}
+		if err := RequireSourceBuild(); (err == nil) != tc.enabled {
+			t.Fatalf("environment=%q legacy=%q: %v", tc.environment, tc.legacyMode, err)
+		}
+	}
+	DB = nil
+	if err := RequireSourceBuild(); err == nil {
+		t.Fatal("unavailable storage enabled source builds")
 	}
 }
 

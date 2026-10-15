@@ -65,6 +65,13 @@ func TestArtifactUpdateClaimsPersistAndAreAtomic(t *testing.T) {
 
 func TestArtifactUploadExecuteOnceAndReupload(t *testing.T) {
 	setupArtifactVersionTestDB(t)
+	// Offline customers can upload and queue image preparation without source capability.
+	if err := repository.NewSettingsRepo().Set("customer_env", "浙江"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.RequireSourceBuild(); err == nil {
+		t.Fatal("expected source builds to be disabled")
+	}
 	if err := repository.DB.AutoMigrate(&model.Pipeline{}, &model.PipelineStage{}); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +143,7 @@ func TestArtifactUploadExecuteOnceAndReupload(t *testing.T) {
 		var reply struct {
 			Code int
 			Data struct {
-				Pipelines []json.RawMessage
+				Pipelines []model.Pipeline
 				Errors    []string
 			}
 		}
@@ -146,6 +153,13 @@ func TestArtifactUploadExecuteOnceAndReupload(t *testing.T) {
 		if wantSuccess {
 			if reply.Code != 0 || len(reply.Data.Pipelines) != 1 || len(reply.Data.Errors) > 0 {
 				t.Fatalf("execute failed: %s", w.Body.String())
+			}
+			var queued model.Pipeline
+			if err := repository.DB.First(&queued, reply.Data.Pipelines[0].ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if queued.DeployMode != "artifact_image" || queued.TaskID != 0 {
+				t.Fatalf("upload entered source workflow: %+v", queued)
 			}
 		} else if reply.Code == 0 || !strings.Contains(w.Body.String(), "已提交过更新") {
 			t.Fatalf("duplicate accepted: %s", w.Body.String())
