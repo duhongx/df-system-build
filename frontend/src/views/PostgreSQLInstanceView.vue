@@ -25,7 +25,6 @@ onMounted(loadInstance)
     <div class="page-title-row">
       <div>
         <h4 class="page-title">实例管理</h4>
-        <p class="page-desc">展示系统设置中已维护的 PostgreSQL 连接和运行状态。</p>
       </div>
       <div class="title-actions">
         <el-button size="small" @click="loadInstance">刷新</el-button>
@@ -81,7 +80,6 @@ onMounted(loadInstance)
 .postgres-instance-page { display: flex; flex-direction: column; gap: 16px; }
 .page-title-row { display: flex; align-items: flex-start; justify-content: space-between; }
 .page-title { font-size: 15px; font-weight: 600; color: #303133; margin: 0; }
-.page-desc { font-size: 13px; color: #909399; margin: 4px 0 0; }
 .title-actions { display: flex; gap: 8px; }
 .content-card { background: #fff; border: 1px solid #ebeef5; border-radius: 6px; padding: 16px; }
 .section-title { font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 12px; }

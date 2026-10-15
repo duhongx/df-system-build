@@ -151,14 +151,13 @@ onUnmounted(() => { disposed = true; clearTimeout(pollTimer); scanController?.ab
 <template>
   <div class="log-collection">
     <header class="collection-heading">
-      <div><span class="console-eyebrow">LOG COLLECTION</span><h1 class="console-title">日志收集</h1><p class="console-description">汇集分散的日志，保留每一份排查线索。</p></div>
+      <div><h1 class="console-title">日志收集</h1></div>
       <div class="heading-actions" v-if="tab === 'sources'"><el-button @click="editSource()"><el-icon><Plus /></el-icon><span>新增来源</span></el-button><el-button type="primary" :disabled="!selectedSources.length" @click="preview([...selectedSources])"><el-icon><Files /></el-icon><span>选择日志文件（{{ selectedSources.length }} 个来源）</span></el-button></div>
     </header>
     <div class="source-overview">
       <div class="overview-metric"><span class="metric-symbol"><Files /></span><div><span>日志来源</span><strong>{{ sources.length }}<small>个</small></strong></div></div>
       <div class="overview-metric"><span class="metric-symbol cyan"><Platform /></span><div><span>覆盖主机</span><strong>{{ sourceHostCount }}<small>台</small></strong></div></div>
       <div class="overview-metric"><span class="metric-symbol violet"><Grid /></span><div><span>日志类型</span><strong>{{ sourceTypeCount }}<small>类</small></strong></div></div>
-      <div class="overview-note"><el-icon><InfoFilled /></el-icon><span>按需收集 · ZIP 下载<br /><small>在线查询继续使用 VictoriaLogs</small></span></div>
     </div>
     <div class="console-panel collection-panel">
     <el-tabs v-model="tab">
@@ -168,7 +167,7 @@ onUnmounted(() => { disposed = true; clearTimeout(pollTimer); scanController?.ab
           <el-select v-model="categoryFilter" clearable placeholder="全部类型" style="width: 145px"><el-option v-for="c in categories" :key="c.value" :label="c.label" :value="c.value" /></el-select>
           <span class="toolbar-spacer"></span><span class="result-count">共 {{ displayedSources.length }} 个来源</span><el-button @click="loadSources" aria-label="刷新日志来源"><el-icon><Refresh /></el-icon></el-button>
         </div>
-        <el-table :data="displayedSources" v-loading="sourcesLoading" row-key="id" @selection-change="selectedSources = $event" empty-text="暂无日志来源，请先新增并配置主机上的日志目录">
+        <el-table :data="displayedSources" v-loading="sourcesLoading" row-key="id" @selection-change="selectedSources = $event" empty-text="暂无日志来源">
           <el-table-column type="selection" width="42" />
           <el-table-column prop="name" label="来源名称" min-width="190"><template #default="{ row }"><div class="source-identity"><span class="source-symbol" :class="row.category"><el-icon><component :is="categoryIcons[row.category] || 'Document'" /></el-icon></span><strong>{{ row.name }}</strong></div></template></el-table-column>
           <el-table-column label="类型" width="105"><template #default="{ row }"><span class="category-label" :class="row.category">{{ categoryName(row.category) }}</span></template></el-table-column>
@@ -178,10 +177,10 @@ onUnmounted(() => { disposed = true; clearTimeout(pollTimer); scanController?.ab
           <el-table-column label="子目录" width="75"><template #default="{ row }">{{ row.recursive ? '包含' : '不包含' }}</template></el-table-column>
           <el-table-column label="操作" width="175"><template #default="{ row }"><el-button link type="primary" @click="preview([row])">收集</el-button><el-button link @click="editSource(row)">编辑</el-button><el-button link type="danger" @click="removeSource(row)">删除</el-button></template></el-table-column>
         </el-table>
-        <div class="table-footnote"><el-icon><Folder /></el-icon><span>按来源选择文件，收集后打包为 ZIP。主机上的原始日志保持不变。</span></div>
+
       </el-tab-pane>
       <el-tab-pane label="收集记录" name="jobs">
-        <div class="toolbar"><span>收集包保存在本系统，可下载或手动删除。</span><el-button @click="loadJobs">刷新</el-button></div>
+        <div class="toolbar"><el-button @click="loadJobs">刷新</el-button></div>
         <el-table :data="jobs" empty-text="暂无收集记录">
           <el-table-column prop="id" label="编号" width="80" />
           <el-table-column label="开始时间" width="185"><template #default="{ row }">{{ time(row.createdAt) }}</template></el-table-column>
@@ -203,14 +202,14 @@ onUnmounted(() => { disposed = true; clearTimeout(pollTimer); scanController?.ab
         <el-form-item label="来源名称" required><el-input v-model="form.name" placeholder="例如：计费服务、PostgreSQL、RabbitMQ" /></el-form-item>
         <el-form-item label="主机" required><el-select v-model="form.serverId" filterable placeholder="选择已配置的主机"><el-option v-for="h in hosts" :key="h.id" :label="hostName(h.id)" :value="h.id" /></el-select><span v-if="!hosts.length" class="hint">请先在服务器管理中新增主机。</span></el-form-item>
         <el-form-item label="日志目录" required><el-input v-model="form.directory" placeholder="主机上的实际绝对路径，例如 /var/log/rabbitmq" /></el-form-item>
-        <el-form-item label="文件规则" required><el-input v-model="form.pattern" placeholder="*.log,*.log.*,*.gz" /><span class="hint">按文件名匹配，多个规则用逗号分隔；填写 * 可匹配全部普通文件。</span></el-form-item>
-        <el-form-item label="包含子目录"><el-switch v-model="form.recursive" /><span class="hint">扫描不跟随软链接；同一服务的不同主机可分别新增来源。</span></el-form-item>
+        <el-form-item label="文件规则" required><el-input v-model="form.pattern" placeholder="*.log,*.log.*,*.gz" /></el-form-item>
+        <el-form-item label="包含子目录"><el-switch v-model="form.recursive" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="sourceDialog = false">取消</el-button><el-button type="primary" :loading="saving" @click="saveSource">保存</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="previewDialog" title="选择要收集的日志文件" width="min(1200px, 96vw)" @close="closePreview">
-      <el-alert title="按文件修改时间筛选，收集整个文件，不按日志内容裁剪。正在写入的文件收集截至开始读取时的内容。" type="info" :closable="false" />
+
       <div v-if="scanning" class="scan-message">{{ scanMessage }}…</div>
       <div v-if="scanErrors.length" class="scan-errors"><div v-for="error in scanErrors" :key="error">{{ error }}</div></div>
       <div class="toolbar">
@@ -233,7 +232,7 @@ onUnmounted(() => { disposed = true; clearTimeout(pollTimer); scanController?.ab
       <template v-if="detail">
         <div class="toolbar"><el-tag :type="statusType(detail.status)">{{ statusLabels[detail.status] }}</el-tag><span>操作人：{{ detail.operator }} · {{ time(detail.createdAt) }}</span><span>成功 {{ detail.successFiles }} / {{ detail.totalFiles }}，失败 {{ detail.failedFiles }}</span></div>
         <el-alert :title="detail.message" :type="detail.status === 'failed' ? 'error' : detail.status === 'partial' ? 'warning' : 'info'" :closable="false" />
-        <p class="hint">ZIP 包按类型 / 主机 / 来源组织，附 collection-manifest.json 收集清单。失败或停止的任务只包含已成功收集的文件；无成功文件时仅含清单。</p>
+
         <el-table :data="detail.items" max-height="460">
           <el-table-column label="来源 / 主机" min-width="190"><template #default="{ row }">{{ row.source.name }}<br /><span class="hint">{{ row.host }}</span></template></el-table-column>
           <el-table-column label="日志文件" min-width="270"><template #default="{ row }"><span class="file-path">{{ row.source.directory }}/{{ row.path }}</span></template></el-table-column>
@@ -252,10 +251,9 @@ onUnmounted(() => { disposed = true; clearTimeout(pollTimer); scanController?.ab
 .collection-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 2px 0 26px; position: relative; }
 .heading-actions { display: flex; gap: 10px; flex-shrink: 0; }.heading-actions :deep(.el-button + .el-button) { margin-left: 0; }.heading-actions :deep(.el-icon) { margin-right: 6px; }
 .source-overview { display: flex; align-items: center; background: var(--ui-panel); border: 1px solid var(--ui-border); border-radius: 12px; padding: 22px 26px; margin-bottom: 24px; box-shadow: var(--ui-shadow); }
-.overview-metric { display: flex; align-items: center; gap: 15px; flex: 1; padding-inline: 24px; border-right: 1px solid var(--ui-border); }.overview-metric:first-child { padding-left: 0; }
+.overview-metric { display: flex; align-items: center; gap: 15px; flex: 1; padding-inline: 24px; border-right: 1px solid var(--ui-border); }.overview-metric:first-child { padding-left: 0; }.overview-metric:last-child { border-right: 0; padding-right: 0; }
 .overview-metric > div > span { display: block; color: var(--ui-muted); font-size: 12px; }.overview-metric strong { display: block; font-size: 29px; color: var(--ui-heading); line-height: 1.3; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -1px; }.overview-metric small { font-size: 11px; color: var(--ui-muted); font-weight: 400; margin-left: 9px; }
 .metric-symbol { width: 43px; height: 43px; padding: 12px; background: var(--ui-tint); color: var(--ui-primary); border-radius: 11px; }.metric-symbol.cyan { color: var(--ui-cyan); background: color-mix(in srgb, var(--ui-cyan) 8%, var(--ui-panel)); }.metric-symbol.violet { color: #7973c3; background: color-mix(in srgb, #7973c3 8%, var(--ui-panel)); }
-.overview-note { display: flex; gap: 10px; color: var(--ui-text); font-size: 11px; line-height: 1.9; padding-left: 30px; }.overview-note > .el-icon { margin-top: 4px; color: var(--ui-muted); }.overview-note small { color: var(--ui-muted); font-size: 10px; }
 .collection-panel { overflow: hidden; padding-top: 9px; }
 .collection-panel :deep(.el-tabs__header) { margin: 0; }.collection-panel :deep(.el-tabs__nav-scroll) { padding-inline: 24px; }.collection-panel :deep(.el-tabs__item) { height: 51px; font-size: 13px; }
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 20px 0; }.collection-panel .toolbar { margin: 0; padding: 20px 24px; }.toolbar-spacer { flex: 1; }.result-count { color: var(--ui-muted); font-size: 11px; margin-right: 5px; }
@@ -263,11 +261,10 @@ onUnmounted(() => { disposed = true; clearTimeout(pollTimer); scanController?.ab
 .source-symbol.database { color: var(--ui-cyan); background: color-mix(in srgb, var(--ui-cyan) 9%, var(--ui-panel)); }.source-symbol.rabbitmq { color: #c48736; background: color-mix(in srgb, #c48736 9%, var(--ui-panel)); }.source-symbol.redis { color: #cb6778; background: color-mix(in srgb, #cb6778 9%, var(--ui-panel)); }
 .category-label { display: inline-block; border: 1px solid var(--ui-border); padding: 2px 7px; border-radius: 4px; font-size: 10px; color: var(--ui-text); background: var(--ui-panel-soft); }
 .host-label { font-size: 12px; white-space: nowrap; }.directory-text { color: var(--ui-muted); }.pattern-label { display: inline; font-size: 11px; color: var(--ui-text); }
-.table-footnote { display: flex; gap: 8px; align-items: center; padding: 17px 24px; color: var(--ui-muted); font-size: 11px; }
 .hint { color: var(--ui-muted); font-size: 12px; display: inline-block; line-height: 1.7; }.selection-info { margin-right: 16px; color: var(--ui-text); font-size: 12px; }
 .scan-message { color: var(--ui-primary); margin-top: 12px; }.scan-errors { margin: 12px 0; padding: 12px; border-radius: 8px; background: var(--el-color-danger-light-9); color: var(--el-color-danger); white-space: pre-wrap; overflow-wrap: anywhere; }
 .error-text, .file-path { white-space: pre-wrap; overflow-wrap: anywhere; }.error-text { color: var(--el-color-danger); }.file-path { font-family: var(--ui-font-mono); font-size: 11px; }
 .el-pagination { padding: 18px 24px; }.el-form .el-select { width: 100%; }
-@media (max-width: 1200px) { .overview-note { display: none; }.overview-metric:nth-child(3) { border-right: 0; }.collection-heading { flex-wrap: wrap; }.source-overview { padding: 20px; } }
-@media (max-width: 700px) { .overview-metric { padding-inline: 12px; gap: 8px; }.metric-symbol { display: none; }.overview-metric strong { font-size: 25px; }.heading-actions { flex-wrap: wrap; }.collection-panel .toolbar { padding: 15px; }.toolbar-spacer { display: none; }.table-footnote { align-items: flex-start; line-height: 1.7; }.selection-info { display: block; margin-bottom: 10px; } }
+@media (max-width: 1200px) {.overview-metric:nth-child(3) { border-right: 0; }.collection-heading { flex-wrap: wrap; }.source-overview { padding: 20px; } }
+@media (max-width: 700px) { .overview-metric { padding-inline: 12px; gap: 8px; }.metric-symbol { display: none; }.overview-metric strong { font-size: 25px; }.heading-actions { flex-wrap: wrap; }.collection-panel .toolbar { padding: 15px; }.toolbar-spacer { display: none; }.selection-info { display: block; margin-bottom: 10px; } }
 </style>

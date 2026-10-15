@@ -129,10 +129,7 @@ html.dark ::-webkit-scrollbar-thumb { background: #41516a; }
 .is-active-item { color: var(--ui-primary) !important; font-weight: 600; }
 
 /* Shared primitives for redesigned screens. */
-.console-eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 10px; font-weight: 650; letter-spacing: 2px; color: var(--ui-cyan); margin-bottom: 11px; }
-.console-eyebrow::before { content: ''; width: 16px; height: 2px; background: currentColor; }
 .console-title { font-size: 28px; font-weight: 650; letter-spacing: -.7px; line-height: 1.35; color: var(--ui-heading); }
-.console-description { font-size: 13px; color: var(--ui-muted); margin-top: 10px; line-height: 1.8; }
 .console-panel { background: var(--ui-panel); border: 1px solid var(--ui-border); border-radius: 12px; box-shadow: var(--ui-shadow); }
 .console-code { font-family: var(--ui-font-mono); font-size: 12px; }
 
@@ -162,7 +159,8 @@ html.dark .el-table--striped .el-table__body tr.el-table__row--striped td.el-tab
 .el-dialog { max-width: calc(100vw - 32px); max-height: calc(100dvh - 48px); margin-top: min(5vh, 40px); display: flex; flex-direction: column; }
 .el-dialog__body { min-height: 0; overflow: auto; }
 .el-dialog__header, .el-dialog__footer { flex-shrink: 0; }
-.el-message-box { max-width: calc(100vw - 32px); }
+.el-message-box { width: var(--el-messagebox-width, 420px); max-width: calc(100vw - 32px); }
+.el-message-box__message { overflow-wrap: anywhere; }
 .main-content :is(.toolbar-row, .page-header, .page-title-row, .page-head, .section-header, .files-header, .k8s-header, .info-bar, .info-bar-left, .info-bar-right, .header-left, .header-actions, .title-actions, .latest-header) { flex-wrap: wrap; gap: 12px; min-width: 0; }
 .main-content :is(.toolbar-left, .toolbar-right, .header-right, .page-actions, .actions, .action-btns) { flex-wrap: wrap; }
 .main-content :is(.page-header, .page-title-row, .page-head, .toolbar-row, .summary-row, .artifact-flow, .files-header, .breadcrumb, .k8s-header) { flex-shrink: 0; }

@@ -6,5 +6,4 @@ for (const key of ['sql_execute_skip_exists_column', 'sql_execute_skip_exists_ta
 }
 assert.match(view, /getSettings/)
 assert.match(view, /updateSettings/)
-assert.match(view, /60 秒/)
 assert.doesNotMatch(view, /白名单|forceBlockedSql|sql_execute_lock_timeout|sql_execute_statement_timeout/)

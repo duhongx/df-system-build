@@ -231,7 +231,6 @@ onMounted(loadServers)
             <div style="width: 100%;">
               <div style="margin-bottom: 8px;">
                 <el-button size="small" @click="handleReadKey">从服务器读取</el-button>
-                <span style="font-size: 12px; color: #909399; margin-left: 8px;">默认读取 /root/.ssh/id_rsa</span>
               </div>
               <el-input
                 v-model="form.credential"

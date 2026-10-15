@@ -109,7 +109,6 @@ function categoryColor(cat: string) {
       <el-button type="primary" size="small" @click="handleAdd"><el-icon><Plus /></el-icon>新增</el-button>
     </div>
 
-    <el-alert title="本地任务按应用类型自动使用 Gradle / Node 默认配置，无需逐任务选择。此处集中维护工具路径和命令。" type="info" :closable="false" style="margin-bottom: 12px;" />
     <div class="content-card">
       <el-table height="100%" :data="buildConfigs" v-loading="loading" stripe border>
         <el-table-column label="名称" min-width="180"><template #default="{ row }">{{ row.name }}<el-tag v-if="defaults[row.category as 'java' | 'vue']?.id === row.id" size="small" style="margin-left: 8px;">默认</el-tag></template></el-table-column>

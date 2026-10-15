@@ -418,7 +418,6 @@ onMounted(loadSQLExecutionSettings)
         <div>
           <h2>视图依赖变更</h2>
           <h3>变更 SQL</h3>
-          <p>可粘贴多条 ALTER TABLE ... ALTER COLUMN ... TYPE ... SQL；系统会统一分析依赖、备份、执行和恢复。</p>
         </div>
         <div class="actions">
           <el-button :disabled="taskBusy || sameTaskBlocked" :loading="analyzing" @click="handleAnalyze">分析</el-button>
@@ -441,7 +440,6 @@ onMounted(loadSQLExecutionSettings)
       <div class="table-header">
         <div>
           <h3>执行过程</h3>
-          <p>展示本次任务从备份、删除依赖、执行变更到恢复检测的处理过程。</p>
         </div>
         <el-button size="small" :disabled="!currentTask" @click="refreshCurrentTask">刷新</el-button>
       </div>
@@ -496,7 +494,6 @@ onMounted(loadSQLExecutionSettings)
       <div class="table-header">
         <div>
           <h3>字段变更</h3>
-          <p>分析后会列出本次任务中的每一条字段类型变更，执行时按 SQL 原始顺序处理。</p>
         </div>
       </div>
       <el-table :data="dependencyChanges" size="small" border stripe max-height="260">
@@ -521,7 +518,6 @@ onMounted(loadSQLExecutionSettings)
       <div class="table-header">
         <div>
           <h3>依赖对象</h3>
-          <p>执行时会按删除顺序处理依赖对象，变更后再按恢复顺序重建。</p>
         </div>
       </div>
       <el-table :data="dependencyItems" size="small" border stripe max-height="50vh">

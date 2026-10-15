@@ -59,7 +59,6 @@ function sourceLabel(sourceType?: string) {
     <div class="page-header">
       <div>
         <h4>最新制品库</h4>
-        <p>每个微服务保留一份 latest 制品，用于客户环境复制、制品比对和后续复用。</p>
       </div>
     </div>
 
@@ -67,7 +66,6 @@ function sourceLabel(sourceType?: string) {
       <div class="latest-header">
         <div>
           <span class="section-title">制品列表</span>
-          <div class="section-subtitle">部署成功后才更新 latest；未匹配、不可读、部署失败的制品不会进入 latest。</div>
         </div>
         <el-switch
           v-model="onlyLatest"
@@ -75,21 +73,6 @@ function sourceLabel(sourceType?: string) {
           inactive-text="历史"
           @change="handleLatestChange"
         />
-      </div>
-
-      <div class="artifact-flow">
-        <div class="artifact-flow-item">
-          <strong>制品导入</strong>
-          <span>本地上传、服务器下载只生成更新版本，不直接覆盖 latest。</span>
-        </div>
-        <div class="artifact-flow-item">
-          <strong>部署成功</strong>
-          <span>只有部署成功的应用更新 latest，未匹配或失败制品不入库。</span>
-        </div>
-        <div class="artifact-flow-item">
-          <strong>版本回滚</strong>
-          <span>回滚依赖版本记录的更新前镜像，不依赖 latest 制品倒推。</span>
-        </div>
       </div>
 
       <el-table height="100%" :data="artifacts" v-loading="loading" stripe border table-layout="auto">
@@ -149,7 +132,6 @@ function sourceLabel(sourceType?: string) {
   border-radius: 4px;
 }
 .page-header h4 { margin: 0 0 6px; font-size: 16px; color: #1f2937; }
-.page-header p { margin: 0; color: #8a9099; }
 .main-card { border-radius: 4px; }
 .latest-header {
   display: flex;
@@ -160,11 +142,6 @@ function sourceLabel(sourceType?: string) {
 .section-title {
   font-size: 15px;
   font-weight: 600;
-}
-.section-subtitle {
-  margin-top: 4px;
-  font-size: 12px;
-  color: #909399;
 }
 
 .artifact-flow {

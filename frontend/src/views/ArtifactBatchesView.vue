@@ -119,7 +119,6 @@ async function deleteVersion(batch: ArtifactVersion) {
     <div class="page-header">
       <div>
         <h4>更新版本</h4>
-        <p>本地上传、服务器下载、制品库选择都会先形成一个更新版本；这里仅查看版本和制品详情。</p>
       </div>
       <div class="page-actions">
         <el-button :loading="syncing" @click="syncWorkspaceVersions">同步工作区</el-button>
@@ -185,7 +184,6 @@ async function deleteVersion(batch: ArtifactVersion) {
   padding: 16px 18px;
 }
 .page-header h4 { margin: 0 0 6px; font-size: 16px; color: #1f2937; }
-.page-header p { margin: 0; color: #8a9099; }
 .page-actions { display: flex; gap: 8px; }
 .summary-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .summary-card {

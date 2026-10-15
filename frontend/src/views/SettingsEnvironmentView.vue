@@ -361,14 +361,6 @@ onMounted(() => {
 
 <template>
   <div class="settings-environment" v-loading="loading">
-    <el-alert
-      type="warning"
-      :closable="false"
-      show-icon
-      style="margin-bottom: 20px;"
-    >
-      以下账号权限极大，请务必保管好。所有具备管理员权限的人员均可查看账号信息。
-    </el-alert>
 
     <!-- 镜像仓库设置 -->
     <el-card shadow="never" style="margin-bottom: 20px;">
@@ -389,7 +381,6 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="仓库名称">
           <el-input v-model="form.docker_registry_repo" placeholder="cloudhis" />
-          <div class="form-hint">Nexus 中 Docker (hosted) 仓库的名称</div>
         </el-form-item>
         <el-form-item label="用户名">
           <el-input v-model="form.docker_registry_user" placeholder="仓库用户名" />
@@ -425,7 +416,6 @@ onMounted(() => {
             <el-input v-model="form.k8s_kubeconfig_path" placeholder="/root/.kube/config" style="flex: 1;" />
             <el-button :loading="k8sReadingConfig" @click="handleReadKubeconfig">读取</el-button>
           </div>
-          <div class="form-hint">服务器上 kubeconfig 文件的绝对路径</div>
         </el-form-item>
         <el-form-item label="kubeconfig 内容" v-if="k8sInputMode === 'content'">
           <el-input
@@ -443,7 +433,6 @@ onMounted(() => {
             </el-select>
             <el-button :loading="k8sLoadingNs" @click="handleLoadNamespaces">获取命名空间</el-button>
           </div>
-          <div class="form-hint">点击"获取命名空间"从集群读取可用的 namespace 列表</div>
         </el-form-item>
       </el-form>
     </el-card>
@@ -490,11 +479,9 @@ onMounted(() => {
       <el-form label-width="160px">
         <el-form-item label="OAP 地址">
           <el-input v-model="form.skywalking_oap_url" placeholder="192.168.1.150:11800" />
-          <div class="form-hint">Java Agent 上报地址，多个地址用逗号分隔；测试仅检查第一个 OAP 地址。</div>
         </el-form-item>
         <el-form-item label="GraphQL 地址">
           <el-input v-model="form.skywalking_graphql_url" placeholder="如 http://192.168.1.154:28080/graphql" />
-          <div class="form-hint">链路查询地址，供部署模板使用；当前连接测试不校验此地址。</div>
         </el-form-item>
       </el-form>
     </el-card>
@@ -515,7 +502,6 @@ onMounted(() => {
       <el-form label-width="160px">
         <el-form-item label="服务器地址">
           <el-input v-model="form.package_download_host" placeholder="如 192.168.199.100 或 192.168.199.100:22" />
-          <div class="form-hint">不填写端口时默认使用 22</div>
         </el-form-item>
         <el-form-item label="用户名">
           <el-input v-model="form.package_download_user" placeholder="root" />
@@ -530,11 +516,9 @@ onMounted(() => {
             :rows="6"
             placeholder="可选，粘贴 SSH 私钥内容"
           />
-          <div class="form-hint">填写 Key 时优先使用 Key 登录；不填则使用密码登录</div>
         </el-form-item>
         <el-form-item label="软件包路径">
           <el-input v-model="form.package_download_path" placeholder="/root/DFHIS/his-release" />
-          <div class="form-hint">批量部署的「服务器下载」会从该目录开始浏览</div>
         </el-form-item>
       </el-form>
     </el-card>
@@ -562,9 +546,8 @@ onMounted(() => {
         <el-form-item label="数据库名">
           <el-input v-model="form.postgresql_database" placeholder="数据库名" />
         </el-form-item>
-        <el-form-item label="管理员密码">
+        <el-form-item label="postgres 密码">
           <el-input v-model="form.postgresql_admin_password" type="password" show-password placeholder="PostgreSQL 管理员密码" />
-          <div class="form-hint">管理员账号固定为 postgres，用于实例查询、业务账号发现和视图依赖变更。</div>
         </el-form-item>
         <el-form-item label="业务用户密码">
           <el-radio-group v-model="form.postgresql_password_mode" @change="handlePostgreSQLPasswordMode" :disabled="testingType === 'postgresql' || !!pgAccountBusy">
@@ -577,7 +560,6 @@ onMounted(() => {
             <el-input v-model="form.postgresql_password" type="password" show-password :disabled="!!pgAccountBusy" placeholder="df_ 业务账号共用的密码" />
             <el-button type="primary" :loading="pgAccountBusy === '__shared__'" :disabled="!!pgAccountBusy || !form.postgresql_password" @click="savePostgreSQLSharedPassword">保存并应用全部账号</el-button>
           </div>
-          <div class="form-hint">一次保存，平台连接全部业务账号时使用此密码。</div>
         </el-form-item>
         <el-form-item v-if="form.postgresql_password_mode === 'individual'" label="业务账号">
           <el-button :disabled="testingType === 'postgresql' || !!pgAccountBusy" @click="openPostgreSQLPasswords">配置业务用户密码</el-button>
@@ -588,7 +570,7 @@ onMounted(() => {
 
     <el-dialog v-model="pgPasswordDialog" title="业务用户密码配置" width="1000px" style="max-width: calc(100vw - 48px);" :close-on-click-modal="!pgAccountBusy" :close-on-press-escape="!pgAccountBusy" :show-close="!pgAccountBusy" @closed="closePostgreSQLPasswords">
       <div class="section-header" style="margin-bottom: 14px;">
-        <span class="form-hint">相同密码批量填入，不同密码单独修改，最后一次保存。</span>
+
         <el-button size="small" :loading="pgDiscovering" :disabled="!!pgAccountBusy" @click="loadPostgreSQLAccounts">刷新账号</el-button>
       </div>
       <div class="pg-password-tools">
@@ -616,7 +598,7 @@ onMounted(() => {
         </template></el-table-column>
       </el-table>
       <template #footer>
-        <span class="form-hint" style="margin-right: 16px;">未填写的账号保留已保存密码。</span>
+
         <el-button :disabled="!!pgAccountBusy" @click="pgPasswordDialog = false">关闭</el-button>
         <el-button type="primary" :loading="pgAccountBusy === '__save_all__'" :disabled="!!pgAccountBusy || pgDiscovering" @click="savePostgreSQLPasswordDialog">保存并关闭{{ pgPendingCount ? `（${pgPendingCount} 个）` : '' }}</el-button>
       </template>

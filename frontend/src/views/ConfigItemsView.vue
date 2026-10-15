@@ -93,7 +93,6 @@ onMounted(loadItems)
     <div class="page-title-row">
       <div>
         <h4 class="page-title">配置项管理</h4>
-        <p class="page-desc">管理 Dockerfile 模板、K8s YAML 模板、脚本文件。支持 ${var} 变量替换。</p>
       </div>
       <div class="title-actions">
         <el-select v-model="filterCategory" placeholder="全部分类" clearable size="small" style="width: 120px; margin-right: 8px;">
@@ -162,9 +161,7 @@ onMounted(loadItems)
           </el-col>
         </el-row>
         <el-form-item label="内容" required>
-          <div class="editor-hint">
-            <span>支持变量: <code>${registryUrl}</code> <code>${appName}</code> <code>${branch}</code> <code>${artifactName}</code> <code>${version}</code> <code>${namespace}</code> <code>${imageName}</code></span>
-          </div>
+
           <el-input
             v-model="form.content"
             type="textarea"
@@ -197,12 +194,6 @@ onMounted(loadItems)
   margin-bottom: 16px;
 }
 
-.page-desc {
-  font-size: 13px;
-  color: #909399;
-  margin: 4px 0 0 0;
-}
-
 .title-actions {
   display: flex;
   align-items: center;
@@ -218,20 +209,6 @@ onMounted(loadItems)
 .content-type {
   font-size: 12px;
   color: #606266;
-}
-
-.editor-hint {
-  margin-bottom: 8px;
-  font-size: 12px;
-  color: #909399;
-}
-
-.editor-hint code {
-  background: #f5f7fa;
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-family: monospace;
-  color: #409eff;
 }
 
 :deep(.code-editor textarea) {

@@ -42,7 +42,6 @@ assert.match(view, /执行确认/, 'field change execution should require explic
 assert.match(view, /refreshCurrentTask/, 'page should refresh selected task after backend state changes')
 assert.match(view, /catch \(err\)/, 'page should handle failed execution responses explicitly')
 assert.match(view, /el-input[\s\S]*type="textarea"[\s\S]*alterSql/, 'page should provide one SQL textarea')
-assert.match(view, /多条 ALTER TABLE/, 'page should allow a batch of ALTER COLUMN SQL statements')
 assert.match(view, /字段变更/, 'page should show parsed field changes before dependency objects')
 assert.match(view, /hasAnalysisResult/, 'page should hide analysis result sections before analyzing')
 assert.match(view, /v-if="hasAnalysisResult" class="summary-card"/, 'summary should only appear after analysis')

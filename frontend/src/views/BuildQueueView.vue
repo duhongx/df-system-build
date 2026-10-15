@@ -189,7 +189,6 @@ function batchStatusText(status: string) {
         </div>
       </template>
 
-      <el-alert title="仅滚动更新已制作完成的镜像。制作失败的目标保留错误，其他目标继续；多个子应用共用一个 web-main 更新任务。" type="info" :closable="false" />
       <el-table :data="imageReadyBatches" v-if="imageReadyBatches.length">
         <el-table-column prop="versionNo" label="版本号" min-width="220" show-overflow-tooltip />
         <el-table-column prop="namespace" label="命名空间" width="110" />
@@ -210,7 +209,7 @@ function batchStatusText(status: string) {
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-else style="padding: 16px 0;" description="暂无待手动更新的批次；本地新任务自动完成滚动更新" :image-size="60" />
+      <el-empty v-else style="padding: 16px 0;" description="暂无待滚动更新的批次" :image-size="60" />
     </el-card>
 
     <el-drawer v-model="batchDrawerVisible" size="56%" title="待手动滚动更新详情">

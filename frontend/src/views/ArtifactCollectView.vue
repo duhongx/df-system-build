@@ -420,11 +420,11 @@ async function uploadEntries(entries: UploadEntry[]) {
     <div class="collect-panel">
       <section v-if="importMode === 'upload'" class="collect-card">
         <div class="card-title">本地上传</div>
-        <div class="card-desc">从浏览器上传 jar/zip 文件或目录，系统会生成一个更新版本。</div>
+
         <div class="upload-zone" v-loading="uploadLoading" @dragover.prevent @drop.prevent="handleDrop">
           <el-icon :size="42"><Upload /></el-icon>
-          <strong>点击或拖拽上传制品</strong>
-          <span>支持 .jar / .zip；选择目录时会递归上传目录内制品</span>
+          <strong>拖拽 JAR / ZIP 到此处</strong>
+
           <div class="upload-actions">
             <el-button type="primary" @click="chooseFiles">选择文件</el-button>
             <el-button @click="chooseDirectory">选择目录</el-button>
@@ -436,7 +436,7 @@ async function uploadEntries(entries: UploadEntry[]) {
 
       <section v-if="importMode === 'download'" class="collect-card">
         <div class="card-title">服务器下载</div>
-        <div class="card-desc">从软件包下载服务器选择目录，下载到平台工作区并生成更新版本。</div>
+
         <div class="download-layout">
           <div class="download-column">
             <div class="column-title">远程目录</div>
@@ -572,7 +572,6 @@ async function uploadEntries(entries: UploadEntry[]) {
         </div>
       </section>
     </div>
-
   </div>
 </template>
 
@@ -584,7 +583,6 @@ async function uploadEntries(entries: UploadEntry[]) {
 .collect-panel { min-width: 0; }
 .collect-card { background: #fff; border: 1px solid #ebeef5; border-radius: 8px; padding: 18px; min-width: 0; }
 .card-title { font-size: 15px; font-weight: 600; color: #303133; }
-.card-desc { margin-top: 6px; margin-bottom: 14px; font-size: 12px; color: #909399; }
 .upload-zone {
   min-height: 430px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
   border: 2px dashed #dcdfe6; border-radius: 8px; background: #fbfcff; color: #606266;

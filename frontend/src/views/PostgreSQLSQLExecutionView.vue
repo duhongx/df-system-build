@@ -182,7 +182,7 @@ onBeforeUnmount(() => { disposed = true; clearPolling() })
   <div class="sql-page">
     <div class="toolbar">
       <strong>SQL 执行</strong>
-      <span class="muted">数据库：{{ database }} · 按文件执行，普通错误立即停止</span>
+      <span class="muted">数据库：{{ database }}</span>
       <el-button type="primary" :disabled="busy" @click="importVisible = true">导入 SQL</el-button>
       <el-button @click="loadFiles">刷新</el-button>
       <router-link to="/settings/sql-execution">SQL执行配置</router-link>
@@ -225,7 +225,7 @@ onBeforeUnmount(() => { disposed = true; clearPolling() })
             <el-button type="danger" plain :disabled="busy || hasUncertainResult || currentFile.executeStatus === 'SUCCESS'" @click="removeFile">删除文件</el-button>
             <span class="muted">共 {{ statements.length }} 句 · 成功 {{ count('SUCCESS') }} · 失败 {{ count('FAILED') }} · 跳过 {{ count('SKIPPED') }}</span>
           </div>
-          <p class="muted">每句最长执行 60 秒。重试原文件时跳过已成功和已跳过的语句；已经提交的 SQL 不自动撤销。</p>
+
           <el-alert v-if="hasUncertainResult && !running" title="执行结果待核实，不能重试、覆盖或删除；请先核实目标库结果，确认已生效后再手工跳过。" type="warning" :closable="false" />
           <pre v-if="currentFile.executeMessage" class="execution-result" :class="{ error: ['FAILED', 'PARTIAL_FAILED'].includes(currentFile.executeStatus) }">{{ currentFile.executeMessage }}</pre>
           <div v-if="currentFile.executeTime" class="muted">执行人：{{ currentFile.executeUser || '—' }} · {{ formatTime(currentFile.executeTime) }}</div>
@@ -249,11 +249,11 @@ onBeforeUnmount(() => { disposed = true; clearPolling() })
       </main>
     </div>
     <el-dialog v-model="importVisible" title="导入 SQL 文件" width="760px" :close-on-click-modal="!importing" :show-close="!importing">
-      <p>文件名：版本__排序号__schema.sql，例如 <code>V2.0.0__001__df_zhushuju.sql</code>。schema 同时作为执行账号。</p>
+
       <el-radio-group v-model="importMode" :disabled="importing || reading"><el-radio-button value="local">本地 SQL / ZIP</el-radio-button><el-radio-button value="text">粘贴 SQL</el-radio-button><el-radio-button value="server">服务器文件</el-radio-button></el-radio-group>
       <div v-if="importMode === 'local'" class="import-body"><input type="file" accept=".sql,.zip" multiple :disabled="importing || reading" @change="readLocalFiles" /><p>{{ reading ? '正在读取文件…' : `已选择 ${localFiles.length} 个 SQL 文件` }}</p><div class="import-list"><div v-for="file in localFiles" :key="file.fileName">{{ file.fileName }}</div></div></div>
       <div v-else-if="importMode === 'text'" class="import-body"><el-input v-model="draft.fileName" placeholder="V2.0.0__001__df_zhushuju.sql" :disabled="importing" /><el-input v-model="draft.content" type="textarea" :rows="12" placeholder="输入完整 SQL 脚本" :disabled="importing" /></div>
-      <div v-else class="import-body"><el-input v-model="serverPath" placeholder="/opt/df-build-server/download/V2.0.0__001__df_zhushuju.sql" :disabled="importing" /><p class="muted">支持服务器 /opt/df-build-server、/root、/tmp 目录下的 SQL 或 ZIP 文件。</p></div>
+      <div v-else class="import-body"><el-input v-model="serverPath" placeholder="/opt/df-build-server/download/V2.0.0__001__df_zhushuju.sql" :disabled="importing" /></div>
       <el-checkbox v-model="overwrite" :disabled="importing">覆盖同名文件，保留相同语句的成功和跳过记录</el-checkbox>
       <template #footer><el-button :disabled="importing" @click="importVisible = false">取消</el-button><el-button type="primary" :loading="importing" :disabled="reading" @click="importFiles">保存文件</el-button></template>
     </el-dialog>

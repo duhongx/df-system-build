@@ -568,7 +568,6 @@ function formatDownloadSize(size?: number) {
     <div class="page-header">
       <div>
         <h4>新增更新任务</h4>
-        <p>{{ settingsStore.autoRollout ? '本地环境：上传制品并制作、推送镜像后自动滚动更新。' : '第一步上传制品并制作、推送镜像；完成后执行第二步滚动更新。' }}</p>
       </div>
       <div class="header-actions">
         <el-button @click="router.push('/artifacts/versions')">更新版本库</el-button>
@@ -586,7 +585,6 @@ function formatDownloadSize(size?: number) {
       <div class="section-title">
         <div>
           <strong>制品来源</strong>
-          <span>新增包直接进入下方应用匹配；也可以选择已生成的更新版本继续部署。</span>
         </div>
         <el-segmented
           v-model="sourceMode"
@@ -600,8 +598,8 @@ function formatDownloadSize(size?: number) {
 
       <div v-if="sourceMode === 'upload'" class="upload-zone" v-loading="uploadLoading" @dragover.prevent @drop.prevent="handleDrop">
         <el-icon :size="40"><Upload /></el-icon>
-        <strong>点击或拖拽上传制品</strong>
-        <span>支持 .jar / .zip；目录上传会递归识别目录内制品，上传后自动生成更新版本并进入应用匹配。</span>
+        <strong>拖拽 JAR / ZIP 到此处</strong>
+
         <div class="upload-actions">
           <el-button type="primary" @click="chooseFiles">选择文件</el-button>
           <el-button @click="chooseDirectory">选择目录</el-button>
@@ -769,7 +767,6 @@ function formatDownloadSize(size?: number) {
       <div class="section-title">
         <div>
           <strong>应用匹配</strong>
-          <span>默认勾选可部署制品；不可读、未匹配和 SQL 包不会进入部署。</span>
         </div>
         <div class="status-tags">
           <el-tag type="success">可部署 {{ matchedCount }}</el-tag>
@@ -786,7 +783,7 @@ function formatDownloadSize(size?: number) {
         stripe
         height="420"
         table-layout="auto"
-        empty-text="上传、下载或选择更新版本后，在这里确认可部署应用"
+        empty-text="暂无制品"
         @selection-change="(rows: MatchResult[]) => selectedFiles = rows.map(row => row.fileName)"
       >
         <el-table-column type="selection" width="46" :selectable="isDeployableMatch" />
@@ -809,8 +806,6 @@ function formatDownloadSize(size?: number) {
     <section class="action-bar">
       <div class="deploy-options">
         <strong>{{ settingsStore.autoRollout ? '构建与滚动更新' : '第一步：上传并制作镜像' }}</strong>
-        <span>每份制品仅允许更新一次；再次更新请重新上传。</span>
-        <span>{{ settingsStore.autoRollout ? '本地环境：镜像推送成功后自动滚动更新。' : '镜像制作并推送完成后，前往第二步执行滚动更新。' }}</span>
       </div>
       <el-button type="primary" :disabled="deployableResults.length === 0" :loading="executing" @click="executeDeploy">
         {{ matchResults.length > 0 && matchResults.every(item => item.updateUsed || !item.matched || !item.valid || item.skipped) ? '无可用制品' : `${settingsStore.autoRollout ? '构建并滚动更新' : '制作镜像'}（${deployableResults.length} 个制品）` }}
@@ -842,7 +837,6 @@ function formatDownloadSize(size?: number) {
   padding: 16px 18px;
 }
 .page-header h4 { margin: 0 0 6px; font-size: 16px; color: #1f2937; }
-.page-header p { margin: 0; color: #8a9099; }
 .header-actions { display: flex; gap: 8px; }
 .step-strip { display: grid; grid-template-columns: 150px 1fr 150px 1fr 150px 1fr 150px; align-items: center; padding: 14px 18px; }
 .step-item { display: flex; align-items: center; gap: 8px; color: #9ca3af; font-weight: 600; }

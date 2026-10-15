@@ -173,7 +173,7 @@ onMounted(load)
   <div class="page viewport-table-page">
     <h4 class="page-title">组件</h4>
     <div class="content-card">
-      <p class="hint">启用/禁用组件、关联目标主机（部分组件由系统自动管理主机）、配置参数、查看 部署任务。部署请到「部署运行」页。</p>
+
       <el-table height="100%" :data="components" v-loading="loading" size="small" border stripe>
         <el-table-column label="启用" width="70" align="center">
           <template #default="{ row }">
@@ -216,7 +216,7 @@ onMounted(load)
 
     <!-- 目标主机 -->
     <el-dialog v-model="hostsVisible" :title="`目标主机 · ${hostsComponent?.displayName || ''}`" width="560px">
-      <p class="dlg-hint">{{ hostsComponent?.description }}</p>
+
       <p class="dlg-hint" v-if="hostsComponent?.minUserHosts || hostsComponent?.maxUserHosts">
         主机数量限制：{{ hostsComponent?.minUserHosts ? `至少 ${hostsComponent.minUserHosts} 台` : '' }}
         {{ hostsComponent?.maxUserHosts ? `最多 ${hostsComponent.maxUserHosts} 台` : '' }}
@@ -240,7 +240,7 @@ onMounted(load)
           <el-option v-for="p in overridePipelines" :key="p" :label="p" :value="p" />
         </el-select>
       </el-form-item>
-      <p class="dlg-hint">键值形式配置；密码类字段不能包含 shell 元字符（单引号 双引号 反斜杠 $ 反引号 空格）。</p>
+
       <div class="kv-head"><span class="kv-k">参数键</span><span class="kv-v">参数值</span><span class="kv-op"></span></div>
       <div v-for="(r, i) in overrideRows" :key="i" class="kv-row">
         <el-input v-model="r.key" placeholder="如 password" class="kv-k" size="small" />
@@ -285,7 +285,6 @@ onMounted(load)
 <style scoped>
 .page-title { font-size: 15px; font-weight: 600; color: #303133; margin: 0 0 16px 0; }
 .content-card { background: #fff; border-radius: 8px; border: 1px solid #ebeef5; padding: 16px; }
-.hint { font-size: 12px; color: #909399; margin: 0 0 12px; }
 .comp-cell { display: flex; flex-direction: column; }
 .comp-name { font-size: 13px; color: #303133; }
 .comp-code { font-size: 11px; color: #c0c4cc; }

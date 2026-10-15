@@ -156,9 +156,6 @@ onMounted(() => { load(); loadOffline() })
           <el-button type="primary" :loading="initializing" @click="initialize">初始化</el-button>
           <el-button :loading="verifying" @click="verify">校验</el-button>
         </el-form-item>
-        <el-form-item>
-          <span class="hint">初始化：解压离线包并转移到资源目录 {{ status?.resourceDir }}。校验：检查资源是否有缺失。</span>
-        </el-form-item>
       </el-form>
     </div>
   </div>
@@ -168,5 +165,4 @@ onMounted(() => { load(); loadOffline() })
 .page-title { font-size: 15px; font-weight: 600; color: #303133; margin: 0 0 16px 0; }
 .content-card { background: #fff; border-radius: 8px; border: 1px solid #ebeef5; padding: 16px; margin-bottom: 12px; }
 .muted { color: #909399; }
-.hint { font-size: 12px; color: #909399; }
 </style>

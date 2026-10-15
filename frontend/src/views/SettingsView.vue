@@ -22,8 +22,6 @@ const generalForm = ref({
   deploy_source: 'artifact',
 })
 
-
-
 async function loadGeneral() {
   try {
     const s = await getSettings()
@@ -37,8 +35,6 @@ async function loadGeneral() {
     }
   } catch (e) { /* ignore */ }
 }
-
-
 
 async function handleSaveGeneral() {
   try {
@@ -143,24 +139,20 @@ onMounted(() => {
               <el-option label="甘肃" value="甘肃" />
               <el-option label="陕西" value="陕西" />
             </el-select>
-            <span class="form-hint">本地环境自动完成镜像制作与滚动更新，其他环境分两步执行；同时影响应用过滤；源码编译仅在本地开放</span>
           </el-form-item>
           <el-form-item label="使用场景">
             <el-radio-group v-model="generalForm.deploy_source">
               <el-radio value="both">机房：源码编译与制品更新</el-radio>
               <el-radio value="artifact">客户现场：仅制品更新</el-radio>
             </el-radio-group>
-            <div class="form-hint-block">本地机房使用服务器已安装的编译工具，任务按应用类型自动带出 Gradle / Node 默认配置；客户现场直接上传 JAR / ZIP，无需 Git、JDK、Node 或编译配置。</div>
-            <div class="form-hint-block">部署环境为“本地”时自动滚动更新；其他环境镜像制作完成后手动滚动更新。</div>
           </el-form-item>
           <el-divider />
-          <el-form-item label="全局并发上限">
+          <el-form-item label="并发上限（重启生效）">
             <el-input-number
               :model-value="Number(generalForm.concurrency_limit)"
               @update:model-value="(v: any) => generalForm.concurrency_limit = String(v)"
               :min="1" :max="20"
             />
-            <span class="form-hint">同时运行的最大构建数，修改后重启平台生效</span>
           </el-form-item>
           <el-form-item label="构建超时(秒)">
             <el-input-number
@@ -175,7 +167,6 @@ onMounted(() => {
               @update:model-value="(v: any) => generalForm.log_retention_days = String(v)"
               :min="1" :max="365"
             />
-            <span class="form-hint">每日清理超过保留天数的构建阶段日志</span>
           </el-form-item>
           <el-form-item>
             <el-button type="primary" @click="handleSaveGeneral">保存设置</el-button>
@@ -250,7 +241,6 @@ onMounted(() => {
         <el-button type="primary" @click="handleSaveNotify">保存</el-button>
       </template>
     </el-dialog>
-
   </div>
 </template>
 
@@ -271,29 +261,11 @@ onMounted(() => {
 
 .page-title-row .page-title { margin: 0; }
 
-.page-desc {
-  font-size: 13px;
-  color: #909399;
-  margin: 0;
-}
-
 .content-card {
   background: #fff;
   border-radius: 6px;
   border: 1px solid #ebeef5;
   padding: 20px;
-}
-
-.form-hint {
-  margin-left: 12px;
-  font-size: 12px;
-  color: #909399;
-}
-
-.form-hint-block {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 4px;
 }
 
 .tpl-card { margin-bottom: 12px; }

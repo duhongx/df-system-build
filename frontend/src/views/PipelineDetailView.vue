@@ -191,8 +191,6 @@ const activeStage = computed(() => {
         </div>
       </div>
 
-      <el-alert v-if="task.status === 'IMAGE_READY'" title="第一步完成：镜像已制作并推送，可执行滚动更新。" :description="task.imageName" type="success" :closable="false" style="margin-bottom: 12px" />
-
       <div class="pipeline-bar">
         <div
           v-for="(stage, idx) in (task.stages || [])"

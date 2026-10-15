@@ -414,7 +414,6 @@ async function handleRollback() {
     <div class="page-header">
       <div>
         <h4>更新版本详情</h4>
-        <p>查看该版本包含的制品、应用匹配结果和 jar/zip 可读性校验。</p>
       </div>
       <el-button @click="router.push('/artifacts/versions')">返回更新版本</el-button>
     </div>
@@ -521,8 +520,8 @@ async function handleRollback() {
           <div>
             <strong>部署记录与回滚</strong>
             <span v-if="deployBatch">部署批次 {{ deployBatch.deployBatchNo }}，状态 {{ deployRecordStatusText(deployBatch.status) }}</span>
-            <span v-else-if="deployRecords.length">当前版本尚未部署，以下展示待更新 Deployment 的当前运行状态</span>
-            <span v-else>当前版本尚未部署，且待更新 Deployment 当前不存在</span>
+            <span v-else-if="deployRecords.length">待部署</span>
+            <span v-else>暂无部署目标</span>
           </div>
           <div class="header-actions">
             <el-button :loading="deployLoading" @click="loadDeployBatch">刷新</el-button>
@@ -538,7 +537,7 @@ async function handleRollback() {
           </div>
         </div>
       </template>
-      <el-alert v-if="deployBatch?.status === 'rolling_back'" title="正在后台回滚，关闭页面不会中断任务；进度每 3 秒刷新。" type="info" :closable="false" />
+      <el-alert v-if="deployBatch?.status === 'rolling_back'" title="正在回滚" type="info" :closable="false" />
       <el-alert v-if="deployBatch?.errorMessage" :title="deployBatch.errorMessage" type="error" :closable="false" />
       <el-table
         :data="deployRecordRows"
@@ -644,7 +643,6 @@ async function handleRollback() {
   padding: 16px 18px;
 }
 .page-header h4 { margin: 0 0 6px; font-size: 16px; color: #1f2937; }
-.page-header p { margin: 0; color: #8a9099; }
 .summary-top {
   display: flex;
   justify-content: space-between;

@@ -352,7 +352,6 @@ function handleHistory(task: Task) {
         <el-form-item label="Git 分支" required>
           <el-input v-model="executeForm.gitBranch" placeholder="如 release_2.15.3_250515" />
         </el-form-item>
-        <el-alert :title="settingsStore.autoRollout ? '本地环境：编译、镜像制作及推送成功后自动滚动更新。' : '先编译并制作、推送镜像，完成后单独执行滚动更新。'" type="info" :closable="false" />
       </el-form>
       <template #footer>
         <el-button @click="executeDialogVisible = false">取消</el-button>
@@ -376,9 +375,7 @@ function handleHistory(task: Task) {
         </el-form-item>
         <el-form-item v-if="settingsStore.isLocal" label="编译配置">
           <el-input :model-value="createForm.applicationId ? (defaultBuildConfig(createForm.applicationId)?.name || '暂无可用默认配置') : '选择应用后自动带出'" readonly />
-          <div v-if="defaultBuildConfig(createForm.applicationId)" class="form-hint">{{ defaultBuildConfig(createForm.applicationId)?.buildCommand }}</div>
         </el-form-item>
-
       </el-form>
       <template #footer>
         <el-button @click="createDialogVisible = false">取消</el-button>
@@ -402,9 +399,7 @@ function handleHistory(task: Task) {
         </el-form-item>
         <el-form-item v-if="settingsStore.isLocal" label="编译配置">
           <el-input :model-value="editForm.applicationId ? (defaultBuildConfig(editForm.applicationId)?.name || '暂无可用默认配置') : '选择应用后自动带出'" readonly />
-          <div v-if="defaultBuildConfig(editForm.applicationId)" class="form-hint">{{ defaultBuildConfig(editForm.applicationId)?.buildCommand }}</div>
         </el-form-item>
-
       </el-form>
       <template #footer>
         <el-button @click="editDialogVisible = false">取消</el-button>
@@ -474,12 +469,6 @@ function handleHistory(task: Task) {
   align-items: center;
   justify-content: center;
   gap: 6px;
-}
-
-.form-hint {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 2px;
 }
 
 .pagination-row {

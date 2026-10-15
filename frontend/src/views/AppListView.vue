@@ -342,7 +342,6 @@ function handleSizeChange(newSize: number) {
         </el-form-item>
         <el-form-item label="网关服务" v-if="form.appType === 'java'">
           <el-checkbox v-model="form.isGateway">是否为 Java 网关 (会创建 Ingress)</el-checkbox>
-          <div class="field-hint">勾选后下方可配置一个或多个对外 Ingress 域名</div>
         </el-form-item>
         <el-form-item label="应用角色" required v-if="form.appType === 'vue'">
           <el-radio-group v-model="form.vueRole">
@@ -353,11 +352,9 @@ function handleSizeChange(newSize: number) {
         </el-form-item>
         <el-form-item label="应用编号" required v-if="form.appType === 'vue' && form.vueRole === 'sub'">
           <el-input v-model="form.appCode" placeholder="如 04、99、gymk" style="width: 160px;" />
-          <div class="field-hint">构建产物将命名为 {编号}.zip</div>
         </el-form-item>
         <el-form-item label="NodePort" v-if="form.appType === 'java' || (form.appType === 'vue' && (form.vueRole === 'main' || form.vueRole === 'standalone'))">
           <el-input-number v-model="form.nodePort" :min="0" :max="32767" :step="1" placeholder="30000-32767" style="width: 160px;" />
-          <div class="field-hint">K8s Service 对外端口 (30000-32767)，0 表示 ClusterIP，不暴露</div>
         </el-form-item>
         <el-form-item label="Ingress 列表" v-if="showIngressEditor">
           <div class="ingress-editor">
@@ -369,7 +366,6 @@ function handleSizeChange(newSize: number) {
             <el-button size="small" @click="addIngressRow" plain>
               <el-icon><Plus /></el-icon>添加 Ingress
             </el-button>
-            <div class="field-hint">Vue 主/独立应用通常一个 Ingress；Java 网关可配置多个对外域名</div>
           </div>
         </el-form-item>
         <el-form-item label="Nginx 配置" v-if="form.appType === 'vue' && (form.vueRole === 'main' || form.vueRole === 'standalone')">
@@ -380,11 +376,9 @@ function handleSizeChange(newSize: number) {
             placeholder="nginx server 配置内容，将作为 ConfigMap 挂载到 /etc/nginx/conf.d/"
             style="font-family: monospace;"
           />
-          <div class="field-hint">留空则不创建 ConfigMap</div>
         </el-form-item>
         <el-form-item label="环境标签">
           <el-input v-model="form.envTags" placeholder="如 四川 或 四川,重庆（逗号分隔）" />
-          <div class="field-hint">用于更新任务的应用匹配与环境过滤；留空适用于所有环境。</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -434,12 +428,6 @@ function handleSizeChange(newSize: number) {
 
 .link-text:hover {
   text-decoration: underline;
-}
-
-.field-hint {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 4px;
 }
 
 .pagination-row {

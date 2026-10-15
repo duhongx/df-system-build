@@ -241,7 +241,7 @@ async function handleSaveProfile() {
     <aside class="sidebar" :style="{ width: sidebarWidth }">
       <div class="sidebar-logo" :class="{ collapsed: isCollapsed }">
         <img src="/logo.svg" alt="" class="logo-icon" />
-        <div v-if="!isCollapsed" class="brand-wordmark"><strong>CloudHIS</strong><small>智能管理平台</small></div>
+        <div v-if="!isCollapsed" class="brand-wordmark"><strong>CloudHIS</strong></div>
       </div>
 
       <el-menu
@@ -338,7 +338,7 @@ async function handleSaveProfile() {
           <el-menu-item index="/deployment/runs">部署运行</el-menu-item>
         </el-sub-menu>
       </el-menu>
-      <div v-if="!isCollapsed" class="sidebar-footer"><span class="footer-mark">C / H</span><div><strong>CloudHIS Console</strong><small>构建 · 发布 · 运维</small></div></div>
+
     </aside>
 
     <!-- Main Area -->
@@ -493,7 +493,7 @@ async function handleSaveProfile() {
 .sidebar-logo.collapsed { padding: 0; justify-content: center; }
 .logo-icon { width: 33px; height: 33px; flex-shrink: 0; }
 .brand-wordmark { white-space: nowrap; }.brand-wordmark strong { display: block; font-size: 22px; letter-spacing: -.9px; color: var(--ui-heading); font-weight: 700; line-height: 1.2; }
-.brand-wordmark strong span { color: var(--ui-cyan); margin-left: 2px; }.brand-wordmark small { display: block; font-size: 10px; color: var(--ui-muted); letter-spacing: 2px; margin-top: 5px; }
+.brand-wordmark strong span { color: var(--ui-cyan); margin-left: 2px; }
 .sidebar-menu { flex: 1; border-right: none; overflow-y: auto; overflow-x: hidden; padding: 0 12px 12px; background: transparent; }
 .nav-section { font-size: 10px; color: var(--ui-muted); letter-spacing: 1.6px; padding: 22px 14px 10px; list-style: none; }
 .nav-section:first-child { padding-top: 12px; }
@@ -507,9 +507,6 @@ async function handleSaveProfile() {
 :deep(.el-sub-menu .el-menu-item) { padding-left: 43px !important; height: 36px; line-height: 36px; font-size: 12px; }
 :deep(.el-menu--collapse) { width: 71px; padding-inline: 10px; }
 :deep(.el-menu--collapse .el-sub-menu__title), :deep(.el-menu--collapse .el-menu-item) { padding-inline: 16px !important; }
-.sidebar-footer { flex-shrink: 0; margin: 12px 18px 20px; padding: 16px 3px 0; border-top: 1px solid var(--ui-border); display: flex; align-items: center; gap: 12px; white-space: nowrap; }
-.footer-mark { font-family: var(--ui-font-mono); font-size: 10px; color: var(--ui-cyan); border: 1px solid var(--ui-border); border-radius: 8px; padding: 8px 5px; }
-.sidebar-footer strong { display: block; font-size: 11px; color: var(--ui-text); font-weight: 500; }.sidebar-footer small { display: block; font-size: 10px; color: var(--ui-muted); margin-top: 3px; }
 .main-area { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--ui-bg); }
 .main-header { height: 66px; background: var(--ui-panel); display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid var(--ui-border); flex-shrink: 0; }
 .header-left, .header-right { display: flex; align-items: center; }.header-left { gap: 22px; min-width: 0; }.header-right { flex-shrink: 0; }
@@ -524,7 +521,6 @@ async function handleSaveProfile() {
 .tab-close { border-radius: 3px; }.tab-close:hover { background: var(--el-color-primary-light-8); }
 .main-content { flex: 1; min-width: 0; overflow: auto; padding: 28px 32px 36px; scrollbar-gutter: stable; }
 .main-content--fill { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.form-hint { font-size: 12px; color: var(--ui-muted); margin-top: 3px; }
 .context-menu { position: fixed; z-index: 9999; background: var(--ui-panel); border: 1px solid var(--ui-border); border-radius: 9px; box-shadow: 0 8px 28px rgb(15 35 67 / 12%); padding: 6px; min-width: 140px; }
 .context-menu-item { padding: 8px 12px; font-size: 12px; color: var(--ui-text); cursor: pointer; border-radius: 5px; }.context-menu-item:hover { background: var(--ui-tint); color: var(--ui-primary); }
 .notify-item { padding: 16px 0; border-bottom: 1px solid var(--ui-border); }.notify-item.unread { background: var(--ui-tint); margin: 0 -20px; padding-inline: 20px; }

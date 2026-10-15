@@ -51,7 +51,7 @@ assert.match(artifactVersionDetail, /\/opt\/app\.jar/, 'java artifacts should sh
 assert.match(artifactVersionDetail, /\/usr\/share\/nginx\/html/, 'vue main artifacts should show the final html path inside the container')
 assert.match(artifactVersionDetail, /\/usr\/share\/nginx\/html\/apps\//, 'web-main child artifacts should show the final child app path inside the container')
 assert.match(artifactVersionDetail, /当前状态/, 'version detail should label runtime preview records as current status')
-assert.match(artifactVersionDetail, /当前版本尚未部署/, 'version detail should explain current runtime preview before deployment')
+assert.match(artifactVersionDetail, /v-else-if="deployRecords.length">待部署/, 'version detail should distinguish pending deployment from a deployed batch')
 assert.match(artifactVersionDetail, /const deployLoading = ref\(false\)/, 'runtime deploy preview should have its own loading state')
 assert.doesNotMatch(artifactVersionDetail, /await loadDeployBatch\(\)/, 'version detail should not block initial page render on slow runtime preview')
 assert.match(artifactVersionDetail, /function formatRawJson/, 'deploy records should render raw JSON returned by the API')
