@@ -118,8 +118,13 @@ function formatDuration(seconds: number | null | undefined) {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
 
+function canExecuteTask(task: Task) {
+  return task.enabled !== false && task.application?.enabled !== false
+}
+
 // ---- Execute ----
 async function handleExecute(task: Task) {
+  if (!canExecuteTask(task)) { ElMessage.warning("任务已停用，请先核对配置"); return }
   await settingsStore.fetchSettings()
   currentTask.value = task
   executeMode.value = 'single'
@@ -284,10 +289,12 @@ function handleHistory(task: Task) {
 
     <div class="table-wrapper">
       <el-table height="100%" :data="tasks" v-loading="loading" @selection-change="handleSelectionChange" stripe size="default">
-        <el-table-column type="selection" width="45" />
+        <el-table-column type="selection" width="45" :selectable="canExecuteTask" />
         <el-table-column prop="taskName" label="任务名称" min-width="180">
           <template #default="{ row }">
             <span class="task-name">{{ row.taskName }}</span>
+            <el-tag v-if="!canExecuteTask(row)" size="small" type="warning">停用</el-tag>
+            <el-tag v-else-if="row.deployMode === 'image_only'" size="small" type="info">仅制作镜像</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="应用名称" min-width="155">
@@ -318,7 +325,7 @@ function handleHistory(task: Task) {
               <el-button size="small" @click="handleEdit(row)">修改</el-button>
               <el-button size="small" type="danger" plain @click="handleDelete(row)">删除</el-button>
               <el-button size="small" @click="handleHistory(row)">历史</el-button>
-              <el-button size="small" type="primary" @click="handleExecute(row)">
+              <el-button size="small" type="primary" :disabled="!canExecuteTask(row)" @click="handleExecute(row)">
                 <el-icon style="margin-right: 3px;"><VideoPlay /></el-icon>执行
               </el-button>
             </div>

@@ -23,6 +23,8 @@ func NormalizeDeployMode(mode string) string {
 	switch mode {
 	case "artifact_image", "artifact_deploy", "manual":
 		return "artifact_image"
+	case "image_only":
+		return "image_only"
 	case "upload_only":
 		return "upload_only"
 	case "upload_and_build", "upload_and_deploy", "upload_deploy":
@@ -69,6 +71,11 @@ func ResolveStagesWithMode(appType, deployMode string) []StageDefinition {
 
 	// Append stages based on deploy mode
 	switch deployMode {
+	case "image_only":
+		defs = append(defs,
+			StageDefinition{Code: "BUILD_IMAGE", Name: "构建镜像", Runner: &stages.BuildImageStage{}},
+			StageDefinition{Code: "PUSH_IMAGE", Name: "推送镜像", Runner: &stages.PushImageStage{}},
+		)
 	case "build_image":
 		// DevOps mode: build image → push → K8s deploy
 		defs = append(defs,

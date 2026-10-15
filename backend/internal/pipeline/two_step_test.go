@@ -220,3 +220,39 @@ func TestLocalRolloutFailureStopsAndRetainsPreparedImage(t *testing.T) {
 		t.Fatal("failed automatic deployment stages not preserved")
 	}
 }
+
+func TestImageOnlyWorkflowNeverDeploysInLocalEnvironment(t *testing.T) {
+	logger.Init("error", "stdout", "")
+	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DB.AutoMigrate(&model.Pipeline{}, &model.PipelineStage{}, &model.StageLog{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, appType := range []string{"java", "vue"} {
+		p := &model.Pipeline{PipelineNo: "image-only-" + appType, AppName: appType, AppType: appType, Status: "RUNNING", DeployMode: "image_only"}
+		if err := repository.NewPipelineRepo().Create(p); err != nil {
+			t.Fatal(err)
+		}
+		var calls []string
+		defs := ResolveStagesWithMode(appType, p.DeployMode)
+		for i := range defs {
+			defs[i].Runner = countingStage{code: defs[i].Code, calls: &calls}
+		}
+		pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: appType, DeployMode: p.DeployMode, AutoRollout: true}
+		if err := NewEngine().executeStages(context.Background(), p, pc, defs); err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) < 3 || calls[len(calls)-2] != "PUSH_IMAGE" || calls[len(calls)-1] != "NOTIFY" {
+			t.Fatalf("image-only did not complete: %v", calls)
+		}
+		for _, code := range calls {
+			if code == "K8S_DEPLOY" {
+				t.Fatal("image-only job deployed a service")
+			}
+		}
+		if err := ValidateRolloutStages(nil, defs, p.ImageName); err == nil {
+			t.Fatal("image-only job accepted a later rollout")
+		}
+	}
+}

@@ -40,7 +40,7 @@ func (e *Engine) Execute(ctx context.Context, p *model.Pipeline, pCtx *types.Pip
 		if err != nil {
 			return fmt.Errorf("读取部署环境失败: %w", err)
 		}
-		pCtx.AutoRollout = AutoRolloutForEnvironment(environment)
+		pCtx.AutoRollout = AutoRolloutForEnvironment(environment) && NormalizeDeployMode(p.DeployMode) != "image_only"
 	}
 	return e.executeStages(ctx, p, pCtx, ResolveStagesWithMode(p.AppType, p.DeployMode))
 }
@@ -154,7 +154,9 @@ func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *typ
 
 		if !loggedScope {
 			if !resume {
-				if pCtx.AutoRollout {
+				if NormalizeDeployMode(p.DeployMode) == "image_only" {
+					pCtx.OnLog(p.ID, 0, "[发布方式] 仅制作并推送镜像，不执行滚动更新", "stdout")
+				} else if pCtx.AutoRollout {
 					pCtx.OnLog(p.ID, 0, "[发布方式] 本地环境：镜像推送成功后自动滚动更新", "stdout")
 				} else {
 					pCtx.OnLog(p.ID, 0, "[发布方式] 镜像制作完成后等待手动滚动更新", "stdout")
@@ -226,6 +228,9 @@ func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *typ
 
 		// Local execution continues through deployment in the same worker and lock.
 		if !resume && def.Code == "PUSH_IMAGE" {
+			if NormalizeDeployMode(p.DeployMode) == "image_only" {
+				continue
+			}
 			if pCtx.AutoRollout {
 				pCtx.OnLog(p.ID, 0, "[自动滚动更新] 镜像制作及推送成功，继续执行 Kubernetes 滚动更新", "stdout")
 				continue

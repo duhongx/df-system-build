@@ -519,9 +519,17 @@ func CreateAndEnqueue(taskID uint, gitBranch, triggerUser string) (*model.Pipeli
 		return nil, fmt.Errorf("任务不存在")
 	}
 
+	if !task.Enabled {
+		return nil, fmt.Errorf("任务已停用，请先核对任务配置")
+	}
+
 	app, err := appRepo.FindByID(task.ApplicationID)
 	if err != nil {
 		return nil, fmt.Errorf("关联应用不存在")
+	}
+
+	if !app.Enabled {
+		return nil, fmt.Errorf("应用已停用，请先核对应用配置")
 	}
 
 	if strings.TrimSpace(app.GitRepo) == "" {

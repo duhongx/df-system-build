@@ -200,3 +200,63 @@ func TestConfirmationDuringBuildCompletionWaitsForCurrentWorker(t *testing.T) {
 		t.Fatalf("resume lost or dispatched too early: %+v", s.queue)
 	}
 }
+
+func TestDisabledTasksAndApplicationsCannotCreatePipelines(t *testing.T) {
+	setupSchedulerTestDB(t)
+	if err := repository.NewSettingsRepo().Set("customer_env", "本地"); err != nil {
+		t.Fatal(err)
+	}
+	app := model.Application{AppName: "disabled-migration-app", AppType: "java", GitRepo: "git@example/repo.git", Enabled: true}
+	if err := repository.DB.Create(&app).Error; err != nil {
+		t.Fatal(err)
+	}
+	task := model.Task{TaskName: "disabled-migration-task", ApplicationID: app.ID, GitBranch: "main", Enabled: true}
+	if err := repository.DB.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DB.Model(&task).Update("enabled", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateAndEnqueue(task.ID, "main", "test"); err == nil {
+		t.Fatal("disabled task created a pipeline")
+	}
+	if err := repository.DB.Model(&task).Update("enabled", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DB.Model(&app).Update("enabled", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateAndEnqueue(task.ID, "main", "test"); err == nil {
+		t.Fatal("disabled application created a pipeline")
+	}
+	var count int64
+	if err := repository.DB.Model(&model.Pipeline{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("disabled configuration created %d pipelines", count)
+	}
+}
+
+func TestBuildContextKeepsStandaloneFrontendCommands(t *testing.T) {
+	setupSchedulerTestDB(t)
+	bc := model.BuildConfig{Name: "shared-node-migration-test", Category: "vue", InstallCommand: "yarn install", BuildCommand: "npm run build:new", ArtifactDir: "dist", Status: "online"}
+	if err := repository.DB.Create(&bc).Error; err != nil {
+		t.Fatal(err)
+	}
+	s := &BuildScheduler{taskRepo: repository.NewTaskRepo(), appRepo: repository.NewApplicationRepo(), buildConfigRepo: repository.NewBuildConfigRepo(), settingsRepo: repository.NewSettingsRepo()}
+	for _, name := range []string{"web-cdr", "web-opm"} {
+		app := model.Application{AppName: name, AppType: "vue", VueRole: "standalone", GitRepo: "git@example/repo.git", InstallCommand: "yarn install", BuildCommand: "npm run build", ArtifactDir: "dist"}
+		if err := repository.DB.Create(&app).Error; err != nil {
+			t.Fatal(err)
+		}
+		task := model.Task{TaskName: name + "-prod", ApplicationID: app.ID, BuildConfigID: bc.ID, GitBranch: "main"}
+		if err := repository.DB.Create(&task).Error; err != nil {
+			t.Fatal(err)
+		}
+		pc := s.buildContext(&model.Pipeline{ID: task.ID, TaskID: task.ID, ApplicationID: app.ID, AppName: name, AppType: "vue", DeployMode: "build_image"})
+		if pc == nil || pc.BuildCommand != "npm run build" || pc.InstallCommand != "yarn install" || pc.ArtifactDir != "dist" {
+			t.Fatalf("standalone frontend lost its Jenkins commands: %+v", pc)
+		}
+	}
+}
