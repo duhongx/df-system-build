@@ -155,25 +155,25 @@ onMounted(loadServers)
 
     <div class="table-wrapper">
       <el-table height="100%" :data="servers" v-loading="loading" stripe border>
-        <el-table-column type="index" label="序号" width="60" />
-        <el-table-column prop="host" label="主机" min-width="180" show-overflow-tooltip />
-        <el-table-column prop="remark" label="主机名" min-width="160" show-overflow-tooltip />
-        <el-table-column prop="port" label="端口" width="70" />
-        <el-table-column prop="username" label="用户名" width="100" show-overflow-tooltip />
-        <el-table-column label="认证方式" width="90">
+        <el-table-column type="index" label="序号" width="56" />
+        <el-table-column prop="host" label="主机" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="remark" label="主机名" min-width="100" show-overflow-tooltip />
+        <el-table-column prop="port" label="端口" width="60" />
+        <el-table-column prop="username" label="用户名" width="80" show-overflow-tooltip />
+        <el-table-column label="认证方式" width="88">
           <template #default="{ row }">{{ row.authType === 'password' ? '密码' : 'SSH 密钥' }}</template>
         </el-table-column>
-        <el-table-column label="最近连接时间" width="190">
+        <el-table-column label="最近连接时间" width="168">
           <template #default="{ row }">
             <span class="time-text">{{ formatTime(row.lastConnTime) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="80">
+        <el-table-column label="状态" width="72">
           <template #default="{ row }">
             <el-tag :type="statusType(row.status)" size="small">{{ row.status === 'online' ? '在线' : row.status === 'offline' ? '离线' : '未知' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="380" fixed="right">
+        <el-table-column label="操作" width="360" fixed="right">
           <template #default="{ row }">
             <div class="action-btns">
               <el-button type="primary" link size="small" @click="handleTerminal(row)">
