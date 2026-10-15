@@ -45,4 +45,4 @@ const automatic = buildDeployConfirmation([
 ], true)
 assert.match(automatic, /自动滚动更新/)
 assert.doesNotMatch(automatic, /仅制作并推送镜像/)
-assert.match(standalone, /滚动更新需在第二步执行/)
+assert.match(standalone, /镜像就绪后单独提交滚动更新/)

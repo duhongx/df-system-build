@@ -66,7 +66,7 @@ assert.match(batchDeploy, /getArtifactVersion/, 'batch deploy should read versio
 assert.doesNotMatch(batchDeploy, /listLocalDir|matchArtifacts/, 'batch deploy should not rescan directories or run match side effects')
 assert.match(batchDeploy, /选择更新版本/, 'batch deploy should let users select an update version')
 assert.doesNotMatch(batchDeploy, /卡点部署|立即部署|deployMode/, 'image preparation must not expose deployment modes')
-assert.match(batchDeploy, /上传并制作镜像/, 'first step should prepare images')
+assert.match(batchDeploy, /updateTaskSteps/, 'update task should use sequential workflow steps')
 assert.match(batchDeploy, /滚动更新/, 'second step should roll prepared images')
 
 assert.match(batchDeploy, /sourceMode/, 'update task should have an explicit source mode')

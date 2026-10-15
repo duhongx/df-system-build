@@ -20,6 +20,8 @@ import {
   type MatchResult,
 } from '../api/batch-deploy'
 import { getSettings } from '../api/settings'
+import { getPipeline, rolloutPipeline, type Pipeline } from '../api/pipeline'
+import { updateTaskSteps, imageState, imagesSettled, rolloutState, needsExecutionPolling, parseSubmittedPipelineIds } from '../utils/update-task-workflow'
 import { useSettingsStore } from '../stores/settings'
 import { buildDeployConfirmation, isDeployableMatch, selectedDeployableFileNames } from '../utils/batch-deploy-selection'
 import type { FileItem } from '../api/server-mgmt'
@@ -34,6 +36,20 @@ const settingsStore = useSettingsStore()
 const fileInput = ref<HTMLInputElement>()
 const dirInput = ref<HTMLInputElement>()
 const sourceMode = ref<SourceMode>('upload')
+const workflowStep = ref(0)
+const submittedIds = ref<number[]>([])
+const submittedPipelines = ref<Pipeline[]>([])
+const executionLoading = ref(false)
+const executionError = ref(false)
+const rolling = ref(false)
+let executionTimer: number | undefined
+let disposed = false
+let restoringSelection = false
+const hasSubmitted = computed(() => submittedIds.value.length > 0)
+const imagesComplete = computed(() => !executionError.value && submittedPipelines.value.length === submittedIds.value.length && imagesSettled(submittedPipelines.value))
+const hasReadyImages = computed(() => submittedPipelines.value.some(pipeline => imageState(pipeline) === 'ready'))
+const readyToRollout = computed(() => submittedPipelines.value.filter(pipeline => pipeline.status === 'IMAGE_READY'))
+const allUpdated = computed(() => !executionError.value && submittedPipelines.value.length === submittedIds.value.length && submittedPipelines.value.length > 0 && submittedPipelines.value.every(pipeline => rolloutState(pipeline) === 'success'))
 const uploadLoading = ref(false)
 const loading = ref(false)
 const executing = ref(false)
@@ -44,7 +60,6 @@ const matchResults = ref<MatchResult[]>([])
 const selectedFiles = ref<string[]>([])
 const matchTableRef = ref<TableInstance>()
 const versions = ref<ArtifactVersion[]>([])
-const currentVersion = ref<ArtifactVersion | null>(null)
 
 const remoteLoading = ref(false)
 const remoteBasePath = ref('/')
@@ -68,7 +83,7 @@ const invalidCount = computed(() => matchResults.value.filter(result => !result.
 const unmatchedCount = computed(() => matchResults.value.filter(result => !result.matched && !result.skipped).length)
 const skippedCount = computed(() => matchResults.value.filter(result => result.skipped).length)
 const readyVersions = computed(() => versions.value.filter(isVersionReady))
-const hasVersion = computed(() => Boolean(currentVersion.value || batchId.value))
+const hasVersion = computed(() => Boolean(batchId.value))
 const selectedRemotePaths = computed(() => selectedRemoteRows.value.map(row => row.path))
 const isDownloadRunning = computed(() => {
   const status = activeDownloadJob.value?.status
@@ -110,16 +125,26 @@ onMounted(async () => {
   batchId.value = String(route.query.batchId || '')
   sourceType.value = String(route.query.sourceType || '')
   sourceDir.value = String(route.query.sourceDir || '')
+  submittedIds.value = parseSubmittedPipelineIds(route.query.pipelineIds)
 
-  await Promise.all([loadVersions(), loadSettingsAndRemoteRoot()])
-  await restoreActiveDownloadJob()
+  await Promise.allSettled([loadVersions(), loadSettingsAndRemoteRoot()])
+  if (!hasSubmitted.value) await restoreActiveDownloadJob()
   if (batchId.value) {
-    await loadVersionDetail(batchId.value)
-    sourceMode.value = 'existing'
+    try {
+      await loadVersionDetail(batchId.value, !hasSubmitted.value)
+      workflowStep.value = 1
+    } catch { /* Accepted task IDs remain available even if version loading fails. */ }
+    sourceMode.value = sourceType.value === 'upload' ? 'upload' : sourceType.value === 'download' ? 'download' : 'existing'
+  }
+  if (hasSubmitted.value) {
+    workflowStep.value = 2
+    await refreshExecution()
   }
 })
 
 onUnmounted(() => {
+  disposed = true
+  if (executionTimer) window.clearTimeout(executionTimer)
   if (pollTimer) window.clearTimeout(pollTimer)
 })
 
@@ -129,6 +154,76 @@ watch(sourceMode, async mode => {
     await loadLocalDownloadDir()
   }
 })
+
+watch(workflowStep, async step => {
+  if (step === 1) await restoreMatchSelection()
+})
+
+async function restoreMatchSelection() {
+  restoringSelection = true
+  const selected = new Set(selectedFiles.value)
+  await nextTick()
+  matchTableRef.value?.clearSelection()
+  for (const row of matchResults.value) {
+    if (selected.has(row.fileName) && isDeployableMatch(row)) matchTableRef.value?.toggleRowSelection(row, true)
+  }
+  restoringSelection = false
+}
+
+function handleMatchSelection(rows: MatchResult[]) {
+  if (!restoringSelection) selectedFiles.value = rows.map(row => row.fileName)
+}
+
+async function refreshExecution() {
+  if (executionLoading.value || !hasSubmitted.value || disposed) return
+  if (executionTimer) window.clearTimeout(executionTimer)
+  executionLoading.value = true
+  try {
+    const results = await Promise.allSettled(submittedIds.value.map(async id => {
+      const pipeline = await getPipeline(id)
+      if (pipeline.batchId !== batchId.value) throw new Error('任务不属于当前更新版本')
+      return pipeline
+    }))
+    if (disposed) return
+    executionError.value = results.some(result => result.status === 'rejected')
+    submittedPipelines.value = results.flatMap((result, index) => {
+      if (result.status === 'fulfilled') return [result.value]
+      const previous = submittedPipelines.value.find(pipeline => pipeline.id === submittedIds.value[index])
+      return previous ? [previous] : []
+    })
+    if (imagesComplete.value && hasReadyImages.value) workflowStep.value = 3
+  } finally {
+    executionLoading.value = false
+    if (!disposed && (executionError.value || needsExecutionPolling(submittedPipelines.value))) executionTimer = window.setTimeout(refreshExecution, 3000)
+  }
+}
+
+async function startRollout() {
+  if (rolling.value || executionLoading.value || executionError.value || !readyToRollout.value.length) return
+  rolling.value = true
+  try {
+    const results = await Promise.allSettled(readyToRollout.value.map(pipeline => rolloutPipeline(pipeline.id)))
+    const failed = results.filter(result => result.status === 'rejected').length
+    if (failed) ElMessage.warning(`${failed} 个任务未提交，请查看对应任务`)
+    else ElMessage.success('滚动更新已提交')
+    await refreshExecution()
+  } finally {
+    rolling.value = false
+  }
+}
+
+function executionStatus(pipeline: Pipeline) {
+  if (workflowStep.value === 2) {
+    const state = imageState(pipeline)
+    if (state === 'ready') return { type: 'success' as const, text: '镜像已就绪' }
+    if (state === 'failed') return { type: 'danger' as const, text: pipeline.status === 'CANCELED' ? '已取消' : '制作失败' }
+    return { type: 'primary' as const, text: pipeline.status === 'PENDING' ? '排队中' : '制作中' }
+  }
+  const state = rolloutState(pipeline)
+  const text = { success: '更新完成', record_error: '更新完成，记录异常', failed: '更新失败', image_failed: '镜像制作失败', canceled: '已取消', ready: '待滚动更新', running: '滚动更新中', pending: '等待中' }[state]
+  const type = state === 'success' ? 'success' : state === 'record_error' ? 'warning' : ['failed', 'image_failed'].includes(state) ? 'danger' : 'info'
+  return { type: type as 'success' | 'warning' | 'danger' | 'info', text }
+}
 
 async function loadVersions() {
   loading.value = true
@@ -161,7 +256,7 @@ function versionStatusText(version: ArtifactVersion) {
 
 async function activateVersion(versionNo: string) {
   await loadVersionDetail(versionNo)
-  sourceMode.value = 'existing'
+  workflowStep.value = 1
   await router.replace({
     path: '/batch-deploy',
     query: { batchId: batchId.value, sourceType: sourceType.value, sourceDir: sourceDir.value },
@@ -173,6 +268,7 @@ async function selectVersion(version: ArtifactVersion) {
     ElMessage.warning('请选择可部署的更新版本')
     return
   }
+  sourceMode.value = 'existing'
   await activateVersion(version.versionNo)
 }
 
@@ -180,19 +276,12 @@ async function loadVersionDetail(versionNo: string, notifyEmpty = true) {
   loading.value = true
   try {
     const result = await getArtifactVersion(versionNo)
-    currentVersion.value = result.version
     batchId.value = result.version.versionNo
     sourceType.value = result.version.sourceType
     sourceDir.value = result.version.targetPath || result.version.localDir || sourceDir.value
     matchResults.value = (result.items || []).map(versionItemToMatchResult)
     selectedFiles.value = selectedDeployableFileNames(matchResults.value)
-    await nextTick()
-    matchTableRef.value?.clearSelection()
-    for (const row of matchResults.value) {
-      if (isDeployableMatch(row)) {
-        matchTableRef.value?.toggleRowSelection(row, true)
-      }
-    }
+    if (workflowStep.value === 1) await restoreMatchSelection()
     if (notifyEmpty && selectedFiles.value.length === 0) {
       ElMessage.warning('当前版本没有可部署制品')
     }
@@ -232,8 +321,19 @@ function resultStatus(result: MatchResult) {
   return { type: 'success', text: '可部署' }
 }
 
+function startNewTask() {
+  if (executing.value || rolling.value || executionLoading.value) return
+  if (executionTimer) window.clearTimeout(executionTimer)
+  submittedIds.value = []
+  submittedPipelines.value = []
+  executionError.value = false
+  sourceMode.value = 'upload'
+  resetSelection()
+}
+
 function resetSelection() {
-  currentVersion.value = null
+  if (hasSubmitted.value) return
+  workflowStep.value = 0
   batchId.value = ''
   sourceDir.value = ''
   sourceType.value = ''
@@ -243,7 +343,7 @@ function resetSelection() {
 }
 
 async function executeDeploy() {
-  if (executing.value) return
+  if (executing.value || hasSubmitted.value) return
   if (deployableResults.value.length === 0) {
     ElMessage.warning('没有可部署制品')
     return
@@ -261,6 +361,12 @@ async function executeDeploy() {
       } catch { return }
     }
     const result = await executeBatchDeploy(sourceDir.value, items, batchId.value)
+    submittedIds.value = (result.pipelines || []).map(pipeline => Number(pipeline.id)).filter(id => Number.isSafeInteger(id) && id > 0)
+    if (hasSubmitted.value) {
+      // Persist accepted task IDs before any follow-up reads can fail.
+      await router.replace({ path: '/batch-deploy', query: { batchId: batchId.value, pipelineIds: submittedIds.value.join(',') } })
+      await refreshExecution()
+    }
     // Once accepted, inputs stay disabled even if execution fails or is rolled back.
     const submittedFiles = new Set(result.consumedFiles || [])
     matchResults.value.forEach(item => { if (submittedFiles.has(item.fileName)) item.updateUsed = true })
@@ -272,12 +378,11 @@ async function executeDeploy() {
       await ElMessageBox.alert(
         errors.join('\n\n'),
         `已创建 ${result.pipelines?.length || 0} 个任务，其他任务已跳过`,
-        { type: 'warning', confirmButtonText: '查看已创建任务' },
+        { type: 'warning', confirmButtonText: '知道了' },
       ).catch(() => {})
     } else {
       ElMessage.success(`已创建 ${result.pipelines?.length || 0} 个制品更新任务`)
     }
-    if (result.pipelines?.length) router.push('/build-queue')
   } finally {
     executing.value = false
   }
@@ -309,6 +414,7 @@ async function handleDrop(event: DragEvent) {
 }
 
 async function uploadEntries(entries: UploadEntry[]) {
+  if (uploadLoading.value || hasSubmitted.value) return
   const artifacts = entries.filter(entry => {
     const name = entry.path.toLowerCase()
     return name.endsWith('.jar') || name.endsWith('.zip')
@@ -477,7 +583,7 @@ async function pollDownload(jobId: string) {
     await loadLocalDownloadDir(job.targetPath || job.localDir)
     activeDownloadJob.value = null
     await loadVersions()
-    if (job.batchId) await activateVersion(job.batchId)
+    if (job.batchId && workflowStep.value === 0 && !hasSubmitted.value) await activateVersion(job.batchId)
     return
   }
   if (job.status === 'failed') {
@@ -564,24 +670,25 @@ function formatDownloadSize(size?: number) {
 </script>
 
 <template>
-  <div class="batch-deploy-page">
+  <div class="batch-deploy-page viewport-table-page">
     <div class="page-header">
       <div>
         <h4>新增更新任务</h4>
       </div>
       <div class="header-actions">
+        <el-button v-if="hasSubmitted" :disabled="executing || rolling || executionLoading" type="primary" @click="startNewTask">新建任务</el-button>
         <el-button @click="router.push('/artifacts/versions')">更新版本库</el-button>
         <el-button @click="router.push('/build-queue')">查看任务队列</el-button>
       </div>
     </div>
 
     <section class="step-strip">
-      <div class="step-item active"><strong>1</strong><span>上传并制作镜像</span></div>
-      <div class="step-line"></div>
-      <div class="step-item"><strong>2</strong><span>{{ settingsStore.autoRollout ? '自动滚动更新' : '滚动更新' }}</span></div>
+      <el-steps :active="allUpdated ? 4 : workflowStep" finish-status="success" align-center>
+        <el-step v-for="title in updateTaskSteps" :key="title" :title="title" />
+      </el-steps>
     </section>
 
-    <section class="workflow-section">
+    <section v-if="workflowStep === 0" class="workflow-section">
       <div class="section-title">
         <div>
           <strong>制品来源</strong>
@@ -682,7 +789,7 @@ function formatDownloadSize(size?: number) {
             <div class="download-sub">当前文件：{{ activeDownloadJob.currentPath || activeDownloadJob.remotePath }}</div>
             <div v-if="activeDownloadJob.error" class="download-error">{{ activeDownloadJob.error }}</div>
           </div>
-          <div v-else class="local-empty">当前没有正在下载的任务。当前目录内容如下：</div>
+          <div v-else class="local-empty">暂无下载任务</div>
           <div class="path-bar">
             <span class="crumb" @click="loadLocalDownloadDir(localBasePath)">本地下载目录</span>
             <template v-for="(part, idx) in localPathRelativeParts" :key="idx">
@@ -754,16 +861,7 @@ function formatDownloadSize(size?: number) {
       </div>
     </section>
 
-    <section class="summary-section" v-if="hasVersion">
-      <div><span>版本号</span><strong>{{ batchId || '-' }}</strong></div>
-      <div><span>来源</span><strong>{{ sourceTypeText(sourceType) }}</strong></div>
-      <div><span>可部署</span><strong>{{ matchedCount }}</strong></div>
-      <div><span>异常</span><strong>{{ invalidCount + unmatchedCount }}</strong></div>
-      <div class="path-cell"><span>目录</span><strong>{{ sourceDir || '-' }}</strong></div>
-      <el-button @click="resetSelection">更换制品</el-button>
-    </section>
-
-    <section class="workflow-section">
+    <section v-if="workflowStep === 1" class="workflow-section matching-section">
       <div class="section-title">
         <div>
           <strong>应用匹配</strong>
@@ -781,10 +879,10 @@ function formatDownloadSize(size?: number) {
         v-loading="loading"
         border
         stripe
-        height="420"
+        height="100%"
         table-layout="auto"
         empty-text="暂无制品"
-        @selection-change="(rows: MatchResult[]) => selectedFiles = rows.map(row => row.fileName)"
+        @selection-change="handleMatchSelection"
       >
         <el-table-column type="selection" width="46" :selectable="isDeployableMatch" />
         <el-table-column prop="fileName" label="制品文件" min-width="210" show-overflow-tooltip />
@@ -803,13 +901,58 @@ function formatDownloadSize(size?: number) {
       </el-table>
     </section>
 
-    <section class="action-bar">
-      <div class="deploy-options">
-        <strong>{{ settingsStore.autoRollout ? '镜像制作与更新' : '第一步：上传并制作镜像' }}</strong>
+    <section v-if="workflowStep === 2 && !hasSubmitted" class="workflow-section">
+      <div class="section-title">
+        <strong>制作镜像</strong>
+        <el-tag>{{ settingsStore.autoRollout ? '自动滚动更新' : '手动滚动更新' }}</el-tag>
       </div>
-      <el-button type="primary" :disabled="deployableResults.length === 0" :loading="executing" @click="executeDeploy">
-        {{ matchResults.length > 0 && matchResults.every(item => item.updateUsed || !item.matched || !item.valid || item.skipped) ? '无可用制品' : `${settingsStore.autoRollout ? '制作镜像并滚动更新' : '制作镜像'}（${deployableResults.length} 个制品）` }}
-      </el-button>
+      <el-table :data="deployableResults" border stripe height="100%">
+        <el-table-column prop="fileName" label="制品文件" min-width="220" show-overflow-tooltip />
+        <el-table-column prop="appName" label="应用" min-width="160" />
+        <el-table-column prop="appType" label="类型" width="100" />
+      </el-table>
+    </section>
+
+    <section v-if="hasSubmitted && workflowStep >= 2" class="workflow-section">
+      <div class="section-title">
+        <strong>{{ workflowStep === 2 ? '镜像制作状态' : '滚动更新状态' }}</strong>
+        <el-button :disabled="rolling || executing" :loading="executionLoading" @click="refreshExecution">刷新状态</el-button>
+      </div>
+      <el-alert v-if="executionError" title="任务状态读取失败，请刷新重试" type="error" :closable="false" show-icon />
+      <el-table :data="submittedPipelines" border stripe height="100%" empty-text="正在读取任务状态">
+        <el-table-column prop="appName" label="应用" min-width="150" />
+        <el-table-column prop="pipelineNo" label="任务" min-width="180" />
+        <el-table-column prop="imageName" label="镜像" min-width="220" show-overflow-tooltip />
+        <el-table-column label="状态" min-width="160">
+          <template #default="{ row }"><el-tag :type="executionStatus(row).type">{{ executionStatus(row).text }}</el-tag></template>
+        </el-table-column>
+        <el-table-column label="操作" width="100" fixed="right">
+          <template #default="{ row }"><el-button link type="primary" @click="router.push(`/release/${row.id}`)">查看日志</el-button></template>
+        </el-table-column>
+      </el-table>
+    </section>
+
+    <section v-if="workflowStep > 0 || hasVersion" class="action-bar">
+      <span v-if="hasVersion" class="version-label">{{ batchId }}</span>
+      <div class="step-actions">
+        <template v-if="workflowStep === 0">
+          <el-button @click="resetSelection">清除选择</el-button>
+          <el-button type="primary" @click="workflowStep = 1">下一步：应用匹配</el-button>
+        </template>
+        <template v-else-if="!hasSubmitted">
+          <el-button :disabled="executing" @click="workflowStep--">上一步</el-button>
+          <el-button v-if="workflowStep === 1" type="primary" :disabled="!deployableResults.length" @click="workflowStep = 2">下一步：制作镜像（{{ deployableResults.length }}）</el-button>
+          <el-button v-else type="primary" :disabled="!deployableResults.length" :loading="executing" @click="executeDeploy">{{ settingsStore.autoRollout ? '开始更新' : '开始制作镜像' }}</el-button>
+        </template>
+        <template v-else-if="workflowStep === 2">
+          <el-button type="primary" :disabled="!imagesComplete || !hasReadyImages" @click="workflowStep = 3">下一步：滚动更新</el-button>
+        </template>
+        <template v-else>
+          <el-button :disabled="executionLoading || rolling" @click="workflowStep = 2">镜像状态</el-button>
+          <el-button v-if="readyToRollout.length" type="primary" :disabled="executionError || executionLoading" :loading="rolling" @click="startRollout">开始滚动更新（{{ readyToRollout.length }}）</el-button>
+          <el-tag v-else-if="allUpdated" type="success">更新完成</el-tag>
+        </template>
+      </div>
     </section>
   </div>
 </template>
@@ -824,7 +967,6 @@ function formatDownloadSize(size?: number) {
 .page-header,
 .step-strip,
 .workflow-section,
-.summary-section,
 .action-bar {
   background: #fff;
   border: 1px solid #e5e7eb;
@@ -836,24 +978,12 @@ function formatDownloadSize(size?: number) {
   justify-content: space-between;
   padding: 16px 18px;
 }
-.page-header h4 { margin: 0 0 6px; font-size: 16px; color: #1f2937; }
+.page-header h4 { margin: 0; font-size: 16px; color: #1f2937; }
 .header-actions { display: flex; gap: 8px; }
-.step-strip { display: grid; grid-template-columns: 150px 1fr 150px 1fr 150px 1fr 150px; align-items: center; padding: 14px 18px; }
-.step-item { display: flex; align-items: center; gap: 8px; color: #9ca3af; font-weight: 600; }
-.step-item strong {
-  width: 24px;
-  height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  border: 1px solid #d1d5db;
-  font-size: 12px;
-}
-.step-item.active { color: #2563eb; }
-.step-item.active strong { color: #fff; background: #2563eb; border-color: #2563eb; }
-.step-line { height: 1px; background: #d1d5db; }
-.workflow-section { padding: 14px 16px 16px; }
+.step-strip { padding: 20px 18px; }
+.workflow-section { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; padding: 14px 16px 16px; }
+.workflow-section > .el-table { flex: 1; min-height: 0; }
+.page-header, .step-strip, .section-title, .action-bar { flex-shrink: 0; }
 .section-title {
   min-height: 40px;
   display: flex;
@@ -866,7 +996,8 @@ function formatDownloadSize(size?: number) {
 .section-title span { color: #8a9099; }
 .status-tags { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .upload-zone {
-  min-height: 260px;
+  flex: 1;
+  min-height: 180px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -894,35 +1025,7 @@ function formatDownloadSize(size?: number) {
 .download-error,
 .download-error-inline { color: #f56c6c; }
 .local-empty { min-height: 82px; display: flex; align-items: center; justify-content: center; text-align: center; color: #909399; font-size: 12px; border: 1px dashed #dcdfe6; border-radius: 4px; background: #fbfcff; padding: 12px; margin-bottom: 10px; }
-.summary-section {
-  display: grid;
-  grid-template-columns: 220px 120px 90px 90px minmax(260px, 1fr) auto;
-  gap: 8px;
-  align-items: stretch;
-  padding: 12px;
-}
-.summary-section > div {
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid #e5e7eb;
-  background: #f8fafc;
-}
-.summary-section span {
-  display: block;
-  font-size: 12px;
-  color: #8a9099;
-  margin-bottom: 4px;
-}
-.summary-section strong {
-  display: block;
-  color: #1f2937;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .action-bar {
-  position: sticky;
-  bottom: 0;
   z-index: 5;
   display: flex;
   align-items: center;
@@ -931,20 +1034,13 @@ function formatDownloadSize(size?: number) {
   padding: 12px 16px;
   box-shadow: 0 -6px 18px rgba(15, 23, 42, 0.05);
 }
-.deploy-options {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: #606266;
-}
-.deploy-options > strong { color: #1f2937; }
-@media (max-width: 1280px) {
-  .step-strip { grid-template-columns: 1fr; gap: 8px; }
-  .step-line { display: none; }
+.step-actions { display: flex; align-items: center; gap: 10px; }
+.version-label { color: #606266; overflow-wrap: anywhere; }
+@media (max-width: 1000px) {
   .download-layout { grid-template-columns: 1fr; }
-  .summary-section { grid-template-columns: 1fr 1fr; }
-  .path-cell { grid-column: 1 / -1; }
-  .action-bar,
-  .deploy-options { align-items: stretch; flex-direction: column; }
+  .page-header { gap: 12px; flex-wrap: wrap; }
+  .step-strip { padding: 16px 4px; }
+  .action-bar { align-items: stretch; flex-direction: column; }
+  .step-actions { justify-content: flex-end; flex-wrap: wrap; }
 }
 </style>

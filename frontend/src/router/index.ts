@@ -19,7 +19,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'tasks', name: 'TaskList', component: () => import('../views/TaskListView.vue'), meta: { title: '任务列表', fillViewport: true, sourceBuild: true } },
       { path: 'artifact-collect', redirect: '/artifacts/import' },
       { path: 'artifact-batches', redirect: '/artifacts/versions' },
-      { path: 'batch-deploy', name: 'BatchDeploy', component: () => import('../views/BatchDeployView.vue'), meta: { title: '新增更新任务' } },
+      { path: 'batch-deploy', name: 'BatchDeploy', component: () => import('../views/BatchDeployView.vue'), meta: { title: '新增更新任务', fillViewport: true } },
       { path: 'build-queue', name: 'BuildQueue', component: () => import('../views/BuildQueueView.vue'), meta: { title: '构建队列' } },
       { path: 'release', name: 'ReleaseList', component: () => import('../views/ReleaseListView.vue'), meta: { title: '构建历史', fillViewport: true } },
       { path: 'release/:id', name: 'PipelineDetail', component: () => import('../views/PipelineDetailView.vue'), meta: { title: '构建详情' } },

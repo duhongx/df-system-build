@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict'
+import { updateTaskSteps, imageState, imagesSettled, rolloutState, needsExecutionPolling, parseSubmittedPipelineIds } from './compiled/update-task-workflow.js'
+
+assert.deepEqual(updateTaskSteps, ['上传制品', '应用匹配', '制作镜像', '滚动更新'])
+const pipeline = (status, stages = [], rest = {}) => ({ status, stages, ...rest })
+const pushed = [{ stageCode: 'BUILD_IMAGE', status: 'SUCCESS' }, { stageCode: 'PUSH_IMAGE', status: 'SUCCESS' }]
+assert.equal(imagesSettled([]), false)
+for (const status of ['PENDING', 'RUNNING']) assert.equal(imageState(pipeline(status)), 'pending')
+for (const status of ['IMAGE_READY', 'DEPLOYING', 'SUCCESS']) assert.equal(imageState(pipeline(status)), 'ready')
+for (const status of ['FAILED', 'CANCELED']) assert.equal(imageState(pipeline(status)), 'failed')
+assert.equal(imageState(pipeline('RUNNING', [{ stageCode: 'PUSH_IMAGE', status: 'FAILED' }])), 'failed')
+assert.equal(imageState(pipeline('FAILED', pushed)), 'ready', 'rollout failure must retain the prepared image')
+assert.equal(imagesSettled([pipeline('IMAGE_READY'), pipeline('RUNNING')]), false)
+assert.equal(imagesSettled([pipeline('IMAGE_READY'), pipeline('FAILED')]), true, 'partial build failure must not block reviewing the prepared targets')
+assert.equal(rolloutState(pipeline('FAILED')), 'image_failed')
+assert.equal(rolloutState(pipeline('FAILED', pushed)), 'failed')
+assert.equal(rolloutState(pipeline('FAILED', pushed, { deploymentProgress: 'completed' })), 'record_error')
+assert.equal(rolloutState(pipeline('SUCCESS', pushed, { deploymentProgress: 'completed', errorMessage: 'record failed' })), 'record_error')
+assert.equal(rolloutState(pipeline('SUCCESS')), 'success')
+assert.equal(rolloutState(pipeline('IMAGE_READY')), 'ready')
+assert.equal(rolloutState(pipeline('DEPLOYING')), 'running')
+assert.equal(rolloutState(pipeline('RUNNING', [...pushed, { stageCode: 'K8S_DEPLOY', status: 'RUNNING' }])), 'running')
+assert.equal(needsExecutionPolling([pipeline('IMAGE_READY'), pipeline('FAILED')]), false)
+assert.equal(needsExecutionPolling([pipeline('SUCCESS'), pipeline('PENDING')]), true)
+assert.deepEqual(parseSubmittedPipelineIds('12,12,0,-1,foo,4,9e2,1.5,9007199254740992'), [12, 4])
+assert.deepEqual(parseSubmittedPipelineIds(['12']), [])
