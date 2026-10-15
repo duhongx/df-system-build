@@ -5,6 +5,7 @@
     "buttonsPerRow": 7,
     "singleLine": true,
     "allButtonsFit": true,
+    "desktopColumnsFit": true,
     "collectionEntryRemoved": true,
     "pageErrors": [],
     "mutationRequests": []
@@ -15,6 +16,7 @@
     "buttonsPerRow": 7,
     "singleLine": true,
     "allButtonsFit": true,
+    "desktopColumnsFit": true,
     "collectionEntryRemoved": true,
     "pageErrors": [],
     "mutationRequests": []
@@ -25,6 +27,7 @@
     "buttonsPerRow": 7,
     "singleLine": true,
     "allButtonsFit": true,
+    "desktopColumnsFit": null,
     "collectionEntryRemoved": true,
     "pageErrors": [],
     "mutationRequests": []
@@ -35,6 +38,7 @@
     "buttonsPerRow": 7,
     "singleLine": true,
     "allButtonsFit": true,
+    "desktopColumnsFit": null,
     "collectionEntryRemoved": true,
     "pageErrors": [],
     "mutationRequests": []
