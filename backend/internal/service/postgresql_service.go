@@ -185,13 +185,14 @@ type ReplicationInfo struct {
 }
 
 type ParseSQLRequest struct {
+	CreatedUser string `json:"-"`
 	SystemCode  string `json:"systemCode"`
 	Environment string `json:"environment"`
 	SchemaName  string `json:"schemaName"`
 	Version     string `json:"version"`
 	GroupSortNo int    `json:"groupSortNo"`
 	FileName    string `json:"fileName"`
-	Content     string `json:"content" binding:"required"`
+	Content     string `json:"content"`
 	Overwrite   bool   `json:"overwrite"`
 }
 
@@ -233,8 +234,9 @@ type ExecuteSQLContentRequest struct {
 }
 
 type ImportServerSQLRequest struct {
-	FilePath  string `json:"filePath" binding:"required"`
-	Overwrite bool   `json:"overwrite"`
+	CreatedUser string `json:"-"`
+	FilePath    string `json:"filePath" binding:"required"`
+	Overwrite   bool   `json:"overwrite"`
 }
 
 type SQLForceWhitelistOption struct {
@@ -257,13 +259,14 @@ type SQLExportStatement struct {
 
 type ParseSQLBatchFile struct {
 	FileName string `json:"fileName" binding:"required"`
-	Content  string `json:"content" binding:"required"`
+	Content  string `json:"content"`
 }
 
 type ParseSQLBatchRequest struct {
-	BatchName string              `json:"batchName"`
-	Overwrite bool                `json:"overwrite"`
-	Files     []ParseSQLBatchFile `json:"files" binding:"required"`
+	CreatedUser string              `json:"-"`
+	BatchName   string              `json:"batchName"`
+	Overwrite   bool                `json:"overwrite"`
+	Files       []ParseSQLBatchFile `json:"files" binding:"required"`
 }
 
 type sqlExecutionCancelRegistry struct {
@@ -1721,23 +1724,36 @@ func (s *PostgreSQLService) ParseSQL(req ParseSQLRequest) (*model.SQLChangeFile,
 }
 
 func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
-	version, order, schema, err := parseReleaseSQLFileName(req.FileName)
+	target, err := currentReleaseSQLTarget()
 	if err != nil {
 		return nil, nil, err
 	}
-	parsed, err := splitReleaseSQL(req.Content)
+	version, order, schema, err := releaseSQLUploadMetadata(req.FileName)
 	if err != nil {
 		return nil, nil, err
+	}
+	parsed, splitErr := splitReleaseSQL(req.Content)
+	importMessage := ""
+	if splitErr != nil {
+		parsed = nil
+		importMessage = splitErr.Error()
+	} else if issue := releaseSQLExecutionIssue(&model.SQLChangeFile{SchemaName: schema, FileContent: req.Content}, parsed); issue != nil {
+		importMessage = issue.Error()
 	}
 	var previous model.SQLChangeFile
 	var previousStatements []model.SQLChangeStatement
-	if err := validateReleaseSQLTransactions(parsed); err != nil {
-		return nil, nil, err
-	}
 	if err := lockSQLFileIdentity(db, version, req.FileName, schema); err != nil {
 		return nil, nil, err
 	}
-	err = db.Clauses(clause.Locking{Strength: "UPDATE"}).Where("version = ? AND file_name = ? AND schema_name = ?", version, req.FileName, schema).Order("id DESC").First(&previous).Error
+	var configured model.SQLChangeFile
+	configErr := db.Where("version = ? AND file_name = ? AND schema_configured = true AND database_target = ?", version, req.FileName, target).Order("id DESC").First(&configured).Error
+	if configErr != nil && !errors.Is(configErr, gorm.ErrRecordNotFound) {
+		return nil, nil, configErr
+	}
+	if configErr == nil {
+		schema = configured.SchemaName
+	}
+	err = db.Clauses(clause.Locking{Strength: "UPDATE"}).Where("version = ? AND file_name = ? AND schema_name = ? AND database_target = ?", version, req.FileName, schema, target).Order("id DESC").First(&previous).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil, err
 	}
@@ -1745,7 +1761,7 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 		if !previous.IsDeleted && !req.Overwrite {
 			return nil, nil, fmt.Errorf("SQL 文件已存在")
 		}
-		if previous.ExecuteStatus == "RUNNING" {
+		if previous.ExecuteStatus == "RUNNING" || previous.ExecuteStatus == "QUEUED" {
 			return nil, nil, fmt.Errorf("SQL 文件正在执行中，不能覆盖")
 		}
 		if err := db.Where("file_id = ?", previous.ID).Order("line_number ASC, id ASC").Find(&previousStatements).Error; err != nil {
@@ -1760,7 +1776,13 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 			return nil, nil, err
 		}
 	}
-	file := &model.SQLChangeFile{FileName: req.FileName, FileContent: req.Content, Version: version, GroupSortNo: order, SchemaName: schema, ExecuteStatus: "PENDING"}
+	file := &model.SQLChangeFile{DatabaseTarget: target, FileName: req.FileName, FileContent: req.Content, Version: version, GroupSortNo: order, SchemaName: schema, SchemaConfigured: configErr == nil, CreatedUser: req.CreatedUser, ImportMessage: importMessage, ExecuteStatus: "PENDING"}
+	file.ImportMessage = ""
+	if splitErr != nil {
+		file.ImportMessage = splitErr.Error()
+	} else if issue := releaseSQLExecutionIssue(file, parsed); issue != nil {
+		file.ImportMessage = issue.Error()
+	}
 	if err := db.Create(file).Error; err != nil {
 		return nil, nil, err
 	}
@@ -1771,12 +1793,18 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 	}
 	for i := range parsed {
 		stmt := &parsed[i]
+		var inherited *model.SQLChangeStatement
 		stmt.FileID = file.ID
 		if matches := old[stmt.SQLContent]; len(matches) > 0 {
 			prior := matches[0]
 			old[stmt.SQLContent] = matches[1:]
 			if prior.ExecuteStatus == "SUCCESS" || prior.ExecuteStatus == "SKIPPED" {
+				inherited = &prior
+				if err := ensureLegacySQLStatementRecord(db, &previous, prior); err != nil {
+					return nil, nil, err
+				}
 				stmt.ExecuteStatus = prior.ExecuteStatus
+				stmt.SkipKind = sqlSkipKind(prior)
 				stmt.ExecuteMessage = prior.ExecuteMessage
 				stmt.ExecuteTime = prior.ExecuteTime
 				stmt.ExecuteUser = prior.ExecuteUser
@@ -1787,6 +1815,20 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 		}
 		if err := db.Create(stmt).Error; err != nil {
 			return nil, nil, err
+		}
+		if inherited != nil {
+			record := newSQLStatementRecord(file, *stmt, "INHERIT", req.CreatedUser)
+			no := false
+			now := time.Now()
+			record.Submitted = &no
+			record.FinishedAt = &now
+			record.Status = stmt.ExecuteStatus
+			record.SkipKind = stmt.SkipKind
+			record.SourceStatementID = inherited.ID
+			record.Message = fmt.Sprintf("沿用前一文件版本的已完成结果（来源语句 %d）", inherited.ID)
+			if err := db.Create(&record).Error; err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 	return file, parsed, nil
@@ -2375,7 +2417,7 @@ func (s *PostgreSQLService) ParseSQLBatch(req ParseSQLBatchRequest) (*model.SQLC
 	names := make(map[string]bool)
 	total := 0
 	for _, file := range files {
-		if _, _, _, err := parseReleaseSQLFileName(file.FileName); err != nil {
+		if _, _, _, err := releaseSQLUploadMetadata(file.FileName); err != nil {
 			return nil, nil, fmt.Errorf("文件 %s: %w", file.FileName, err)
 		}
 		if names[file.FileName] {
@@ -2388,8 +2430,8 @@ func (s *PostgreSQLService) ParseSQLBatch(req ParseSQLBatchRequest) (*model.SQLC
 		}
 	}
 	sort.SliceStable(files, func(i, j int) bool {
-		vi, oi, _, _ := parseReleaseSQLFileName(files[i].FileName)
-		vj, oj, _, _ := parseReleaseSQLFileName(files[j].FileName)
+		vi, oi, _, _ := releaseSQLUploadMetadata(files[i].FileName)
+		vj, oj, _, _ := releaseSQLUploadMetadata(files[j].FileName)
 		if vi != vj {
 			return vi < vj
 		}
@@ -2416,7 +2458,7 @@ func (s *PostgreSQLService) ParseSQLBatch(req ParseSQLBatchRequest) (*model.SQLC
 			file, _, err := s.parseSQLWithDB(tx, ParseSQLRequest{
 				FileName:  input.FileName,
 				Content:   input.Content,
-				Overwrite: req.Overwrite,
+				Overwrite: req.Overwrite, CreatedUser: req.CreatedUser,
 			})
 			if err != nil {
 				return err
@@ -2973,16 +3015,27 @@ func (s *PostgreSQLService) StartSQLFileExecution(ctx context.Context, fileID ui
 }
 
 func (s *PostgreSQLService) prepareSQLFileExecution(fileID uint, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, SQLExecuteOptions, error) {
+	return s.prepareQueuedSQLFileExecution(fileID, 0, username, options)
+}
+
+func (s *PostgreSQLService) prepareQueuedSQLFileExecution(fileID, batchID uint, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, SQLExecuteOptions, error) {
+	target, err := currentReleaseSQLTarget()
+	if err != nil {
+		return nil, nil, options, err
+	}
 	var file *model.SQLChangeFile
 	var statements []model.SQLChangeStatement
-	err := repository.DB.Transaction(func(tx *gorm.DB) error {
+	err = repository.DB.Transaction(func(tx *gorm.DB) error {
 		var err error
 		file, err = lockSQLFile(tx, fileID)
 		if err != nil {
 			return err
 		}
-		if file.ExecuteStatus == "RUNNING" {
-			return fmt.Errorf("SQL 文件正在执行中")
+		if file.ExecuteStatus == "RUNNING" || (file.ExecuteStatus == "QUEUED" && (batchID == 0 || file.ExecutionBatchID != batchID)) {
+			return fmt.Errorf("SQL 文件正在执行或等待执行中")
+		}
+		if batchID != 0 && (file.ExecuteStatus != "QUEUED" || file.ExecutionBatchID != batchID) {
+			return fmt.Errorf("SQL 文件执行队列已失效")
 		}
 		if file.ExecuteStatus == "SUCCESS" || file.ExecuteStatus == "SKIPPED" {
 			return fmt.Errorf("SQL 文件已执行过，不能重复执行")
@@ -2995,15 +3048,27 @@ func (s *PostgreSQLService) prepareSQLFileExecution(fileID uint, username string
 				return fmt.Errorf("第 %d 行执行结果待核实，请先核实数据库结果；确认已生效后可手工跳过", stmt.LineNumber)
 			}
 		}
-		if err := validateReleaseSQLTransactions(statements); err != nil {
+		if err := releaseSQLExecutionIssue(file, statements); err != nil {
 			return err
+		}
+		if err := requireReleaseSQLTarget(file, target); err != nil {
+			return err
+		}
+		if file.DatabaseTarget == "" {
+			for _, stmt := range statements {
+				if stmt.ExecuteStatus != "PENDING" {
+					return fmt.Errorf("旧文件的数据库目标未确认，不能续执行，请先迁移执行目标")
+				}
+			}
+			file.DatabaseTarget = target
 		}
 		now := time.Now()
-		if err := tx.Model(file).Updates(map[string]any{"execute_status": "RUNNING", "execute_message": "后台执行中", "execute_user": username, "execute_time": now}).Error; err != nil {
+		if err := tx.Model(file).Updates(map[string]any{"database_target": file.DatabaseTarget, "execute_status": "RUNNING", "execute_message": "后台执行中", "execute_user": username, "execute_time": now, "execution_batch_id": batchID}).Error; err != nil {
 			return err
 		}
+		file.ExecutionBatchID = batchID
 		file.ExecuteStatus, file.ExecuteMessage, file.ExecuteUser, file.ExecuteTime = "RUNNING", "后台执行中", username, &now
-		return nil
+		return updateSQLExecutionSnapshot(tx, file)
 	})
 	return file, statements, options, err
 }
@@ -3013,10 +3078,25 @@ func (s *PostgreSQLService) runPreparedSQLFileExecution(ctx context.Context, fil
 }
 
 func (s *PostgreSQLService) markSQLFileExecutionFailed(fileID uint, username string, executionErr error) {
-	err := repository.DB.Model(&model.SQLChangeFile{}).Where("id = ? AND is_deleted = ? AND execute_status = ?", fileID, false, "RUNNING").
-		Updates(map[string]any{"execute_status": "FAILED", "execute_user": username, "execute_time": time.Now(), "execute_message": executionErr.Error()}).Error
+	err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&model.SQLChangeFile{}).Where("id = ? AND is_deleted = false AND execute_status = ?", fileID, "RUNNING").Updates(map[string]any{"execute_status": "FAILED", "execute_user": username, "execute_time": time.Now(), "execute_message": executionErr.Error()})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+		if err := tx.Model(&model.SQLStatementRecord{}).Where("file_id = ? AND status = ?", fileID, "RUNNING").Updates(map[string]any{"status": "UNKNOWN", "message": executionErr.Error(), "finished_at": time.Now()}).Error; err != nil {
+			return err
+		}
+		var file model.SQLChangeFile
+		if err := tx.First(&file, fileID).Error; err != nil {
+			return err
+		}
+		return updateSQLExecutionSnapshot(tx, &file)
+	})
 	if err != nil {
-		log.Printf("SQL 文件 %d 执行失败: %v；保存失败状态也失败: %v", fileID, executionErr, err)
+		log.Printf("保存 SQL 文件异常状态失败: %v", err)
 	}
 }
 
@@ -3234,14 +3314,24 @@ func (s *PostgreSQLService) SkipSQLStatement(statementID uint, username string) 
 		if err := tx.First(&stmt, statementID).Error; err != nil {
 			return err
 		}
-		if file.ExecuteStatus == "RUNNING" || stmt.ExecuteStatus == "RUNNING" {
+		if file.ExecuteStatus == "RUNNING" || file.ExecuteStatus == "QUEUED" || stmt.ExecuteStatus == "RUNNING" {
 			return fmt.Errorf("SQL 正在执行中，不能手工跳过")
 		}
 		if file.ExecuteStatus == "SUCCESS" || stmt.ExecuteStatus == "SUCCESS" {
 			return fmt.Errorf("已成功的 SQL 不能跳过")
 		}
+		if stmt.ExecuteStatus == "SKIPPED" {
+			return nil
+		}
+		if err := ensureLegacySQLStatementRecord(tx, file, stmt); err != nil {
+			return err
+		}
+		if err := appendSQLActionRecord(tx, file, stmt, "MANUAL_SKIP", username, "SKIPPED", "手动跳过此句"); err != nil {
+			return err
+		}
 		now := time.Now()
 		stmt.ExecuteStatus = "SKIPPED"
+		stmt.SkipKind = "MANUAL"
 		stmt.ExecuteMessage = "手工标记不执行: " + username
 		stmt.ExecuteTime = &now
 		stmt.ExecuteUser = username
@@ -3268,11 +3358,26 @@ func (s *PostgreSQLService) SkipSQLFile(fileID uint, username string) (*model.SQ
 		if file.ExecuteStatus == "SUCCESS" {
 			return fmt.Errorf("已成功的 SQL 文件不能跳过")
 		}
-		if file.ExecuteStatus == "RUNNING" {
-			return fmt.Errorf("SQL 文件正在执行中，不能手工跳过")
+		if file.ExecuteStatus == "RUNNING" || file.ExecuteStatus == "QUEUED" {
+			return fmt.Errorf("SQL 文件正在执行或等待执行中，不能手工跳过")
+		}
+		if file.ExecuteStatus == "SKIPPED" {
+			return nil
+		}
+		var rows []model.SQLChangeStatement
+		if err := tx.Where("file_id = ? AND execute_status NOT IN ?", fileID, []string{"SUCCESS", "SKIPPED"}).Find(&rows).Error; err != nil {
+			return err
+		}
+		for _, stmt := range rows {
+			if err := ensureLegacySQLStatementRecord(tx, &file, stmt); err != nil {
+				return err
+			}
+			if err := appendSQLActionRecord(tx, &file, stmt, "FILE_SKIP", username, "SKIPPED", "手动跳过文件"); err != nil {
+				return err
+			}
 		}
 		now := time.Now()
-		if err := tx.Model(&model.SQLChangeStatement{}).Where("file_id = ? AND execute_status <> ?", fileID, "SUCCESS").Updates(map[string]any{"execute_status": "SKIPPED", "execute_message": "手工标记不执行: " + username, "execute_time": &now, "execute_user": username}).Error; err != nil {
+		if err := tx.Model(&model.SQLChangeStatement{}).Where("file_id = ? AND execute_status NOT IN ?", fileID, []string{"SUCCESS", "SKIPPED"}).Updates(map[string]any{"execute_status": "SKIPPED", "skip_kind": "MANUAL", "execute_message": "手工标记不执行: " + username, "execute_time": &now, "execute_user": username}).Error; err != nil {
 			return err
 		}
 		file.ExecuteStatus = "SKIPPED"
@@ -3562,7 +3667,7 @@ func batchExecutionSummary(successFiles, failedFiles, skippedFiles, canceledFile
 	}
 }
 
-func (s *PostgreSQLService) ListSQLBatches(page, pageSize int) ([]model.SQLChangeBatch, int64, error) {
+func (s *PostgreSQLService) ListSQLBatches(page, pageSize int, executionOnly ...bool) ([]model.SQLChangeBatch, int64, error) {
 	if page <= 0 {
 		page = 1
 	}
@@ -3572,6 +3677,9 @@ func (s *PostgreSQLService) ListSQLBatches(page, pageSize int) ([]model.SQLChang
 	var total int64
 	var batches []model.SQLChangeBatch
 	query := repository.DB.Model(&model.SQLChangeBatch{}).Where("is_deleted = ?", false)
+	if len(executionOnly) > 0 && executionOnly[0] {
+		query = query.Where("file_ids_json <> ''")
+	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
@@ -3583,6 +3691,9 @@ func (s *PostgreSQLService) GetSQLBatch(id uint) (*model.SQLChangeBatch, []model
 	var batch model.SQLChangeBatch
 	if err := repository.DB.Where("is_deleted = ?", false).First(&batch, id).Error; err != nil {
 		return nil, nil, err
+	}
+	if batch.FileIDsJSON != "" {
+		return s.getSelectedSQLBatchFiles(&batch)
 	}
 	var files []model.SQLChangeFile
 	if err := repository.DB.Where("batch_id = ? AND is_deleted = ?", id, false).Order("batch_sort_no ASC, file_name ASC, id ASC").Find(&files).Error; err != nil {
@@ -3596,6 +3707,10 @@ func (s *PostgreSQLService) ListSQLFiles(page, pageSize int) ([]model.SQLChangeF
 }
 
 func (s *PostgreSQLService) ListSQLFilesByStatus(page, pageSize int, statusGroup string, filters ...SQLFileFilter) ([]model.SQLChangeFile, int64, error) {
+	target, err := currentReleaseSQLTarget()
+	if err != nil {
+		return nil, 0, err
+	}
 	if page <= 0 {
 		page = 1
 	}
@@ -3604,7 +3719,7 @@ func (s *PostgreSQLService) ListSQLFilesByStatus(page, pageSize int, statusGroup
 	}
 	var total int64
 	var files []model.SQLChangeFile
-	query := repository.DB.Model(&model.SQLChangeFile{}).Where("is_deleted = ?", false)
+	query := repository.DB.Model(&model.SQLChangeFile{}).Where("is_deleted = ? AND (database_target = ? OR database_target = '')", false, target)
 	if len(filters) > 0 {
 		f := filters[0]
 		if f.Version != "" {
@@ -3619,19 +3734,36 @@ func (s *PostgreSQLService) ListSQLFilesByStatus(page, pageSize int, statusGroup
 	}
 	switch statusGroup {
 	case "todo":
-		query = query.Where("execute_status IN ?", []string{"PENDING", "RUNNING", "FAILED", "PARTIAL_FAILED", "NOT_EXECUTABLE", "CANCELED", "UNKNOWN"})
+		query = query.Where("execute_status IN ?", []string{"PENDING", "QUEUED", "RUNNING", "FAILED", "PARTIAL_FAILED", "NOT_EXECUTABLE", "CANCELED", "UNKNOWN"})
 	case "done":
 		query = query.Where("execute_status IN ?", []string{"SUCCESS", "SKIPPED"})
 	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	order := "version DESC, file_name DESC, id DESC"
-	if statusGroup == "todo" {
-		order = "version ASC, group_sort_no ASC, file_name ASC, id ASC"
+	// Sort file metadata naturally before pagination; SQL lexical ordering
+	// would place V10 before V2. File content is deliberately omitted.
+	if err := query.Omit("file_content").Find(&files).Error; err != nil {
+		return nil, 0, err
 	}
-	err := query.Omit("file_content").Order(order).Offset((page - 1) * pageSize).Limit(pageSize).Find(&files).Error
-	return files, total, err
+	sort.SliceStable(files, func(i, j int) bool {
+		if statusGroup == "done" {
+			return lessSQLFiles(files[j], files[i])
+		}
+		return lessSQLFiles(files[i], files[j])
+	})
+	start := (page - 1) * pageSize
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(files) {
+		return []model.SQLChangeFile{}, total, nil
+	}
+	end := start + pageSize
+	if end > len(files) {
+		end = len(files)
+	}
+	return files[start:end], total, nil
 }
 
 func (s *PostgreSQLService) GetSQLFile(id uint) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
@@ -3655,8 +3787,8 @@ func (s *PostgreSQLService) DeleteSQLFile(id uint) error {
 		if file.ExecuteStatus == "SUCCESS" {
 			return fmt.Errorf("已执行成功的文件不能删除")
 		}
-		if file.ExecuteStatus == "RUNNING" {
-			return fmt.Errorf("SQL 文件正在执行中，不能删除")
+		if file.ExecuteStatus == "RUNNING" || file.ExecuteStatus == "QUEUED" {
+			return fmt.Errorf("SQL 文件正在执行或等待执行中，不能删除")
 		}
 		var uncertain int64
 		if err := tx.Model(&model.SQLChangeStatement{}).Where("file_id = ? AND execute_status IN ?", id, []string{"RUNNING", "UNKNOWN"}).Count(&uncertain).Error; err != nil {
@@ -3723,19 +3855,22 @@ func (s *PostgreSQLService) ImportServerSQL(req ImportServerSQLRequest) (int, er
 		if err != nil {
 			return 0, err
 		}
-		_, _, err = s.ParseSQL(ParseSQLRequest{FileName: filepath.Base(absPath), Content: string(content), Overwrite: req.Overwrite})
+		_, _, err = s.ParseSQL(ParseSQLRequest{FileName: filepath.Base(absPath), Content: string(content), Overwrite: req.Overwrite, CreatedUser: req.CreatedUser})
 		if err != nil {
 			return 0, err
 		}
 		return 1, nil
 	case ".zip":
-		return s.importSQLZip(absPath, req.Overwrite)
+		return s.importSQLZipAsUser(absPath, req.Overwrite, req.CreatedUser)
 	default:
 		return 0, fmt.Errorf("仅支持 .sql 或 .zip 文件")
 	}
 }
 
 func (s *PostgreSQLService) importSQLZip(path string, overwrite bool) (int, error) {
+	return s.importSQLZipAsUser(path, overwrite, "")
+}
+func (s *PostgreSQLService) importSQLZipAsUser(path string, overwrite bool, username string) (int, error) {
 	reader, err := zip.OpenReader(path)
 	if err != nil {
 		return 0, fmt.Errorf("解压提取 SQL 错误: %w", err)
@@ -3772,7 +3907,7 @@ func (s *PostgreSQLService) importSQLZip(path string, overwrite bool) (int, erro
 	if len(files) == 0 {
 		return 0, fmt.Errorf("ZIP 内没有 SQL 文件")
 	}
-	if _, _, err := s.ParseSQLBatch(ParseSQLBatchRequest{BatchName: filepath.Base(path), Overwrite: overwrite, Files: files}); err != nil {
+	if _, _, err := s.ParseSQLBatch(ParseSQLBatchRequest{BatchName: filepath.Base(path), Overwrite: overwrite, Files: files, CreatedUser: username}); err != nil {
 		return 0, err
 	}
 	return len(files), nil

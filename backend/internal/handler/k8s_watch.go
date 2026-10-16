@@ -44,13 +44,10 @@ func (h *K8sWatchHandler) Watch(c *gin.Context) {
 		return
 	}
 
-	namespace := c.Query("namespace")
-	if namespace == "" {
-		namespace, err = k8s.GetDefaultNamespace()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
+	namespace, err := k8s.ManagementNamespace(c.Query("namespace"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 	resource := c.DefaultQuery("resource", "deployments") // deployments / pods
 

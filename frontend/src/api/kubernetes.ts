@@ -3,9 +3,6 @@ import request from './request'
 export const getK8sOverview = (namespace: string) =>
   request.get<any, any>('/kubernetes/overview', { params: { namespace } })
 
-export const getK8sNamespaces = () =>
-  request.get<any, string[]>('/kubernetes/namespaces')
-
 export const getK8sNodes = () =>
   request.get<any, any[]>('/kubernetes/nodes')
 
@@ -75,8 +72,38 @@ export const updateK8sImage = (name: string, namespace: string, image: string, c
 export const getK8sImageTags = (name: string, namespace: string) =>
   request.get<any, { currentImage: string; repository: string; images: string[] }>(`/kubernetes/deployments/${name}/tags`, { params: { namespace } })
 
-export const updateK8sResources = (name: string, namespace: string, data: { container?: string; cpuRequest?: string; cpuLimit?: string; memoryRequest?: string; memoryLimit?: string }) =>
-  request.post<any, any>(`/kubernetes/deployments/${name}/resources`, data, { params: { namespace } })
+export interface ContainerConfigEdit {
+  name: string
+  cpuRequest?: string
+  cpuLimit?: string
+  memoryRequest?: string
+  memoryLimit?: string
+  startupInitialDelay?: number
+  readinessInitialDelay?: number
+  livenessInitialDelay?: number
+  startupFailureThreshold?: number
+}
+export interface DeploymentConfigEdit {
+  uid: string
+  resourceVersion: string
+  replicas?: number
+  containers: ContainerConfigEdit[]
+}
+export interface DeploymentConfigResult {
+  recordWarning?: string
+  deployment?: any
+  expectedStrategy?: string
+  changes?: { field: string; before: string; after: string }[]
+  rolloutRequired?: boolean
+  replicasChanged?: boolean
+  waitSeconds: number
+}
+export const getDeploymentConfig = (name: string, namespace: string) =>
+  request.get<any, DeploymentConfigResult>(`/kubernetes/deployments/${name}/config`, { params: { namespace } })
+export const previewDeploymentConfig = (name: string, namespace: string, data: DeploymentConfigEdit) =>
+  request.post<any, DeploymentConfigResult>(`/kubernetes/deployments/${name}/config/preview`, data, { params: { namespace } })
+export const saveDeploymentConfig = (name: string, namespace: string, data: DeploymentConfigEdit) =>
+  request.put<any, DeploymentConfigResult>(`/kubernetes/deployments/${name}/config`, data, { params: { namespace } })
 
 export const getK8sTopNodes = () =>
   request.get<any, any[]>('/kubernetes/top/nodes')

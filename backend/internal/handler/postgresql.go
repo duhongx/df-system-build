@@ -43,8 +43,13 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/sql-files/:id/not-executable.sql", h.ExportNotExecutableSQL)
 		g.GET("/sql-batches", h.ListSQLBatches)
 		g.GET("/sql-batches/:id", h.GetSQLBatch)
+		g.GET("/sql-batches/:id/files/:fileId", h.GetSQLBatchFile)
+		g.POST("/sql-batches/:id/cancel", h.CancelSQLFileSequence)
+		g.GET("/sql-records", h.ListSQLStatementRecords)
+		g.PUT("/sql-files/:id/execution-config", h.SetSQLFileExecutionConfig)
 		g.POST("/sql-batches/parse", h.ParseSQLBatch)
 		g.POST("/sql-files/parse", h.ParseSQL)
+		g.POST("/sql-files/execute", h.ExecuteSelectedSQLFiles)
 		g.POST("/sql-files/:id/execute", h.ExecuteSQLFile)
 		g.POST("/sql-files/:id/cancel", h.CancelSQLFile)
 		g.POST("/sql-files/save", h.ParseSQL)
@@ -52,6 +57,7 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.POST("/sql-files/:id/skip", h.SkipSQLFile)
 		g.DELETE("/sql-files/:id", h.DeleteSQLFile)
 		g.POST("/sql-statements/:id/skip", h.SkipSQLStatement)
+		g.PUT("/sql-statements/:id/content", h.EditReleaseSQLStatement)
 	}
 }
 
@@ -252,6 +258,7 @@ func (h *PostgreSQLHandler) ParseSQL(c *gin.Context) {
 		response.Fail(c, 14002, "参数错误")
 		return
 	}
+	req.CreatedUser = middleware.GetCurrentUsername(c)
 	file, statements, err := h.svc.ParseSQL(req)
 	if err != nil {
 		response.Fail(c, 14002, err.Error())
@@ -298,6 +305,7 @@ func (h *PostgreSQLHandler) ParseSQLBatch(c *gin.Context) {
 		response.Fail(c, 14013, "参数错误")
 		return
 	}
+	req.CreatedUser = middleware.GetCurrentUsername(c)
 	batch, files, err := h.svc.ParseSQLBatch(req)
 	if err != nil {
 		response.Fail(c, 14013, err.Error())
@@ -326,7 +334,7 @@ func (h *PostgreSQLHandler) ListSQLBatches(c *gin.Context) {
 	if pageSize > 100 {
 		pageSize = 100
 	}
-	batches, total, err := h.svc.ListSQLBatches(page, pageSize)
+	batches, total, err := h.svc.ListSQLBatches(page, pageSize, c.Query("executionOnly") == "true")
 	if err != nil {
 		response.Fail(c, 14015, err.Error())
 		return
@@ -340,7 +348,13 @@ func (h *PostgreSQLHandler) GetSQLBatch(c *gin.Context) {
 		response.Fail(c, 14000, "无效的 ID 参数")
 		return
 	}
-	batch, files, err := h.svc.GetSQLBatch(uint(id))
+	var batch *model.SQLChangeBatch
+	var files []model.SQLChangeFile
+	if c.Query("current") == "true" {
+		batch, files, err = h.svc.GetCurrentSQLBatchFiles(uint(id))
+	} else {
+		batch, files, err = h.svc.GetSQLBatch(uint(id))
+	}
 	if err != nil {
 		response.Fail(c, 14016, err.Error())
 		return
@@ -390,6 +404,7 @@ func (h *PostgreSQLHandler) ImportServerSQL(c *gin.Context) {
 		response.Fail(c, 14008, "参数错误")
 		return
 	}
+	req.CreatedUser = middleware.GetCurrentUsername(c)
 	count, err := h.svc.ImportServerSQL(req)
 	if err != nil {
 		response.Fail(c, 14008, err.Error())
@@ -441,6 +456,25 @@ func (h *PostgreSQLHandler) ExportNotExecutableSQL(c *gin.Context) {
 	c.String(http.StatusOK, content)
 }
 
+func (h *PostgreSQLHandler) EditReleaseSQLStatement(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	var req service.EditReleaseSQLStatementRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 14006, "请输入 SQL 内容及原始内容")
+		return
+	}
+	file, statements, err := h.svc.EditReleaseSQLStatement(uint(id), req, middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14006, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"file": file, "statements": statements})
+}
+
 func (h *PostgreSQLHandler) SkipSQLStatement(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -453,4 +487,21 @@ func (h *PostgreSQLHandler) SkipSQLStatement(c *gin.Context) {
 		return
 	}
 	response.OK(c, stmt)
+}
+
+func (h *PostgreSQLHandler) ExecuteSelectedSQLFiles(c *gin.Context) {
+	var req struct {
+		FileIDs []uint                    `json:"fileIds" binding:"required"`
+		Options service.SQLExecuteOptions `json:"options"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 14003, "请选择 SQL 文件")
+		return
+	}
+	batch, files, err := h.svc.StartSQLFileSequence(req.FileIDs, middleware.GetCurrentUsername(c), req.Options)
+	if err != nil {
+		response.Fail(c, 14003, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"batch": batch, "files": files})
 }

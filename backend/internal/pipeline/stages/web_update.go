@@ -348,13 +348,13 @@ func (plan *webUpdatePlan) assemble(baseline, output string, initial bool) (upda
 			return
 		}
 	}
-	logWebTree(plan.log, "组装完成，所选入口通过，未选区域及历史资源已保留", output)
+	logWebTree(plan.log, "组装完成，所选应用已完整替换，未选区域保持不变", output)
 	return
 }
 
-// Retain all baseline files until a separate, audited garbage collection plan.
-// This conservatively exceeds the 30-day/two-version minimum, including files
-// whose original ownership/age cannot be proven during legacy adoption.
+// Business packages replace their complete region. The main region excludes
+// the whole apps tree; sub/standalone regions have no baseline files retained.
+// Explicit CDN updates keep their separate, additive version-directory policy.
 func (plan *webUpdatePlan) mergeRegion(source, dest, regionPath, role string, excludeApps bool) error {
 	before := frontend.Files{}
 	if _, err := os.Stat(dest); err == nil {
@@ -376,9 +376,29 @@ func (plan *webUpdatePlan) mergeRegion(source, dest, regionPath, role string, ex
 		}
 	}
 	for file, next := range current {
-		if old, ok := before[file]; ok && old.SHA256 != next.SHA256 && file != ".df-build.json" && (role == "cdn" || frontend.IsImmutable(file)) {
+		if old, ok := before[file]; ok && old.SHA256 != next.SHA256 && file != ".df-build.json" && role == "cdn" {
 			return fmt.Errorf("不可变资源同路径内容冲突: %s/%s；请使用新文件名或版本目录", regionPath, file)
 		}
+	}
+	if role != "cdn" {
+		if excludeApps {
+			entries, err := os.ReadDir(dest)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			for _, entry := range entries {
+				if entry.Name() == "apps" {
+					continue
+				}
+				if err := os.RemoveAll(filepath.Join(dest, entry.Name())); err != nil {
+					return err
+				}
+			}
+		} else if err := os.RemoveAll(dest); err != nil {
+			return err
+		}
+	}
+	for file := range current {
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(dest, file)), 0755); err != nil {
 			return err
 		}
@@ -388,7 +408,7 @@ func (plan *webUpdatePlan) mergeRegion(source, dest, regionPath, role string, ex
 	}
 	retained := frontend.Files{}
 	for file, old := range before {
-		if _, ok := current[file]; !ok && !(excludeApps && strings.HasPrefix(file, "apps/")) {
+		if _, ok := current[file]; !ok && role == "cdn" {
 			retained[file] = old
 		}
 	}

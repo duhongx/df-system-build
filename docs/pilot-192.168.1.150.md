@@ -207,3 +207,75 @@ SkyWalking 原配置为本机 `192.168.1.150:11800`，测试返回端口未开�
 源码目录为 `/opt/df-build-server/source-ui-audit-20261014/backend`，部署前平台数据库及程序备份为 `/opt/df-build-server/backups/ui-audit-20261014/`（root 700，数据库备份 600），验证记录为 `/opt/df-build-server/pilot-tests/ui-audit-20261014/verification.json`。程序 SHA-256 为 `4324fd6edfe44d231b48e404a4b0542fb051da454347a53d9d83355238c4bfcd`。
 
 部署前确认构建／SQL 无运行任务；部署后平台健康检查及 Jenkins 正常。Chrome 复核修正后的历史、失败详情、服务器和 K8s 列表及窄视口，缩放已恢复。前后端构建／测试和独立临时 PostgreSQL 验证通过，临时库实例已停止。真实业务操作与全量实际深色页面未测试，限制在报告中逐项说明；本轮未发起业务构建、滚动更新、SQL、通知测试、资源删除或修改业务凭据。
+
+## Deployment 配置及前端目录更新修正上线（2026-10-15 15:06）
+
+已按授权更新 df-build-server，版本标识 `deployment-config-20261015`，来自 `5593e2b` 基础上的已验证工作区快照，未创建 Git 提交。二进制 SHA256 为 `9c4c9d183cc0484833b9907a90965e5ce2689a835dda13b0524f6ed6a24fc11f`，源码和程序在 `/opt/df-build-server/pilot-tests/deployment-config-final-1792047381/`，运行记录为 `/opt/df-build-server/release.json`。
+
+- 备份目录 `/opt/df-build-server/backups/deployment-config-20261015T150632/` 包含原程序、配置、发布记录和停止服务后的平台数据库备份。
+- 服务与数据库健康检查通过；97 个任务、108 个应用数量一致，配置变更记录表已迁移。
+- Chrome 直接检查线上页面：namespace 无切换入口，配置抽屉加载正常，现有 startupProbe 延迟 60 秒、失败阈值 30；env 与卷配置只读。页面检查未提交配置更新，无脚本错误。
+- 发布前后所有生产 Deployment 的 UID 与 spec 摘要一致；Jenkins 始终 active 且 PID 未变。
+- 此版本同时包含此前验证通过的前端所选目录完整替换、本地环境持久完整站点目录及 Nginx v2 基础镜像选择修正；本次更新平台程序，没有触发业务镜像构建、滚动更新，也没有修改生产 Nginx、Python 脚本或其站点目录。现有 Nginx 的迁移事项仍需单独处理。
+
+部署及页面证据见 [output/deployment-config-20261015](../output/deployment-config-20261015/)。
+
+## Deployment 完整配置弹窗与扩缩容整合（2026-10-15 15:19）
+
+已部署 `deployment-dialog-20261015`。配置改为居中弹窗，按完整 Deployment 层级展示字段，允许修改项直接编辑，其余字段置灰；managedFields 默认折叠但可展开查看，环境敏感值与历史完整配置注解脱敏。副本数并入 spec.replicas，移除列表独立“扩缩容”按钮。顶部显示实际策略，与规则不符时提供“预览策略修正”。
+
+隔离真实集群验证副本从 1 到 2、CPU／内存和探针配置联合更新通过，env 和卷保持原值；接口回归验证缩容到 0 保留 Pod 模板，并正确标记为扩缩容而非模板替换。浏览器模拟确认在旧副本数仍为 1 时不会提前提示扩容成功。
+
+二进制 SHA256 为 `10fc6f6edaf9f7750c36cc079801f8fbba376b07a7412b5388d23000767f1ce0`，发布备份位于 `/opt/df-build-server/backups/deployment-dialog-20261015T151907/`。平台健康正常，97 个任务和 108 个应用数量一致，生产 Deployment UID 与 spec 摘要未变，Jenkins PID 未变。未在生产执行扩缩容或配置保存。证据见 [output/deployment-dialog-20261015](../output/deployment-dialog-20261015/)。
+
+## Deployment 默认显示可修改配置（2026-10-15 15:29）
+
+已部署 `deployment-editable-20261015`。参考 ACK 官方工作负载配置的基本信息、资源和健康检查分组，默认显示可修改配置表单；通过“完整 Deployment”切换查看完整层级，展开／收起按钮仅显示在完整视图。视图切换保留当前编辑草稿；后端字段白名单未改变。官方参考：https://help.aliyun.com/zh/ack/ack-managed-and-ack-dedicated/user-guide/create-a-stateless-application-by-using-a-deployment 。
+
+前端类型检查、构建与浏览器模拟交互验证通过，Linux 二进制构建成功。发布备份为 `/opt/df-build-server/backups/deployment-editable-20261015T152956/`，二进制 SHA256 为 `e0e723ecc23e5454305169e914a04970e7cc023d5746e0c25b5cf879a1e47cf2`。服务健康正常，任务和应用仍分别为 97／108，生产 Deployment spec 未变、Jenkins PID 未变。证据见 [output/deployment-editable-20261015](../output/deployment-editable-20261015/)。
+
+## 默认表单恢复更新策略参数（2026-10-15 15:36）
+
+已部署 `deployment-strategy-20261015`，默认表单恢复只读策略、maxSurge／maxUnavailable 与进度期限，完整视图继续保留。此次仅恢复展示，没有修改业务探针或滚动更新参数，也未增加后端编辑字段。前端构建和浏览器交互验证通过；发布备份为 `/opt/df-build-server/backups/deployment-strategy-20261015T153559/`。服务与数据库健康，任务／应用数量为 97／108，生产 Deployment spec 和 Jenkins PID 未变。证据见 [output/deployment-strategy-20261015](../output/deployment-strategy-20261015/)。
+
+## 默认 Java Deployment 使用 TCP 探针（2026-10-15 15:42）
+
+已部署 `deployment-probes-20261015`。默认 `deployment-java` 模板的启动、就绪、存活检查统一为 TCP 8080；启动探针保留 initialDelaySeconds=60、periodSeconds=10、failureThreshold=30、timeoutSeconds=5，其余检查周期及失败阈值保持原值。150 保存的旧模板与上一版默认内容指纹相同，启动时已升级；只有完全匹配旧默认内容的模板才会自动升级，自定义模板不会被覆盖。Web 模板、Service 模板和版本采集逻辑未改。
+
+真实隔离 PostgreSQL 验证首次生成、存量默认升级、重复启动不改写、自定义模板保留；YAML 严格解析及流水线阶段回归通过。发布后核对实际模板摘要 `f7732922669af89b4a7308461659a73dfac49fd51d6a70400119f829d0ab727e`，三项 tcpSocket、无 httpGet／actuator 健康检查，其余模板摘要一致。生产 Deployment spec、Jenkins PID 未变，服务及平台数据库健康。备份 `/opt/df-build-server/backups/deployment-probes-20261015T154211/`，证据 [output/deployment-probes-20261015](../output/deployment-probes-20261015/)。
+
+此次更新仅修改生成模板；已有 Deployment 不会自动切换探针，后续只更新镜像时也仍保留既有探针。TCP 检查不等于应用业务就绪；探针改为 TCP 不会禁用或限制 Actuator 的 HTTP 暴露。
+
+### 2026-10-15 SQL 文件列表与执行弹窗
+
+已发布 `sql-alignment-20261015`，二进制 SHA256 `a93e94ba4a71e566dba334885ff097637aebdb259424e665d7204201f031b68f`。文件列表／全屏执行弹窗按 df-ops-service 流程调整，支持所选文件后台顺序执行、逐句结果及手工跳过。按 SQL 类型限定重复错误跳过；真实失败或停止后释放后续等待文件。
+
+前端构建、浏览器模拟交互、隔离 PostgreSQL 的普通文件／队列测试及 Linux 构建通过。发布前确认无活动平台任务并备份平台库；发布后健康检查、SQL 记录校验、Kubernetes Deployment 规格校验均通过，Jenkins 进程保持运行。未执行业务 SQL。回退备份：`/opt/df-build-server/backups/sql-alignment-20261015T174854`。验证文件位于 `output/sql-platform-alignment-20261015/`。
+
+### 2026-10-15 SQL 上传不再受命名规则拦截
+
+已发布 `sql-upload-20261015`，二进制 SHA256 `e0f646877ea764f53b43f9feed77aafb1a5bebf37a75bafcd1a2dad42d455dc9`。SQL 文件先上传，非标准名称、空内容和无法拆分的内容保留原文并展示待处理原因；执行时过滤不满足条件的文件，正常文件继续。过滤文件仍可手工标记不执行或删除，完整 SQL 可直接查看。
+
+18 文件浏览器模拟上传、执行过滤／标记／删除检查通过；隔离 PostgreSQL 普通 SQL、队列、审核回归及 HTTP 上传测试通过，前端及 Linux 构建通过。发布后平台健康，既有 SQL 记录与业务 Deployment 规格保持原样，Jenkins 持续运行。未执行业务 SQL。备份：`/opt/df-build-server/backups/sql-upload-20261015T181315`。验证记录位于 `output/sql-upload-20261015/`。
+
+### 2026-10-15 SQL 详情支持修正语句
+
+已发布 `sql-edit-20261015`，二进制 SHA256 `72dfb7ed0f78b81ae21928580ae9c478d63898ba95b1d9c08d15c341a8705fee`。SQL 详情新增编辑、取消、保存，允许修正未执行或失败的单条 SQL（含完整 DO 块）。保存同步完整文件及后续行号，保留其他成功／已跳过记录，并保存修改前后内容、修改人及原错误；执行中、排队中、结果待核实的文件不可编辑，并发旧版本覆盖被拦截。保存不自动执行，需手动点击“执行”重试。
+
+隔离 PostgreSQL 已验证 DO 块修正及续执行、成功／跳过结果保留、原文件及行号同步、编辑状态限制和并发修改冲突；前端构建、浏览器模拟交互、Linux 构建通过。150 实际页面只读检查确认失败 DO 块可进入编辑，并取消退出，未保存或重试业务 SQL。更新后平台健康，原 SQL 记录和 Kubernetes Deployment 规格校验未变，Jenkins 进程持续运行。备份：`/opt/df-build-server/backups/sql-edit-20261015T183122`。验证记录位于 `output/sql-edit-20261015/`。
+
+### 2026-10-15 SQL 执行错误定位
+
+已发布 `sql-error-focus-20261015`，二进制 SHA256 `9f9e3420874a376dd7d660487dcdb9fe8edba3371bf9211a1d8b2b233170be24`。语句错误直接在对应执行信息列标红并展开，失败行高亮；打开失败文件或执行队列失败时自动定位具体文件及语句，提供“定位错误”再次跳转。取消语句报错在顶部重复展示的整段 SQL；没有语句结果的连接等文件级错误保留提示。手动滚动后刷新不重复抢占位置。SQL 编辑及执行规则保持原有行为。
+
+前端构建、错误定位／多文件失败／文件级错误／SQL 编辑浏览器交互检查、Linux 构建通过。150 实际页面只读验证第 209 行 UPDATE 错误可见并高亮，顶部无重复报错。只读核对业务库 `df_zhushuju.gy_ribaomb` 主键为 `zhujianid`、不可延迟校验，6 条记录主键互不重复且没有自定义触发器；本次未修改或执行任何业务 SQL。发布后平台健康、SQL 记录和业务 Deployment 规格校验保持原样，Jenkins 进程未变。备份：`/opt/df-build-server/backups/sql-error-focus-20261015T185610`。验证记录位于 `output/sql-error-focus-20261015/`。
+
+### 2026-10-16 SQL 执行控制与逐次记录
+
+已发布 `sql-history-20261016`，二进制 SHA256 `76457319d98c43e61b826fe00ee537640418021d06e4ae7b5b66f1720a3998d9`。跳过保存及刷新期间锁定执行；停止按整个执行批次持久保存，在文件／语句边界检查；列表、工作台及后台使用自然版本顺序；上传后可补填并只读校验执行账号/schema，同名覆盖及删除后重传保留配置和已完成进度。
+
+新增 `sql_statement_records`，记录每次执行尝试、自动／手动跳过、编辑、配置和沿用旧结果，保留原错误、操作人、时间及来源。新增批次文件快照，历史查询不再复用当前状态；工作台使用显式 current=true 查询续跑状态。页面增加“SQL记录”、单句“执行记录”、当次批次文件与 SQL 查看。
+
+33 项服务、7 项 HTTP 顶层测试及前端构建通过；浏览器验证跳过保存期间执行锁、原错误保留、批次停止、手动账号配置、历史查询和旧批次快照，上传／编辑／错误定位回归通过。150 实际页面只读验证 SQL 关键字查询、手动跳过筛选及配置入口。升级迁移 193 条旧版当前状态快照，其中 2 条记录显示手动跳过；旧版已覆盖的历次尝试无法恢复，不伪造成完整日志。当前原 SQL 文件／语句状态校验未变，新增已提交数据库执行的记录为 0。Jenkins 及生产 Kubernetes Deployment 规格保持原样。
+
+备份：`/opt/df-build-server/backups/sql-history-20261016T104645`。验证记录位于 `output/sql-history-20261016/`。本次没有执行或重试线上业务 SQL。

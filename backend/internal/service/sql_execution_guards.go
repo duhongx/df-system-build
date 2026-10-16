@@ -12,9 +12,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Serialize first imports as well as operations on existing/deleted revisions.
+// Serialize imports and metadata changes by filename, including schema changes
+// and operations on deleted/overwritten revisions.
 func lockSQLFileIdentity(tx *gorm.DB, version, name, schema string) error {
-	sum := sha256.Sum256([]byte(strings.Join([]string{version, name, schema}, "\x00")))
+	sum := sha256.Sum256([]byte(strings.Join([]string{version, name}, "\x00")))
 	return tx.Exec("SELECT pg_advisory_xact_lock(?)", int64(binary.BigEndian.Uint64(sum[:8]))).Error
 }
 
@@ -44,6 +45,9 @@ func validateReleaseSQLTransactions(statements []model.SQLChangeStatement) error
 			variable := raw.Stmt.GetVariableSetStmt()
 			if raw.Stmt.GetTransactionStmt() != nil || (variable != nil && variable.Name == "TRANSACTION") {
 				return fmt.Errorf("第 %d 行包含事务控制语句；普通 SQL 文件逐句提交，请移除 BEGIN/COMMIT/ROLLBACK/SAVEPOINT 等事务控制语句", stmt.LineNumber)
+			}
+			if variable != nil && (variable.IsLocal || variable.Kind == pg_query.VariableSetKind_VAR_SET_CURRENT) {
+				return fmt.Errorf("第 %d 行包含不能安全恢复的 SET LOCAL/FROM CURRENT，请改为明确的会话 SET 配置", stmt.LineNumber)
 			}
 		}
 	}

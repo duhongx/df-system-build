@@ -58,7 +58,7 @@ func TestImagePreparationAndRolloutAreSeparateExecutions(t *testing.T) {
 			for i := range defs {
 				defs[i].Runner = countingStage{code: defs[i].Code, calls: &calls}
 			}
-			pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType}
+			pc := &types.PipelineContext{K8sNamespace: "test", PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType}
 			e := NewEngine()
 			if err := e.executeStages(context.Background(), p, pc, defs); !errors.Is(err, ErrImageReady) {
 				t.Fatalf("image preparation did not finish: %v", err)
@@ -81,7 +81,7 @@ func TestImagePreparationAndRolloutAreSeparateExecutions(t *testing.T) {
 			// A fresh execution reconstructs the context from the saved image.
 			saved.Status = "DEPLOYING"
 			calls = nil
-			pc = &types.PipelineContext{PipelineID: saved.ID, Pipeline: &saved, AppName: saved.AppName, AppType: saved.AppType, ImageName: saved.ImageName}
+			pc = &types.PipelineContext{K8sNamespace: "test", PipelineID: saved.ID, Pipeline: &saved, AppName: saved.AppName, AppType: saved.AppType, ImageName: saved.ImageName}
 			if err := e.executeStages(context.Background(), &saved, pc, defs); err != nil {
 				t.Fatal(err)
 			}
@@ -112,7 +112,7 @@ func TestFailedPushCannotEnterRollout(t *testing.T) {
 	for i := range defs {
 		defs[i].Runner = countingStage{code: defs[i].Code, calls: &calls, failedPush: true}
 	}
-	pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType, AutoRollout: true}
+	pc := &types.PipelineContext{K8sNamespace: "test", PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType, AutoRollout: true}
 	if err := NewEngine().executeStages(context.Background(), p, pc, defs); err == nil || errors.Is(err, ErrImageReady) {
 		t.Fatalf("failed push treated as ready: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestLocalImageWorkflowsContinueThroughRollout(t *testing.T) {
 			for i := range defs {
 				defs[i].Runner = countingStage{code: defs[i].Code, calls: &calls}
 			}
-			pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType, AutoRollout: AutoRolloutForEnvironment("本地")}
+			pc := &types.PipelineContext{K8sNamespace: "test", PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType, AutoRollout: AutoRolloutForEnvironment("本地")}
 			if err := NewEngine().executeStages(context.Background(), p, pc, defs); err != nil {
 				t.Fatal(err)
 			}
@@ -205,7 +205,7 @@ func TestLocalRolloutFailureStopsAndRetainsPreparedImage(t *testing.T) {
 	for i := range defs {
 		defs[i].Runner = countingStage{code: defs[i].Code, calls: &calls, failedStage: "K8S_DEPLOY"}
 	}
-	pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType, AutoRollout: true}
+	pc := &types.PipelineContext{K8sNamespace: "test", PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: p.AppType, AutoRollout: true}
 	if err := NewEngine().executeStages(context.Background(), p, pc, defs); err == nil || errors.Is(err, ErrImageReady) {
 		t.Fatal("failed automatic rollout treated as ready or success")
 	}
@@ -239,7 +239,7 @@ func TestImageOnlyWorkflowNeverDeploysInLocalEnvironment(t *testing.T) {
 		for i := range defs {
 			defs[i].Runner = countingStage{code: defs[i].Code, calls: &calls}
 		}
-		pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: appType, DeployMode: p.DeployMode, AutoRollout: true}
+		pc := &types.PipelineContext{K8sNamespace: "test", PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: appType, DeployMode: p.DeployMode, AutoRollout: true}
 		if err := NewEngine().executeStages(context.Background(), p, pc, defs); err != nil {
 			t.Fatal(err)
 		}

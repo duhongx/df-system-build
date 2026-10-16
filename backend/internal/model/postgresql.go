@@ -3,42 +3,60 @@ package model
 import "time"
 
 type SQLChangeFile struct {
-	ID             uint       `gorm:"primaryKey" json:"id"`
-	BatchID        uint       `gorm:"index" json:"batchId"`
-	BatchSortNo    int        `json:"batchSortNo"`
-	SystemCode     string     `gorm:"size:64" json:"systemCode"`
-	Environment    string     `gorm:"size:64" json:"environment"`
-	SchemaName     string     `gorm:"size:64" json:"schemaName"`
-	Version        string     `gorm:"size:64" json:"version"`
-	GroupSortNo    int        `json:"groupSortNo"`
-	FileName       string     `gorm:"size:255" json:"fileName"`
-	FileContent    string     `gorm:"type:text" json:"fileContent"`
-	ExecuteStatus  string     `gorm:"size:24;index" json:"executeStatus"`
-	ExecuteMessage string     `gorm:"type:text" json:"executeMessage"`
-	ExecuteUser    string     `gorm:"size:64" json:"executeUser"`
-	ExecuteTime    *time.Time `json:"executeTime"`
-	IsDeleted      bool       `gorm:"index" json:"isDeleted"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	DatabaseTarget   string     `gorm:"type:text;not null;default:''" json:"databaseTarget,omitempty"`
+	ID               uint       `gorm:"primaryKey" json:"id"`
+	BatchID          uint       `gorm:"index" json:"batchId"`
+	BatchSortNo      int        `json:"batchSortNo"`
+	SystemCode       string     `gorm:"size:64" json:"systemCode"`
+	Environment      string     `gorm:"size:64" json:"environment"`
+	SchemaName       string     `gorm:"size:64" json:"schemaName"`
+	SchemaConfigured bool       `json:"schemaConfigured"`
+	Version          string     `gorm:"size:64" json:"version"`
+	GroupSortNo      int        `json:"groupSortNo"`
+	FileName         string     `gorm:"size:255" json:"fileName"`
+	FileContent      string     `gorm:"type:text" json:"fileContent"`
+	ImportMessage    string     `gorm:"type:text" json:"importMessage"`
+	ExecuteStatus    string     `gorm:"size:24;index" json:"executeStatus"`
+	ExecuteMessage   string     `gorm:"type:text" json:"executeMessage"`
+	ExecuteUser      string     `gorm:"size:64" json:"executeUser"`
+	CreatedUser      string     `gorm:"size:64" json:"createdUser"`
+	ExecutionBatchID uint       `gorm:"index" json:"executionBatchId"`
+	ExecuteTime      *time.Time `json:"executeTime"`
+	IsDeleted        bool       `gorm:"index" json:"isDeleted"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
 }
 
 type SQLChangeBatch struct {
-	ID             uint       `gorm:"primaryKey" json:"id"`
-	BatchName      string     `gorm:"size:255" json:"batchName"`
-	ExecuteStatus  string     `gorm:"size:24;index" json:"executeStatus"`
-	ExecuteMessage string     `gorm:"type:text" json:"executeMessage"`
-	ExecuteUser    string     `gorm:"size:64" json:"executeUser"`
-	ExecuteTime    *time.Time `json:"executeTime"`
-	TotalFiles     int        `json:"totalFiles"`
-	SuccessFiles   int        `json:"successFiles"`
-	FailedFiles    int        `json:"failedFiles"`
-	SkippedFiles   int        `json:"skippedFiles"`
-	IsDeleted      bool       `gorm:"index" json:"isDeleted"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	StopRequested     bool                     `json:"stopRequested"`
+	StopUser          string                   `gorm:"size:64" json:"stopUser"`
+	StopTime          *time.Time               `json:"stopTime"`
+	HistoryIncomplete bool                     `gorm:"-" json:"historyIncomplete,omitempty"`
+	FilteredFiles     []SQLExecutionFileFilter `gorm:"-" json:"filteredFiles,omitempty"`
+	FileIDsJSON       string                   `gorm:"type:text" json:"-"`
+	ID                uint                     `gorm:"primaryKey" json:"id"`
+	BatchName         string                   `gorm:"size:255" json:"batchName"`
+	ExecuteStatus     string                   `gorm:"size:24;index" json:"executeStatus"`
+	ExecuteMessage    string                   `gorm:"type:text" json:"executeMessage"`
+	ExecuteUser       string                   `gorm:"size:64" json:"executeUser"`
+	ExecuteTime       *time.Time               `json:"executeTime"`
+	TotalFiles        int                      `json:"totalFiles"`
+	SuccessFiles      int                      `json:"successFiles"`
+	FailedFiles       int                      `json:"failedFiles"`
+	SkippedFiles      int                      `json:"skippedFiles"`
+	IsDeleted         bool                     `gorm:"index" json:"isDeleted"`
+	CreatedAt         time.Time                `json:"createdAt"`
+	UpdatedAt         time.Time                `json:"updatedAt"`
+}
+
+type SQLExecutionFileFilter struct {
+	ID       uint   `json:"id"`
+	FileName string `json:"fileName"`
+	Reason   string `json:"reason"`
 }
 
 type SQLChangeStatement struct {
+	ResultOrigin        string     `gorm:"-" json:"resultOrigin,omitempty"`
 	ID                  uint       `gorm:"primaryKey" json:"id"`
 	FileID              uint       `gorm:"index" json:"fileId"`
 	LineNumber          int        `json:"lineNumber"`
@@ -50,6 +68,7 @@ type SQLChangeStatement struct {
 	CanRunInTransaction bool       `json:"canRunInTransaction"`
 	ExecutionStrategy   string     `gorm:"size:32" json:"executionStrategy"`
 	ExecuteStatus       string     `gorm:"size:24;index" json:"executeStatus"`
+	SkipKind            string     `gorm:"size:24" json:"skipKind"`
 	ExecuteMessage      string     `gorm:"type:text" json:"executeMessage"`
 	ExecuteUser         string     `gorm:"size:64" json:"executeUser"`
 	SQLState            string     `gorm:"size:16" json:"sqlState"`
@@ -58,6 +77,64 @@ type SQLChangeStatement struct {
 	ExecuteTime         *time.Time `json:"executeTime"`
 	CreatedAt           time.Time  `json:"createdAt"`
 	UpdatedAt           time.Time  `json:"updatedAt"`
+}
+
+// SQLStatementEdit retains the original SQL and failure when a pending release
+// statement is corrected. Saving an edit never executes business SQL.
+type SQLStatementEdit struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	FileID         uint      `gorm:"index" json:"fileId"`
+	StatementID    uint      `gorm:"index" json:"statementId"`
+	BeforeSQL      string    `gorm:"type:text" json:"beforeSql"`
+	AfterSQL       string    `gorm:"type:text" json:"afterSql"`
+	BeforeStatus   string    `gorm:"size:24" json:"beforeStatus"`
+	BeforeMessage  string    `gorm:"type:text" json:"beforeMessage"`
+	BeforeSQLState string    `gorm:"size:16" json:"beforeSqlState"`
+	Editor         string    `gorm:"size:64" json:"editor"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
+// One execution attempt or explicit action. Completed records are never reused
+// by retry, editing, manual skipping, file deletion or overwrite.
+type SQLStatementRecord struct {
+	SourceStatementID uint       `gorm:"index" json:"sourceStatementId"`
+	ID                uint       `gorm:"primaryKey" json:"id"`
+	BatchID           uint       `gorm:"index" json:"batchId"`
+	FileID            uint       `gorm:"index" json:"fileId"`
+	StatementID       uint       `gorm:"index" json:"statementId"`
+	FileName          string     `gorm:"size:255" json:"fileName"`
+	SchemaName        string     `gorm:"size:64;index" json:"schemaName"`
+	DatabaseHost      string     `gorm:"size:255" json:"databaseHost"`
+	DatabasePort      string     `gorm:"size:16" json:"databasePort"`
+	DatabaseName      string     `gorm:"size:128" json:"databaseName"`
+	DatabaseUser      string     `gorm:"size:64" json:"databaseUser"`
+	SQLHash           string     `gorm:"size:64;index" json:"sqlHash"`
+	SQLContent        string     `gorm:"type:text" json:"sqlContent"`
+	LineNumber        int        `json:"lineNumber"`
+	Action            string     `gorm:"size:32;index" json:"action"`
+	SkipKind          string     `gorm:"size:24;index" json:"skipKind"`
+	Status            string     `gorm:"size:24;index" json:"status"`
+	Submitted         *bool      `json:"submitted"`
+	Message           string     `gorm:"type:text" json:"message"`
+	SQLState          string     `gorm:"size:16" json:"sqlState"`
+	Operator          string     `gorm:"size:64" json:"operator"`
+	StartedAt         time.Time  `gorm:"index" json:"startedAt"`
+	FinishedAt        *time.Time `json:"finishedAt"`
+	AffectedRows      int64      `json:"affectedRows"`
+	DurationMs        int64      `json:"durationMs"`
+	BeforeStatus      string     `gorm:"size:24" json:"beforeStatus"`
+	BeforeMessage     string     `gorm:"type:text" json:"beforeMessage"`
+	BeforeSQLState    string     `gorm:"size:16" json:"beforeSqlState"`
+	BeforeOperator    string     `gorm:"size:64" json:"beforeOperator"`
+	BeforeTime        *time.Time `json:"beforeTime"`
+}
+
+type SQLExecutionFileSnapshot struct {
+	ID             uint   `gorm:"primaryKey" json:"id"`
+	BatchID        uint   `gorm:"uniqueIndex:idx_sql_batch_file_snapshot;index" json:"batchId"`
+	FileID         uint   `gorm:"uniqueIndex:idx_sql_batch_file_snapshot" json:"fileId"`
+	FileJSON       string `gorm:"type:text" json:"-"`
+	StatementsJSON string `gorm:"type:text" json:"-"`
 }
 
 type SQLViewBackup struct {

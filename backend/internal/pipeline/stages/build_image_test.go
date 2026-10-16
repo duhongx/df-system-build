@@ -68,12 +68,14 @@ func TestExtractWebZipFlattensSubAppDistIntoAppCodeDir(t *testing.T) {
 	assertMissing(t, filepath.Join(target, "dist", "index.html"))
 }
 
-func TestMainUpdateRetainsOldAssetsAndKeepsExistingApps(t *testing.T) {
+func TestMainUpdateRemovesOldAssetsAndKeepsExistingApps(t *testing.T) {
 	tmp := t.TempDir()
 	htmlDir := filepath.Join(tmp, "html")
 	dockerDir := filepath.Join(tmp, "docker-build")
 	mustWriteFile(t, filepath.Join(htmlDir, "index.html"), "old-main")
 	mustWriteFile(t, filepath.Join(htmlDir, "assets", "old-hash.js"), "old-hash")
+	mustWriteFile(t, filepath.Join(htmlDir, "report-sdk", "legacy.js"), "old-sdk")
+	mustWriteFile(t, filepath.Join(htmlDir, ".legacy"), "old-hidden")
 	mustWriteFile(t, filepath.Join(htmlDir, "apps", "04", "old-sub.js"), "old-sub")
 	mustWriteFile(t, filepath.Join(htmlDir, "apps", "04", "index.html"), "old-sub-index")
 
@@ -94,7 +96,9 @@ func TestMainUpdateRetainsOldAssetsAndKeepsExistingApps(t *testing.T) {
 
 	assertFile(t, filepath.Join(htmlDir, "index.html"))
 	assertFile(t, filepath.Join(htmlDir, "assets", "new-hash.js"))
-	assertWebContent(t, filepath.Join(htmlDir, "assets", "old-hash.js"), "old-hash")
+	assertMissing(t, filepath.Join(htmlDir, "assets", "old-hash.js"))
+	assertMissing(t, filepath.Join(htmlDir, "report-sdk"))
+	assertMissing(t, filepath.Join(htmlDir, ".legacy"))
 	assertFile(t, filepath.Join(htmlDir, "apps", "04", "old-sub.js"))
 	assertMissing(t, filepath.Join(htmlDir, "apps", "from-package", "x.js"))
 	assertMissing(t, filepath.Join(htmlDir, "dist", "index.html"))

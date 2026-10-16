@@ -54,10 +54,10 @@ func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *typ
 		return fmt.Errorf("unsupported app type: %s", p.AppType)
 	}
 
-	// Keep the existing shared web-main target serial through build, push,
+	// Serialize each Deployment target against configuration edits through
 	// each execution step. Image preparation releases the lock; its persisted
 	// baseline is checked again at deployment time.
-	if pCtx.AppType == "vue" {
+	if pCtx.AppType == "vue" || pCtx.AppType == "java" {
 		if pCtx.K8sNamespace == "" {
 			var err error
 			pCtx.K8sNamespace, err = k8s.GetDefaultNamespace()
@@ -66,12 +66,12 @@ func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *typ
 			}
 		}
 		target := pCtx.AppName
-		if pCtx.VueRole != "standalone" {
+		if pCtx.AppType == "vue" && pCtx.VueRole != "standalone" {
 			target = "web-main"
 		}
 		unlock, err := k8s.LockDeployment(ctx, pCtx.K8sNamespace, target)
 		if err != nil {
-			return fmt.Errorf("等待 web-main 更新完成: %w", err)
+			return fmt.Errorf("等待 Deployment %s 更新完成: %w", target, err)
 		}
 		defer unlock()
 	}

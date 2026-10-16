@@ -5,6 +5,7 @@ import (
 	"df-build-server/pkg/logger"
 
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 func AutoMigrate() error {
@@ -33,9 +34,13 @@ func AutoMigrate() error {
 		&model.ArtifactDeployBatch{},
 		&model.ArtifactDeployRecord{},
 		&model.DeploymentRuntimeVersion{},
+		&model.DeploymentConfigChange{},
 		&model.SQLChangeBatch{},
 		&model.SQLChangeFile{},
 		&model.SQLChangeStatement{},
+		&model.SQLStatementEdit{},
+		&model.SQLStatementRecord{},
+		&model.SQLExecutionFileSnapshot{},
 		&model.SQLViewBackup{},
 		&model.SQLViewDependencyTask{},
 		&model.SQLViewDependencyChange{},
@@ -62,7 +67,12 @@ func AutoMigrate() error {
 	}
 
 	// Identity applies to active release files; deleted revisions retain their audit history.
-	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sql_change_files_active_identity ON sql_change_files (version, file_name, schema_name) WHERE is_deleted = false AND file_name <> ''`).Error; err != nil {
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sql_change_files_active_target_identity ON sql_change_files (version, file_name, schema_name, database_target) WHERE is_deleted = false AND file_name <> ''`).Error; err != nil {
+			return err
+		}
+		return tx.Exec(`DROP INDEX IF EXISTS idx_sql_change_files_active_identity`).Error
+	}); err != nil {
 		return err
 	}
 

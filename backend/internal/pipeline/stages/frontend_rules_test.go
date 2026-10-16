@@ -93,9 +93,7 @@ func TestCDNUpdateHasNoEntryAndCannotOverwriteVersionedFiles(t *testing.T) {
 func TestResourcePreparationKeepsOldEntriesAndPreloadsNewResources(t *testing.T) {
 	root := t.TempDir()
 	base, final, prep := filepath.Join(root, "base"), filepath.Join(root, "final"), filepath.Join(root, "prep")
-	for _, dir := range []string{base, final} {
-		mustWriteFile(t, filepath.Join(dir, "js/old.1234.js"), "old")
-	}
+	mustWriteFile(t, filepath.Join(base, "js/old.1234.js"), "old")
 	mustWriteFile(t, filepath.Join(base, "index.html"), "old-entry")
 	mustWriteFile(t, filepath.Join(base, "config.json"), "old-config")
 	mustWriteFile(t, filepath.Join(final, "index.html"), "new-entry")
@@ -103,34 +101,90 @@ func TestResourcePreparationKeepsOldEntriesAndPreloadsNewResources(t *testing.T)
 	mustWriteFile(t, filepath.Join(final, "js/new.5678.js"), "new")
 	mustWriteFile(t, filepath.Join(final, "apps/42/index.html"), "new-child-entry")
 	mustWriteFile(t, filepath.Join(final, "apps/42/js/app.42.js"), "new-child")
+	mustWriteFile(t, filepath.Join(base, "assets"), "old-file")
+	mustWriteFile(t, filepath.Join(final, "assets/new.js"), "new-nested")
+	mustWriteFile(t, filepath.Join(base, "sdk.js/nested.js"), "old-nested")
+	mustWriteFile(t, filepath.Join(final, "sdk.js"), "new-file")
 	if err := prepareResourceSite(base, final, prep); err != nil {
 		t.Fatal(err)
 	}
 	assertWebContent(t, filepath.Join(prep, "index.html"), "old-entry")
 	assertWebContent(t, filepath.Join(prep, "config.json"), "old-config")
+	assertWebContent(t, filepath.Join(prep, "js/old.1234.js"), "old")
 	assertWebContent(t, filepath.Join(prep, "js/new.5678.js"), "new")
 	assertWebContent(t, filepath.Join(prep, "apps/42/js/app.42.js"), "new-child")
 	assertMissing(t, filepath.Join(prep, "apps/42/index.html"))
+	assertWebContent(t, filepath.Join(prep, "assets"), "old-file")
+	assertWebContent(t, filepath.Join(prep, "sdk.js/nested.js"), "old-nested")
 }
 
-func TestFrontendRejectsImmutableConflictAndAcceptsLegacyStandalone(t *testing.T) {
+func TestFrontendReplacesSamePathResourcesAndAcceptsLegacyStandalone(t *testing.T) {
 	root := t.TempDir()
 	base := filepath.Join(root, "base")
 	mustWriteFile(t, filepath.Join(base, "index.html"), "old")
 	mustWriteFile(t, filepath.Join(base, "sdk.js"), "old-sdk")
+	mustWriteFile(t, filepath.Join(base, "obsolete/nested.js"), "obsolete")
+	mustWriteFile(t, filepath.Join(base, ".old-manifest"), "obsolete")
 	writeTestZip(t, filepath.Join(root, "web-opm.zip"), map[string]string{"index.html": `<script src=/sdk.js></script>`, "sdk.js": "new-sdk"})
 	plan, err := prepareWebUpdate(root, filepath.Join(root, "in"), []model.FrontendArtifact{{FileName: "web-opm.zip", Role: "standalone", AppName: "web-opm"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := plan.assemble(base, filepath.Join(root, "out"), false); err == nil {
-		t.Fatal("fixed SDK overwritten")
+	if _, _, err := plan.assemble(base, filepath.Join(root, "out"), false); err != nil {
+		t.Fatal(err)
 	}
+	assertWebContent(t, filepath.Join(root, "out/sdk.js"), "new-sdk")
+	assertMissing(t, filepath.Join(root, "out/obsolete"))
+	assertMissing(t, filepath.Join(root, "out/.old-manifest"))
+	assertWebContent(t, filepath.Join(base, "sdk.js"), "old-sdk")
 	if _, _, err := plan.assemble("", filepath.Join(root, "initial"), true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := frontend.ValidateReferences(filepath.Join(root, "initial"), "."); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBusinessRegionReplacementClearsDirectoriesAndCannotUseOmittedOldResource(t *testing.T) {
+	for _, role := range []string{"main", "sub", "standalone"} {
+		t.Run(role, func(t *testing.T) {
+			root := t.TempDir()
+			base, out := filepath.Join(root, "base"), filepath.Join(root, "out")
+			region := "."
+			artifact := model.FrontendArtifact{FileName: "update.zip", Role: role}
+			if role == "sub" {
+				region, artifact.AppCode = "apps/04", "04"
+			}
+			mustWriteFile(t, filepath.Join(base, "index.html"), "old-main")
+			mustWriteFile(t, filepath.Join(base, region, "index.html"), "old-entry")
+			mustWriteFile(t, filepath.Join(base, region, "old.js"), "old-script")
+			mustWriteFile(t, filepath.Join(base, region, "file-to-dir"), "old-file")
+			mustWriteFile(t, filepath.Join(base, region, "dir-to-file/nested"), "old-nested")
+			if err := os.MkdirAll(filepath.Join(base, region, "empty-old-dir"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			// An omitted script must not be silently supplied by the old site.
+			writeTestZip(t, filepath.Join(root, artifact.FileName), map[string]string{
+				"index.html":          `<script src=old.js></script>`,
+				"file-to-dir/new.txt": "new-nested",
+				"dir-to-file":         "new-file",
+			})
+			plan, err := prepareWebUpdate(root, filepath.Join(root, "in"), []model.FrontendArtifact{artifact})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := plan.assemble(base, out, false); err != nil {
+				t.Fatal(err)
+			}
+			assertWebContent(t, filepath.Join(out, region, "file-to-dir/new.txt"), "new-nested")
+			assertWebContent(t, filepath.Join(out, region, "dir-to-file"), "new-file")
+			assertMissing(t, filepath.Join(out, region, "empty-old-dir"))
+			assertMissing(t, filepath.Join(out, region, "old.js"))
+			if _, err := frontend.ValidateReferences(out, region); err == nil {
+				t.Fatal("new package used an omitted baseline script")
+			}
+			assertWebContent(t, filepath.Join(base, region, "old.js"), "old-script")
+		})
 	}
 }
 

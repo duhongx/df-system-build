@@ -86,10 +86,15 @@ func TestSQLExecutionAuditFixes(t *testing.T) {
 		return task
 	}
 
-	t.Run("transaction_import_and_legacy_execution_rejected", func(t *testing.T) {
-		if _, _, err := s.ParseSQL(ParseSQLRequest{FileName: "FIX__1__sql_release.sql", Content: "BEGIN; SELECT 1; COMMIT;"}); err == nil {
-			t.Fatal("transaction import allowed")
+	t.Run("transaction_upload_allowed_execution_rejected", func(t *testing.T) {
+		uploaded, _, err := s.ParseSQL(ParseSQLRequest{FileName: "FIX__1__sql_release.sql", Content: "BEGIN; SELECT 1; COMMIT;"})
+		if err != nil || !strings.Contains(uploaded.ImportMessage, "事务") {
+			t.Fatalf("transaction upload blocked: %+v %v", uploaded, err)
 		}
+		if _, _, err := s.ExecuteSQLFile(ctx, uploaded.ID, "test"); err == nil {
+			t.Fatal("transaction executed")
+		}
+
 		f := save(t, "FIX__1__sql_release.sql", "SELECT 1")
 		exec(t, "UPDATE sql_change_statements SET sql_content='BEGIN' WHERE file_id="+fmtUint(f.ID))
 		if _, _, err := s.ExecuteSQLFile(ctx, f.ID, "test"); err == nil {
@@ -227,7 +232,11 @@ func TestSQLExecutionAuditFixes(t *testing.T) {
 		if (first == nil) == (second == nil) {
 			t.Fatalf("imports were not exclusive: %v / %v", first, second)
 		}
-		duplicate := model.SQLChangeFile{Version: "FIX", FileName: "FIX__6__sql_release.sql", SchemaName: "sql_release", ExecuteStatus: "PENDING"}
+		target, err := currentReleaseSQLTarget()
+		if err != nil {
+			t.Fatal(err)
+		}
+		duplicate := model.SQLChangeFile{DatabaseTarget: target, Version: "FIX", FileName: "FIX__6__sql_release.sql", SchemaName: "sql_release", ExecuteStatus: "PENDING"}
 		if err := repository.DB.Create(&duplicate).Error; pgState(err) != "23505" {
 			t.Fatalf("database uniqueness missing: %v", err)
 		}

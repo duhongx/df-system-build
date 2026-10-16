@@ -3,10 +3,10 @@ import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getSettings, updateSettings } from '../api/settings'
 const saving = ref(false)
-const form = ref({ sql_execute_skip_exists_column: false, sql_execute_skip_exists_table: false, sql_execute_skip_unique_constraint: false })
+const form = ref({ sql_execute_skip_exists_column: true, sql_execute_skip_exists_table: true, sql_execute_skip_unique_constraint: true })
 onMounted(async () => {
   const settings = await getSettings()
-  for (const key of Object.keys(form.value) as (keyof typeof form.value)[]) form.value[key] = settings[key] === 'true'
+  for (const key of Object.keys(form.value) as (keyof typeof form.value)[]) form.value[key] = settings[key] !== 'false'
 })
 async function save() {
   saving.value = true
@@ -22,8 +22,8 @@ async function save() {
 
     <el-form label-width="190px">
       <el-form-item label="已存在字段跳过"><el-switch v-model="form.sql_execute_skip_exists_column" /></el-form-item>
-      <el-form-item label="对象已存在跳过"><el-switch v-model="form.sql_execute_skip_exists_table" /></el-form-item>
-      <el-form-item label="唯一冲突跳过"><el-switch v-model="form.sql_execute_skip_unique_constraint" /></el-form-item>
+      <el-form-item label="表 / 索引已存在跳过"><el-switch v-model="form.sql_execute_skip_exists_table" /></el-form-item>
+      <el-form-item label="INSERT 唯一冲突跳过"><el-switch v-model="form.sql_execute_skip_unique_constraint" /></el-form-item>
       <el-form-item><el-button type="primary" :loading="saving" @click="save">保存</el-button></el-form-item>
     </el-form>
 

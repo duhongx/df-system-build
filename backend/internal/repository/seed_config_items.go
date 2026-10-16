@@ -1,14 +1,19 @@
 package repository
 
 import (
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"strings"
+
 	"df-build-server/internal/model"
 	"df-build-server/pkg/logger"
+	"gorm.io/gorm"
 )
 
-// SeedCoreConfigItems seeds config items that the system NEEDS to function.
-// Only inserts if the code doesn't already exist (idempotent).
-func SeedCoreConfigItems() {
-	items := []model.ConfigItem{
+// coreConfigItems defines the templates shipped with the platform.
+func coreConfigItems() []model.ConfigItem {
+	return []model.ConfigItem{
 		{
 			Name:        "Java Dockerfile",
 			Code:        "dockerfile-java",
@@ -115,27 +120,21 @@ spec:
           containerPort: 8080
           protocol: TCP
         startupProbe:
-          httpGet:
-            path: /actuator/health
+          tcpSocket:
             port: 8080
-            scheme: HTTP
           initialDelaySeconds: 60
           periodSeconds: 10
           failureThreshold: 30
           timeoutSeconds: 5
         readinessProbe:
-          httpGet:
-            path: /actuator/health
+          tcpSocket:
             port: 8080
-            scheme: HTTP
           periodSeconds: 10
           failureThreshold: 3
           timeoutSeconds: 5
         livenessProbe:
-          httpGet:
-            path: /actuator/health
+          tcpSocket:
             port: 8080
-            scheme: HTTP
           periodSeconds: 15
           failureThreshold: 4
           timeoutSeconds: 5
@@ -311,15 +310,36 @@ spec:
 `,
 		},
 	}
+}
 
-	for _, item := range items {
+// SeedCoreConfigItems inserts missing items and upgrades only the fingerprinted,
+// unmodified legacy Java Deployment default.
+func SeedCoreConfigItems() {
+	for _, item := range coreConfigItems() {
 		var existing model.ConfigItem
-		if DB.Where("code = ?", item.Code).First(&existing).Error != nil {
-			DB.Create(&item)
+		err := DB.Where("code = ?", item.Code).First(&existing).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if err := DB.Create(&item).Error; err != nil {
+				logger.Log.Errorf("创建默认配置项 %s 失败: %v", item.Code, err)
+			}
+		} else if err != nil {
+			logger.Log.Errorf("读取默认配置项 %s 失败: %v", item.Code, err)
+		} else if item.Code == "deployment-java" && isLegacyJavaHTTPDeploymentTemplate(existing.Content) {
+			// Compare-and-swap protects an edit made while the service starts.
+			result := DB.Model(&existing).Where("content = ?", existing.Content).Update("content", item.Content)
+			if result.Error != nil {
+				logger.Log.Errorf("升级默认 Java TCP 探针模板失败: %v", result.Error)
+			}
 		}
 	}
 
 	logger.Log.Info("Core config items seeding completed")
+}
+
+// Fingerprint of the previous shipped Java template, not a customer-edited YAML.
+// Updating a template does not patch existing Kubernetes Deployments.
+func isLegacyJavaHTTPDeploymentTemplate(content string) bool {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(content)))) == "5180aa747b146e916d2557912bdea333c7aa9840e1294b608f748bf187519f5a"
 }
 
 // SeedPersonalConfigItems seeds personal/environment-specific config items.

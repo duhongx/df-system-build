@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,16 +18,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 )
 
 type KubernetesHandler struct {
 	settingsRepo  *repository.SettingsRepo
 	runtimeReader service.ArtifactDeployRuntimeReader
+	configClient  kubernetes.Interface
 }
 
 func NewKubernetesHandler() *KubernetesHandler {
@@ -58,7 +60,9 @@ func (h *KubernetesHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.POST("/deployments/:name/scale", h.ScaleDeployment)
 		g.POST("/deployments/:name/image", h.UpdateImage)
 		g.GET("/deployments/:name/tags", h.GetImageTags)
-		g.POST("/deployments/:name/resources", h.UpdateResources)
+		g.GET("/deployments/:name/config", h.DeploymentConfig)
+		g.POST("/deployments/:name/config/preview", h.PreviewDeploymentConfig)
+		g.PUT("/deployments/:name/config", h.UpdateDeploymentConfig)
 		g.GET("/top/nodes", h.TopNodes)
 		g.GET("/top/pods", h.TopPods)
 		g.GET("/resource/:kind/:name", h.GetResourceYAML)
@@ -66,14 +70,10 @@ func (h *KubernetesHandler) RegisterRoutes(r *gin.RouterGroup) {
 }
 
 func (h *KubernetesHandler) getNS(c *gin.Context) (string, bool) {
-	ns := c.DefaultQuery("namespace", "")
-	if ns == "" {
-		var err error
-		ns, err = k8s.GetDefaultNamespace()
-		if err != nil {
-			response.Fail(c, 12301, err.Error())
-			return "", false
-		}
+	ns, err := k8s.ManagementNamespace(c.Query("namespace"))
+	if err != nil {
+		response.Fail(c, 12301, err.Error())
+		return "", false
 	}
 	return ns, true
 }
@@ -126,14 +126,13 @@ func (h *KubernetesHandler) Overview(c *gin.Context) {
 	})
 }
 
-// Namespaces returns all namespaces
+// Namespaces returns only the environment-configured management namespace
 func (h *KubernetesHandler) Namespaces(c *gin.Context) {
-	names, err := k8s.ListNamespaces(c.Request.Context())
-	if err != nil {
-		response.Fail(c, 12301, "获取命名空间失败: "+err.Error())
+	ns, ok := h.getNS(c)
+	if !ok {
 		return
 	}
-	response.OK(c, names)
+	response.OK(c, []string{ns})
 }
 
 // Nodes returns node list
@@ -480,83 +479,43 @@ func (h *KubernetesHandler) UpdateImage(c *gin.Context) {
 		container = name
 	}
 
-	patch := fmt.Sprintf(`{"spec":{"template":{"spec":{"containers":[{"name":"%s","image":"%s"}]}}}}`, container, req.Image)
-	_, err = cs.AppsV1().Deployments(ns).Patch(c.Request.Context(), name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
+	lockCtx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	unlock, err := k8s.LockDeployment(lockCtx, ns, name)
+	cancel()
 	if err != nil {
-		response.Fail(c, 12310, "更新镜像失败: "+err.Error())
+		response.Fail(c, 12310, "该 Deployment 正在执行任务，请稍后重试")
+		return
+	}
+	defer unlock()
+	dep, err := cs.AppsV1().Deployments(ns).Get(c.Request.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		response.Fail(c, 12310, err.Error())
+		return
+	}
+	found := false
+	for i := range dep.Spec.Template.Spec.Containers {
+		if dep.Spec.Template.Spec.Containers[i].Name == container {
+			dep.Spec.Template.Spec.Containers[i].Image = req.Image
+			found = true
+		}
+	}
+	if !found {
+		response.Fail(c, 12310, "指定容器不存在")
+		return
+	}
+	managed, err := managedMicroservice(name)
+	if err != nil {
+		response.Fail(c, 12310, err.Error())
+		return
+	}
+	k8s.ApplyDeploymentStrategy(dep, managed)
+	k8s.EnsureDeploymentProgress(dep)
+	_, err = cs.AppsV1().Deployments(ns).Update(c.Request.Context(), dep, metav1.UpdateOptions{})
+	if err != nil {
+		response.Fail(c, 12310, "更新镜像失败："+err.Error())
 		return
 	}
 	response.OKWithMessage(c, "镜像已更新", nil)
-}
-
-// UpdateResources updates CPU/memory
-func (h *KubernetesHandler) UpdateResources(c *gin.Context) {
-	cs, err := k8s.GetClient()
-	if err != nil {
-		response.Fail(c, 12311, "K8s 连接失败: "+err.Error())
-		return
-	}
-	ns, nsOK := h.getNS(c)
-	if !nsOK {
-		return
-	}
-	name := c.Param("name")
-
-	var req struct {
-		Container     string `json:"container"`
-		CPURequest    string `json:"cpuRequest"`
-		CPULimit      string `json:"cpuLimit"`
-		MemoryRequest string `json:"memoryRequest"`
-		MemoryLimit   string `json:"memoryLimit"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Fail(c, 12311, "参数错误")
-		return
-	}
-
-	container := req.Container
-	if container == "" {
-		container = name
-	}
-
-	// Get current deployment
-	dep, err := cs.AppsV1().Deployments(ns).Get(c.Request.Context(), name, metav1.GetOptions{})
-	if err != nil {
-		response.Fail(c, 12311, "Deployment 不存在: "+err.Error())
-		return
-	}
-
-	// Find and update container resources
-	for i, cont := range dep.Spec.Template.Spec.Containers {
-		if cont.Name == container {
-			if dep.Spec.Template.Spec.Containers[i].Resources.Requests == nil {
-				dep.Spec.Template.Spec.Containers[i].Resources.Requests = corev1.ResourceList{}
-			}
-			if dep.Spec.Template.Spec.Containers[i].Resources.Limits == nil {
-				dep.Spec.Template.Spec.Containers[i].Resources.Limits = corev1.ResourceList{}
-			}
-			if req.CPURequest != "" {
-				dep.Spec.Template.Spec.Containers[i].Resources.Requests[corev1.ResourceCPU] = resource.MustParse(req.CPURequest)
-			}
-			if req.MemoryRequest != "" {
-				dep.Spec.Template.Spec.Containers[i].Resources.Requests[corev1.ResourceMemory] = resource.MustParse(req.MemoryRequest)
-			}
-			if req.CPULimit != "" {
-				dep.Spec.Template.Spec.Containers[i].Resources.Limits[corev1.ResourceCPU] = resource.MustParse(req.CPULimit)
-			}
-			if req.MemoryLimit != "" {
-				dep.Spec.Template.Spec.Containers[i].Resources.Limits[corev1.ResourceMemory] = resource.MustParse(req.MemoryLimit)
-			}
-			break
-		}
-	}
-
-	_, err = cs.AppsV1().Deployments(ns).Update(c.Request.Context(), dep, metav1.UpdateOptions{})
-	if err != nil {
-		response.Fail(c, 12311, "更新资源配置失败: "+err.Error())
-		return
-	}
-	response.OKWithMessage(c, "资源配置已更新", nil)
 }
 
 // UpdateServicePorts updates service type and ports

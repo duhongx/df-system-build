@@ -21,7 +21,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 )
 
-func TestWebUpdatePreservesUnselectedChildrenAndRetainsOldResources(t *testing.T) {
+func TestWebUpdateReplacesSelectedRegionsAndPreservesUnselectedChildren(t *testing.T) {
 	for _, withMain := range []bool{false, true} {
 		t.Run(map[bool]string{false: "children", true: "main_and_children"}[withMain], func(t *testing.T) {
 			root := t.TempDir()
@@ -31,6 +31,8 @@ func TestWebUpdatePreservesUnselectedChildrenAndRetainsOldResources(t *testing.T
 			for _, code := range []string{"a", "b", "unregistered"} {
 				mustWriteFile(t, filepath.Join(base, "apps", code, "index.html"), code+"-old")
 				mustWriteFile(t, filepath.Join(base, "apps", code, "old.js"), code+"-old-js")
+				mustWriteFile(t, filepath.Join(base, "apps", code, "obsolete/nested.js"), "obsolete")
+				mustWriteFile(t, filepath.Join(base, "apps", code, ".legacy"), "obsolete")
 			}
 			writeTestZip(t, filepath.Join(root, "a.zip"), map[string]string{"dist/index.html": "a-new", "dist/new.js": "a-new-js"})
 			artifacts := []model.FrontendArtifact{{FileName: "a.zip", Role: "sub", AppCode: "a"}}
@@ -50,7 +52,15 @@ func TestWebUpdatePreservesUnselectedChildrenAndRetainsOldResources(t *testing.T
 				t.Fatal(preserved)
 			}
 			assertWebContent(t, filepath.Join(out, "apps/a/index.html"), "a-new")
-			assertWebContent(t, filepath.Join(out, "apps/a/old.js"), "a-old-js")
+			assertMissing(t, filepath.Join(out, "apps/a/old.js"))
+			assertMissing(t, filepath.Join(out, "apps/a/obsolete"))
+			assertMissing(t, filepath.Join(out, "apps/a/.legacy"))
+			assertWebContent(t, filepath.Join(out, "apps/a/new.js"), "a-new-js")
+			for _, region := range plan.regions {
+				if len(region.Retained) != 0 {
+					t.Fatalf("replaced region retained files: %s", region.Path)
+				}
+			}
 			assertMissing(t, filepath.Join(out, "apps/b/leaked.js"))
 			for _, code := range []string{"b", "unregistered"} {
 				before, _ := hashWebTree(filepath.Join(base, "apps", code))
@@ -60,8 +70,11 @@ func TestWebUpdatePreservesUnselectedChildrenAndRetainsOldResources(t *testing.T
 				}
 			}
 			if withMain {
-				assertWebContent(t, filepath.Join(out, "old-main.js"), "old")
+				assertMissing(t, filepath.Join(out, "old-main.js"))
 				assertWebContent(t, filepath.Join(out, "index.html"), "main-new")
+			} else {
+				assertWebContent(t, filepath.Join(out, "old-main.js"), "old")
+				assertWebContent(t, filepath.Join(out, "index.html"), "old-main")
 			}
 			assertWebContent(t, filepath.Join(base, "apps/a/index.html"), "a-old")
 		})
@@ -89,6 +102,69 @@ func TestWebUpdateEmbeddedChildrenAndFirstDeployment(t *testing.T) {
 	}
 	if _, _, err := child.assemble("", filepath.Join(root, "initial-child"), true); err == nil {
 		t.Fatal("accepted initial child-only deployment")
+	}
+}
+
+func TestWebUpdateCombinesMultipleChildrenOnOneBaseline(t *testing.T) {
+	for _, withMain := range []bool{false, true} {
+		t.Run(map[bool]string{false: "children_only", true: "with_main"}[withMain], func(t *testing.T) {
+			root := t.TempDir()
+			base, out := filepath.Join(root, "base"), filepath.Join(root, "out")
+			mustWriteFile(t, filepath.Join(base, "index.html"), "old-main")
+			mustWriteFile(t, filepath.Join(base, "old-main.js"), "old-main-script")
+			mustWriteFile(t, filepath.Join(base, "apps/99/index.html"), "unselected")
+			mustWriteFile(t, filepath.Join(base, "apps/cdn/lib.js"), "shared")
+			mustWriteFile(t, filepath.Join(base, "apps/FileSaver.js"), "shared-root-file")
+			var artifacts []model.FrontendArtifact
+			for _, code := range []string{"04", "10", "12"} {
+				mustWriteFile(t, filepath.Join(base, "apps", code, "index.html"), "old-"+code)
+				mustWriteFile(t, filepath.Join(base, "apps", code, "old.js"), "old-script")
+				writeTestZip(t, filepath.Join(root, code+".zip"), map[string]string{
+					"index.html": `<script src=new.js></script>`,
+					"new.js":     "new-" + code,
+				})
+				artifacts = append(artifacts, model.FrontendArtifact{FileName: code + ".zip", Role: "sub", AppCode: code})
+			}
+			if withMain {
+				writeTestZip(t, filepath.Join(root, "main.zip"), map[string]string{"index.html": "new-main"})
+				artifacts = append(artifacts, model.FrontendArtifact{FileName: "main.zip", Role: "main"})
+			}
+			before, err := hashWebTree(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := prepareWebUpdate(root, filepath.Join(root, "inputs"), artifacts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := plan.assemble(base, out, false); err != nil {
+				t.Fatal(err)
+			}
+			for code, source := range plan.children {
+				want, err := hashWebTree(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := hashWebTree(filepath.Join(out, "apps", code))
+				if err != nil || got != want {
+					t.Fatalf("child %s does not exactly match its new package: %v", code, err)
+				}
+			}
+			assertWebContent(t, filepath.Join(out, "apps/99/index.html"), "unselected")
+			assertWebContent(t, filepath.Join(out, "apps/cdn/lib.js"), "shared")
+			assertWebContent(t, filepath.Join(out, "apps/FileSaver.js"), "shared-root-file")
+			if withMain {
+				assertWebContent(t, filepath.Join(out, "index.html"), "new-main")
+				assertMissing(t, filepath.Join(out, "old-main.js"))
+			} else {
+				assertWebContent(t, filepath.Join(out, "index.html"), "old-main")
+				assertWebContent(t, filepath.Join(out, "old-main.js"), "old-main-script")
+			}
+			after, err := hashWebTree(base)
+			if err != nil || before != after {
+				t.Fatal("baseline modified")
+			}
+		})
 	}
 }
 

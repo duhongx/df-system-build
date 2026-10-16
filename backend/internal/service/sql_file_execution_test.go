@@ -33,14 +33,23 @@ func saveReleaseTestFile(t *testing.T, s *PostgreSQLService, content string) (*m
 }
 
 func TestReleaseSQLSplitAndNaming(t *testing.T) {
-	for _, name := range []string{"change.sql", "V1__x__his.sql", "V1__1__中文.sql", "../V1__1__his.sql", "V1__-1__his.sql"} {
-		if _, _, _, err := parseReleaseSQLFileName(name); err == nil {
-			t.Fatalf("accepted %s", name)
+	for _, name := range []string{"../V1__1__his.sql", "file.txt"} {
+		if _, _, _, err := releaseSQLUploadMetadata(name); err == nil {
+			t.Fatalf("accepted non-file %s", name)
 		}
 	}
-	version, order, schema, err := parseReleaseSQLFileName("V2.0__012__his__说明.sql")
+	for _, name := range []string{"change.sql", "V1__x__his.sql", "V1__1__中文.sql", "V1__-1__his.sql", "15.3_SP15_260507__18__有需要再执行小数位数相关-有视图依赖需手动执行.sql"} {
+		if _, _, _, err := releaseSQLUploadMetadata(name); err != nil {
+			t.Fatalf("SQL filename rejected: %s %v", name, err)
+		}
+	}
+	version, order, schema, err := releaseSQLUploadMetadata("V2.0__012__his__说明.sql")
 	if err != nil || version != "V2.0" || order != 12 || schema != "his" {
 		t.Fatalf("%s %d %s %v", version, order, schema, err)
+	}
+	_, _, schema, err = releaseSQLUploadMetadata("V1__17__df_shenqingdan 程序更新完执行.sql")
+	if err != nil || schema != "" {
+		t.Fatalf("description guessed as login: %s %v", schema, err)
 	}
 	items, err := splitReleaseSQL("-- comment\nSELECT 'a;b';\n/* comment */\nSELECT 'a;b';\nDO $$ BEGIN RAISE NOTICE 'x;y'; END $$;")
 	if err != nil || len(items) != 3 {
@@ -265,13 +274,17 @@ func TestReleaseSQLServerZipImportIsAtomic(t *testing.T) {
 	}
 	writer.Close()
 	f.Close()
-	if _, err := s.ImportServerSQL(ImportServerSQLRequest{FilePath: path, Overwrite: true}); err == nil {
-		t.Fatal("invalid SQL filename accepted")
+	if n, err := s.ImportServerSQL(ImportServerSQLRequest{FilePath: path, Overwrite: true}); err != nil || n != 2 {
+		t.Fatalf("SQL names blocked ZIP import: %d %v", n, err)
 	}
-	var count int64
-	repository.DB.Model(&model.SQLChangeFile{}).Count(&count)
-	if count != 0 {
-		t.Fatalf("partially imported archive: %d", count)
+	uploaded, total, err := s.ListSQLFilesByStatus(1, 20, "todo")
+	if err != nil || total != 2 {
+		t.Fatalf("%+v %v", uploaded, err)
+	}
+	for _, file := range uploaded {
+		if err := s.DeleteSQLFile(file.ID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	f, _ = os.Create(path)
 	writer = zip.NewWriter(f)

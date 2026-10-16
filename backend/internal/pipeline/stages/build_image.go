@@ -124,6 +124,10 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 	if err != nil {
 		return fail(err)
 	}
+	local, err := localWebSiteEnabled()
+	if err != nil {
+		return fail(err)
+	}
 	namespace := pCtx.K8sNamespace
 	if namespace == "" {
 		namespace, err = k8s.GetDefaultNamespace()
@@ -152,7 +156,7 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 	}
 	artifacts = plan.inputs
 	baselineDir := filepath.Join(inputDir, "baseline")
-	baseline, err := s.copyFromPod(ctx, pCtx, namespace, baselineDir, target)
+	baseline, err := s.frontendBaseline(ctx, pCtx, namespace, baselineDir, target)
 	if err != nil {
 		return fail(err)
 	}
@@ -209,7 +213,7 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 	if err != nil {
 		return fail(err)
 	}
-	dockerfile := webMainDockerfile(registryURL)
+	dockerfile := webMainDockerfile(registryURL, local)
 	if err := os.WriteFile(filepath.Join(dockerDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 		return fail(err)
 	}
@@ -251,8 +255,12 @@ func preparationImageName(image string) string {
 	return image[:at+1] + tag + "-assets"
 }
 
-func webMainDockerfile(registryURL string) string {
-	return fmt.Sprintf("FROM %s/base/nginx:v1\nRUN rm -rf /usr/share/nginx/html && mkdir -p /usr/share/nginx/html\nCOPY html/ /usr/share/nginx/html/\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]\n", strings.TrimRight(registryURL, "/"))
+func webMainDockerfile(registryURL string, local bool) string {
+	version := "v1"
+	if local {
+		version = "v2" // Match the existing local Python publishing runtime.
+	}
+	return fmt.Sprintf("FROM %s/base/nginx:%s\nRUN rm -rf /usr/share/nginx/html && mkdir -p /usr/share/nginx/html\nCOPY html/ /usr/share/nginx/html/\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]\n", strings.TrimRight(registryURL, "/"), version)
 }
 
 func replaceWebZip(pCtx *types.PipelineContext, zipPath, targetDir string) error {

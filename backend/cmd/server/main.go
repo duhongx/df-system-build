@@ -70,6 +70,13 @@ func main() {
 		logger.Log.Fatalf("恢复 SQL 执行状态失败: %v", err)
 	}
 
+	if err := service.BackfillSQLStatementHistory(); err != nil {
+		logger.Log.Fatalf("迁移 SQL 历史状态快照失败: %v", err)
+	}
+	if err := service.BackfillSQLExecutionTargets(); err != nil {
+		logger.Log.Fatalf("迁移 SQL 执行目标失败: %v", err)
+	}
+
 	// Finalize any deployment runs left "in flight" by a previous crash.
 	if n, err := deployrepo.FinalizeOrphanedRuns(repository.DB); err != nil {
 		logger.Log.Warnf("failed to finalize orphaned deployment runs: %v", err)

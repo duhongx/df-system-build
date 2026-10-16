@@ -42,7 +42,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'kubernetes/ingresses', name: 'K8sIngresses', component: () => import('../views/KubernetesView.vue'), meta: { title: 'Ingress', fillViewport: true, k8sTab: 'ingresses' } },
       { path: 'postgresql', redirect: '/postgresql/sql-execution' },
       { path: 'postgresql/instances', name: 'PostgreSQLInstances', component: () => import('../views/PostgreSQLInstanceView.vue'), meta: { title: '实例管理' } },
-      { path: 'postgresql/sql-execution', name: 'PostgreSQLSQLExecution', component: () => import('../views/PostgreSQLSQLExecutionView.vue'), meta: { title: 'SQL 执行' } },
+      { path: 'postgresql/sql-execution', name: 'PostgreSQLSQLExecution', component: () => import('../views/PostgreSQLSQLExecutionView.vue'), meta: { title: 'SQL 执行', fillViewport: true } },
       { path: 'postgresql/view-dependency-change', name: 'PostgreSQLViewDependencyChange', component: () => import('../views/PostgreSQLViewDependencyChangeView.vue'), meta: { title: '视图依赖变更' } },
       { path: 'settings/general', name: 'SettingsGeneral', component: () => import('../views/SettingsView.vue'), meta: { title: '全局参数', settingsTab: 'general' } },
       { path: 'settings/apps', name: 'SettingsApps', component: () => import('../views/AppListView.vue'), meta: { title: '应用管理', fillViewport: true, settingsTab: 'apps' } },

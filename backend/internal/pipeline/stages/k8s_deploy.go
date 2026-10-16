@@ -20,7 +20,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
 )
@@ -379,8 +378,19 @@ func (s *K8sDeployStage) applyDeployment(ctx context.Context, cs kubernetes.Inte
 	if err == nil {
 		// Exists: just patch the image
 		pCtx.OnLog(pCtx.PipelineID, 0, "Deployment 已存在，更新镜像...", "stdout")
-		patch := fmt.Sprintf(`{"spec":{"template":{"spec":{"containers":[{"name":"%s","image":"%s"}]}}}}`, deploymentName, pCtx.ImageName)
-		if _, err := cs.AppsV1().Deployments(namespace).Patch(ctx, deploymentName, k8stypes.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+		found := false
+		for i := range dep.Spec.Template.Spec.Containers {
+			if dep.Spec.Template.Spec.Containers[i].Name == deploymentName {
+				dep.Spec.Template.Spec.Containers[i].Image = pCtx.ImageName
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("Deployment 缺少目标容器 %s", deploymentName)
+		}
+		k8s.ApplyDeploymentStrategy(dep, pCtx.AppType == "java")
+		k8s.EnsureDeploymentProgress(dep)
+		if _, err := cs.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{}); err != nil {
 			errMsg := fmt.Sprintf("更新镜像失败: %v", err)
 			pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 			return fmt.Errorf("%s", errMsg)
@@ -402,6 +412,8 @@ func (s *K8sDeployStage) applyDeployment(ctx context.Context, cs kubernetes.Inte
 		return fmt.Errorf("%s", errMsg)
 	}
 	created.Namespace = namespace
+	k8s.ApplyDeploymentStrategy(&created, pCtx.AppType == "java")
+	k8s.EnsureDeploymentProgress(&created)
 	if sharedWeb && (created.Name != "web-main" || webContainerImage(&created) != pCtx.ImageName) {
 		return fmt.Errorf("前端 Deployment 模板的名称、容器或镜像与本次更新不一致")
 	}
@@ -564,14 +576,14 @@ func (s *K8sDeployStage) waitForRollout(ctx context.Context, cs kubernetes.Inter
 			}
 		}
 	}()
-	timeout := 300 * time.Second // 5 minutes for slow-starting services
-	deadline := time.Now().Add(timeout)
-
 	// Get the deployment's generation after update
 	dep, err := cs.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("获取 Deployment 失败: %v", err)
 	}
+	timeout := k8s.DeploymentWaitTimeout(dep)
+	deadline := time.Now().Add(timeout)
+	pCtx.OnLog(pCtx.PipelineID, 0, fmt.Sprintf("部署等待期限=%ds，按启动探针和 Deployment 进度期限计算", int64(timeout/time.Second)), "stdout")
 	targetGeneration, targetUID := dep.Generation, dep.UID
 	replicas := int32(1)
 	if dep.Spec.Replicas != nil {
@@ -631,7 +643,7 @@ func (s *K8sDeployStage) waitForRollout(ctx context.Context, cs kubernetes.Inter
 		time.Sleep(5 * time.Second)
 	}
 
-	return fmt.Errorf("Deployment 滚动更新超时 (300s)")
+	return fmt.Errorf("Deployment 更新等待超时 (%ds)", int64(timeout/time.Second))
 }
 
 // checkPodErrors checks if any new pods have fatal errors

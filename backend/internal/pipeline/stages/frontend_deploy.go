@@ -135,7 +135,7 @@ func (s *K8sDeployStage) runFrontendDeployment(ctx context.Context, cs kubernete
 		if err := checkpoint("assets_ready", b.PreparationImage); err != nil {
 			return fail(err)
 		}
-		pCtx.OnLog(pCtx.PipelineID, 0, "全部副本已具备新旧静态资源，开始切换所选入口", "stdout")
+		pCtx.OnLog(pCtx.PipelineID, 0, "资源准备阶段全部副本验证通过，开始替换所选应用", "stdout")
 	}
 	if err := validateWebBaseline(ctx, cs, pCtx, namespace); err != nil {
 		return fail(err)
@@ -181,6 +181,11 @@ func (s *K8sDeployStage) runFrontendDeployment(ctx context.Context, cs kubernete
 	}
 	if err := service.CaptureAfterDeployVersions(ctx, pCtx.PipelineID, b.target(), pCtx.ImageName, reader, true); err != nil {
 		return fail(fmt.Errorf("已发布并通过技术验证，保存结果异常: %w", err))
+	}
+	if err := savePublishedWebSite(ctx, cs, pCtx, b); err != nil {
+		// The deployment already succeeded. An unavailable disk/cache must not
+		// turn that fact into a failed business release; next build resyncs it.
+		webLogger(pCtx).printf("正式发布成功，但本地完整站点未保存；下次构建将核对并重新同步：%v", err)
 	}
 	pCtx.OnLog(pCtx.PipelineID, 0, "前端更新完成：全部副本文件、入口、静态资源和路由验证通过；业务菜单及权限按业务接入配置验收", "stdout")
 	return &types.StageResult{}, nil

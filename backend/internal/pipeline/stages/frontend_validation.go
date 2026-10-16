@@ -230,7 +230,8 @@ func InspectFrontendArtifact(zip string, app model.Application) ([]frontend.Regi
 }
 
 // C contains the old entry/config set plus new immutable resources only. The
-// final F already contains the union. Never expose new HTML during C rollout.
+// final F contains only the new package in replaced business regions. Never
+// expose new HTML during C rollout; baseline resources exist only in C there.
 func prepareResourceSite(baseline, final, output string) error {
 	if err := copyDirContents(baseline, output); err != nil {
 		return err
@@ -245,6 +246,27 @@ func prepareResourceSite(baseline, final, output string) error {
 	}
 	for file := range next {
 		if _, exists := old[file]; exists || (!frontend.IsImmutable(file) && !strings.HasPrefix(file, "apps/cdn/")) {
+			continue
+		}
+		// A file/directory shape change cannot coexist with the old site in C.
+		// Leave that path unchanged until the complete replacement in F.
+		path, conflict := output, false
+		parts := strings.Split(filepath.ToSlash(file), "/")
+		for i, part := range parts {
+			path = filepath.Join(path, part)
+			info, err := os.Lstat(path)
+			if os.IsNotExist(err) {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() || i == len(parts)-1 {
+				conflict = true
+				break
+			}
+		}
+		if conflict {
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(output, file)), 0755); err != nil {

@@ -3,21 +3,22 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  getK8sOverview, getK8sNamespaces, getK8sNodes, getK8sDeployments, getK8sPods,
+  getK8sOverview, getK8sNodes, getK8sDeployments, getK8sPods,
   getK8sServices, getK8sConfigMaps, getK8sIngresses, getK8sConfigMap, updateK8sConfigMap,
-  getK8sPodLogs, restartK8sDeployment, scaleK8sDeployment,
-  updateK8sImage, updateK8sResources, getK8sTopNodes, getK8sTopPods,
+  getK8sPodLogs, restartK8sDeployment,
+  updateK8sImage, getK8sTopNodes, getK8sTopPods,
   updateK8sServicePorts, deleteK8sService, getK8sImageTags,
   syncK8sDeploymentRuntimeVersions,
   type DeploymentRuntimeVersion,
 } from '../api/kubernetes'
 import { useSettingsStore } from '../stores/settings'
+import DeploymentConfigDialog from '../components/DeploymentConfigDialog.vue'
 
 const route = useRoute()
 const settingsStore = useSettingsStore()
 const activeTab = computed(() => (route.meta?.k8sTab as string) || 'overview')
-const namespace = ref('default')
-const namespaces = ref<string[]>([])
+const namespace = computed(() => settingsStore.k8sNamespace)
+const initialized = ref(false)
 const loading = ref(false)
 
 // Overview
@@ -62,9 +63,9 @@ const imageForm = ref({ name: '', image: '', container: '' })
 const imageList = ref<string[]>([])
 const imageLoading = ref(false)
 
-// Resources dialog
-const resourceDialogVisible = ref(false)
-const resourceForm = ref({ name: '', container: '', cpuRequest: '', cpuLimit: '', memoryRequest: '', memoryLimit: '' })
+// Deployment configuration
+const configVisible = ref(false)
+const configName = ref('')
 
 // Service edit dialog
 const svcDialogVisible = ref(false)
@@ -78,58 +79,77 @@ const cmEditKey = ref('')
 const cmLoading = ref(false)
 
 onMounted(async () => {
-  if (!settingsStore.loaded) {
-    await settingsStore.fetchSettings()
-  }
-  namespace.value = settingsStore.k8sNamespace
-  try {
-    namespaces.value = await getK8sNamespaces()
-  } catch (e) {
-    namespaces.value = [namespace.value || 'default']
-  }
+  await settingsStore.fetchSettings()
+  initialized.value = true
   await loadTab()
 })
 
-watch(namespace, () => loadTab())
-watch(activeTab, () => loadTab())
+watch(namespace, () => {
+  configVisible.value = false
+  deployments.value = []; deploymentRuntimeVersions.value = []; pods.value = []
+  services.value = []; configmaps.value = []; ingresses.value = []; overview.value = null
+  if (initialized.value) void loadTab()
+})
+watch(activeTab, () => { configVisible.value = false; if (initialized.value) void loadTab() })
 
+async function refreshPage() {
+  await settingsStore.fetchSettings()
+  await loadTab()
+}
+
+let loadSequence = 0
 async function loadTab() {
+  const ticket = ++loadSequence, ns = namespace.value, tab = activeTab.value
+  const current = () => ticket === loadSequence && ns === namespace.value && tab === activeTab.value
   loading.value = true
   try {
-    switch (activeTab.value) {
-      case 'overview':
-        overview.value = await getK8sOverview(namespace.value)
-        try { topNodes.value = await getK8sTopNodes() } catch (e) { topNodes.value = [] }
+    switch (tab) {
+      case 'overview': {
+        const data = await getK8sOverview(ns)
+        if (!current()) return
+        overview.value = data
+        try { const top = await getK8sTopNodes(); if (current()) topNodes.value = top } catch { if (current()) topNodes.value = [] }
         break
-      case 'nodes':
-        nodes.value = await getK8sNodes()
-        try { topNodes.value = await getK8sTopNodes() } catch (e) { topNodes.value = [] }
+      }
+      case 'nodes': {
+        const data = await getK8sNodes()
+        if (!current()) return
+        nodes.value = data
+        try { const top = await getK8sTopNodes(); if (current()) topNodes.value = top } catch { if (current()) topNodes.value = [] }
         break
-      case 'deployments':
-        const depData = await getK8sDeployments(namespace.value)
-        deployments.value = depData?.items || []
-        deploymentRuntimeVersions.value = depData?.runtimeVersions || []
+      }
+      case 'deployments': {
+        const data = await getK8sDeployments(ns)
+        if (!current()) return
+        deployments.value = data?.items || []
+        deploymentRuntimeVersions.value = data?.runtimeVersions || []
         break
-      case 'pods':
-        const podData = await getK8sPods(namespace.value)
-        pods.value = podData?.items || []
-        try { topPods.value = await getK8sTopPods(namespace.value) } catch (e) { topPods.value = [] }
+      }
+      case 'pods': {
+        const data = await getK8sPods(ns)
+        if (!current()) return
+        pods.value = data?.items || []
+        try { const top = await getK8sTopPods(ns); if (current()) topPods.value = top } catch { if (current()) topPods.value = [] }
         break
-      case 'services':
-        const svcData = await getK8sServices(namespace.value)
-        services.value = svcData?.items || []
+      }
+      case 'services': {
+        const data = await getK8sServices(ns)
+        if (current()) services.value = data?.items || []
         break
-      case 'configmaps':
-        const cmData = await getK8sConfigMaps(namespace.value)
-        configmaps.value = cmData?.items || []
+      }
+      case 'configmaps': {
+        const data = await getK8sConfigMaps(ns)
+        if (current()) configmaps.value = data?.items || []
         break
-      case 'ingresses':
-        const ingData = await getK8sIngresses(namespace.value)
-        ingresses.value = ingData?.items || []
+      }
+      case 'ingresses': {
+        const data = await getK8sIngresses(ns)
+        if (current()) ingresses.value = data?.items || []
         break
+      }
     }
-  } catch (e) { /* handled */ }
-  finally { loading.value = false }
+  } catch { /* handled by request interceptor */ }
+  finally { if (current()) loading.value = false }
 }
 
 async function handleRestart(name: string) {
@@ -141,17 +161,6 @@ async function handleRestart(name: string) {
   } catch (e) { /* handled */ }
 }
 
-async function handleScale(name: string, current: number) {
-  const { value } = await ElMessageBox.prompt('请输入副本数', '扩缩容', {
-    confirmButtonText: '确定', inputValue: String(current), inputPattern: /^\d+$/, inputErrorMessage: '请输入数字'
-  })
-  if (value === undefined) return
-  try {
-    await scaleK8sDeployment(name, namespace.value, Number(value))
-    ElMessage.success('扩缩容成功')
-    setTimeout(loadTab, 2000)
-  } catch (e) { /* handled */ }
-}
 
 async function handleViewLogs(podName: string) {
   logPodName.value = podName
@@ -192,34 +201,9 @@ async function handleSubmitImage() {
   } catch (e) { /* handled */ }
 }
 
-function handleUpdateResources(dep: any) {
-  const name = dep.metadata?.name
-  const container = dep.spec?.template?.spec?.containers?.[0]
-  const res = container?.resources || {}
-  resourceForm.value = {
-    name,
-    container: container?.name || name,
-    cpuRequest: res.requests?.cpu || '',
-    cpuLimit: res.limits?.cpu || '',
-    memoryRequest: res.requests?.memory || '',
-    memoryLimit: res.limits?.memory || '',
-  }
-  resourceDialogVisible.value = true
-}
-
-async function handleSubmitResources() {
-  try {
-    await updateK8sResources(resourceForm.value.name, namespace.value, {
-      container: resourceForm.value.container,
-      cpuRequest: resourceForm.value.cpuRequest,
-      cpuLimit: resourceForm.value.cpuLimit,
-      memoryRequest: resourceForm.value.memoryRequest,
-      memoryLimit: resourceForm.value.memoryLimit,
-    })
-    ElMessage.success('资源配置已更新')
-    resourceDialogVisible.value = false
-    setTimeout(loadTab, 2000)
-  } catch (e) { /* handled */ }
+function handleOpenConfig(dep: any) {
+  configName.value = dep.metadata?.name || ''
+  configVisible.value = true
 }
 
 function getPodMetrics(podName: string) {
@@ -521,9 +505,7 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
     <div class="k8s-header">
       <div class="header-left">
         <h4 class="page-title">Kubernetes 管理</h4>
-        <el-select v-model="namespace" style="width: 180px;" placeholder="命名空间">
-          <el-option v-for="ns in namespaces" :key="ns" :label="ns" :value="ns" />
-        </el-select>
+        <el-tag effect="plain">{{ namespace }}</el-tag>
       </div>
       <div class="header-actions">
         <el-button
@@ -536,7 +518,7 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
         >
           同步版本
         </el-button>
-        <el-button size="small" @click="loadTab" :loading="loading"><el-icon><Refresh /></el-icon>刷新</el-button>
+        <el-button size="small" @click="refreshPage" :loading="loading"><el-icon><Refresh /></el-icon>刷新</el-button>
       </div>
     </div>
 
@@ -643,12 +625,11 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
           <el-table-column label="创建时间" width="170">
             <template #default="{ row }">{{ row.deployment.metadata?.creationTimestamp?.replace('T', ' ').replace('Z', '') || '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="330" fixed="right">
+          <el-table-column label="操作" width="270" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link size="small" @click="handleRestart(row.deploymentName)">重启</el-button>
-              <el-button type="primary" link size="small" @click="handleScale(row.deploymentName, row.deployment.spec?.replicas || 1)">扩缩容</el-button>
               <el-button type="primary" link size="small" @click="handleUpdateImage(row.deployment)">回滚</el-button>
-              <el-button type="primary" link size="small" @click="handleUpdateResources(row.deployment)">资源</el-button>
+              <el-button type="primary" link size="small" @click="handleOpenConfig(row.deployment)">配置</el-button>
               <el-button
                 type="primary"
                 link
@@ -823,30 +804,7 @@ async function handleSyncRuntimeVersions(deploymentName?: string) {
       </template>
     </el-dialog>
 
-    <!-- Resources Dialog -->
-    <el-dialog v-model="resourceDialogVisible" title="修改资源配置" width="500px">
-      <el-form :model="resourceForm" label-width="110px">
-        <el-form-item label="Deployment">
-          <el-input :model-value="resourceForm.name" disabled />
-        </el-form-item>
-        <el-form-item label="CPU Request">
-          <el-input v-model="resourceForm.cpuRequest" placeholder="如 100m, 500m, 1" />
-        </el-form-item>
-        <el-form-item label="CPU Limit">
-          <el-input v-model="resourceForm.cpuLimit" placeholder="如 500m, 1, 2" />
-        </el-form-item>
-        <el-form-item label="Memory Request">
-          <el-input v-model="resourceForm.memoryRequest" placeholder="如 128Mi, 256Mi, 1Gi" />
-        </el-form-item>
-        <el-form-item label="Memory Limit">
-          <el-input v-model="resourceForm.memoryLimit" placeholder="如 256Mi, 512Mi, 2Gi" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="resourceDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="handleSubmitResources">确定</el-button>
-      </template>
-    </el-dialog>
+    <DeploymentConfigDialog v-model="configVisible" :name="configName" :namespace="namespace" @updated="loadTab" />
 
     <!-- Service Edit Dialog -->
     <el-dialog v-model="svcDialogVisible" title="修改 Service" width="600px">

@@ -76,6 +76,9 @@ func TestFrontendClusterPublication(t *testing.T) {
 	if err := repository.NewSettingsRepo().BatchUpdate(settings); err != nil {
 		t.Fatal(err)
 	}
+	if err := repository.NewSettingsRepo().Set("customer_env", "本地"); err != nil {
+		t.Fatal(err)
+	}
 	k8s.ResetClient()
 	defer k8s.ResetClient()
 	cs, err := k8s.GetClient()
@@ -135,7 +138,7 @@ func TestFrontendClusterPublication(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		mustWriteFile(t, filepath.Join(dir, "Dockerfile"), webMainDockerfile(registry))
+		mustWriteFile(t, filepath.Join(dir, "Dockerfile"), webMainDockerfile(registry, true))
 		image := registry + "/prod/" + name + ":" + namespace + "-baseline"
 		pc := &types.PipelineContext{AppType: "vue", ImageName: image, OnLog: noop}
 		if _, err := (&BuildImageStage{}).execDockerBuild(ctx, pc, dir, image); err != nil {
@@ -198,13 +201,22 @@ func TestFrontendClusterPublication(t *testing.T) {
 		t.Fatal("route preflight changed deployment")
 	}
 	configure(nginx)
+	cacheHits, cacheSyncs := 0, 0
 	publish := func(key, script string) *model.Pipeline {
 		app := apps[key]
-		p := &model.Pipeline{PipelineNo: namespace + "-" + key, ApplicationID: app.ID, AppName: app.AppName, AppType: "vue", TriggerUser: "isolated-test", GitBranch: namespace, ArtifactName: app.ArtifactName, DeployMode: "artifact_image", K8sNamespace: namespace}
+		p := &model.Pipeline{PipelineNo: fmt.Sprintf("site-%d", time.Now().UnixNano()), ApplicationID: app.ID, AppName: app.AppName, AppType: "vue", TriggerUser: "isolated-test", GitBranch: namespace, ArtifactName: app.ArtifactName, DeployMode: "artifact_image", K8sNamespace: namespace}
 		if err := repository.DB.Create(p).Error; err != nil {
 			t.Fatal(err)
 		}
-		pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: "vue", VueRole: app.VueRole, AppCode: app.AppCode, ArtifactName: app.ArtifactName, GitBranch: p.GitBranch, DeployMode: p.DeployMode, K8sNamespace: namespace, OnLog: noop, Workspace: &types.Workspace{BaseDir: workspaceRoot, AppName: app.AppName, PipelineID: p.ID}}
+		log := func(_, _ uint, line, _ string) {
+			if strings.Contains(line, "复用本地完整站点") {
+				cacheHits++
+			}
+			if strings.Contains(line, "已同步本地完整站点") {
+				cacheSyncs++
+			}
+		}
+		pc := &types.PipelineContext{PipelineID: p.ID, Pipeline: p, AppName: p.AppName, AppType: "vue", VueRole: app.VueRole, AppCode: app.AppCode, ArtifactName: app.ArtifactName, GitBranch: p.GitBranch, DeployMode: p.DeployMode, K8sNamespace: namespace, OnLog: log, Workspace: &types.Workspace{BaseDir: workspaceRoot, AppName: app.AppName, PipelineID: p.ID}}
 		if err := os.MkdirAll(pc.Workspace.SourceDir(), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -247,15 +259,54 @@ func TestFrontendClusterPublication(t *testing.T) {
 		if !b.AssetsVerified || b.PreparationImage == "" || !strings.Contains(p.ImageName, "@sha256:") || p.DeploymentProgress != "completed" {
 			t.Fatalf("C/F checkpoints missing: %+v", b)
 		}
+		_, identity, err := currentWebSite(ctx, cs, b.Cluster, namespace, b.target())
+		if err != nil {
+			t.Fatal(err)
+		}
+		store, err := newWebSiteStore(workspaceRoot, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := store.read()
+		if err != nil || state.Identity.Image != p.ImageName || state.SHA256 != b.FinalSHA256 {
+			t.Fatalf("published complete site not saved: %v %v", state, err)
+		}
 		return p
 	}
 	first := publish("42", "new42.2222")
 	second := publish("04", "new04.3333")
+	if cacheHits != 1 || cacheSyncs != 1 {
+		t.Fatalf("second child failed to reuse complete site: hits=%d syncs=%d", cacheHits, cacheSyncs)
+	}
+	// Customer environments always use the target Pod, even if a local snapshot
+	// exists. Keep the customer's path independent of this local-only facility.
+	if err := repository.NewSettingsRepo().Set("customer_env", "客户现场"); err != nil {
+		t.Fatal(err)
+	}
+	copiedPod := false
+	pc := &types.PipelineContext{Workspace: &types.Workspace{BaseDir: workspaceRoot}, OnLog: func(_, _ uint, line, _ string) {
+		if strings.Contains(line, "开始复制运行中的前端") {
+			copiedPod = true
+		}
+	}}
+	if _, err := (&BuildImageStage{}).frontendBaseline(ctx, pc, namespace, filepath.Join(t.TempDir(), "customer-baseline"), "web-main"); err != nil {
+		t.Fatal(err)
+	}
+	if !copiedPod {
+		t.Fatal("customer environment incorrectly reused a local site")
+	}
+	if err := repository.NewSettingsRepo().Set("customer_env", "本地"); err != nil {
+		t.Fatal(err)
+	}
 	if err := service.RollbackDeployBatch(ctx, first.PipelineNo, service.NewK8sDeploymentRollbacker(), nil); err == nil {
 		t.Fatal("stale first-child rollback accepted")
 	}
 	if err := service.RollbackDeployBatch(ctx, second.PipelineNo, service.NewK8sDeploymentRollbacker(), nil); err != nil {
 		t.Fatal(err)
+	}
+	_ = publish("04", "new04.5555")
+	if cacheHits != 1 || cacheSyncs != 2 {
+		t.Fatalf("rollback failed to invalidate saved site: hits=%d syncs=%d", cacheHits, cacheSyncs)
 	}
 	main, err := readWebDeployment(ctx, cs, namespace)
 	if err != nil {
@@ -274,7 +325,7 @@ func TestFrontendClusterPublication(t *testing.T) {
 	if err := service.RollbackDeployBatch(ctx, opm.PipelineNo, service.NewK8sDeploymentRollbacker(), nil); err != nil {
 		t.Fatal(err)
 	}
-	evidence := map[string]any{"namespace": namespace, "replicas": 2, "newSubApplication": true, "cdnAndEmptyDirectoryPreserved": true, "twoPhasePublication": true, "staleRollbackRejected": true, "compatibleRollback": true, "standaloneWithoutConfig": true, "badRoutingBlockedWithoutImageChange": true, "productionNamespaceWritten": false}
+	evidence := map[string]any{"namespace": namespace, "replicas": 2, "newSubApplication": true, "cdnAndEmptyDirectoryPreserved": true, "twoPhasePublication": true, "staleRollbackRejected": true, "compatibleRollback": true, "standaloneWithoutConfig": true, "badRoutingBlockedWithoutImageChange": true, "localCompleteSiteReuse": true, "customerEnvironmentCopiesPod": copiedPod, "rollbackInvalidatesCompleteSite": true, "cacheHits": cacheHits, "cacheSyncs": cacheSyncs, "productionNamespaceWritten": false}
 	if file := os.Getenv("DF_FRONTEND_EVIDENCE"); file != "" {
 		data, _ := json.MarshalIndent(evidence, "", "  ")
 		if err := os.WriteFile(file, data, 0600); err != nil {

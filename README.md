@@ -11,7 +11,7 @@
 | 应用与编译配置 | 应用管理、Git 分支、Java／Vue 分类、微前端角色、服务器本机编译、安装／构建命令、环境变量、产物目录、配置项模板 |
 | 构建发布 | 本机工具编译、打包、SSH/SFTP 上传、镜像构建与推送、K8s 部署；队列、并发控制、取消、超时、历史与实时日志 |
 | 制品与批量更新 | 上传／目录导入／远程下载、应用匹配、最新制品库、更新版本、文件替换与重下载、制品仅更新一次（再次更新须重新上传）、上传并制作镜像、单独执行滚动更新、人工批次回滚与版本信息展示 |
-| Kubernetes | 集群与资源查询、Pod 日志、指标、YAML 查看、重启、扩缩容、镜像与资源调整、ConfigMap 编辑、Service 端口维护 |
+| Kubernetes | 集群与资源查询、Pod 日志、指标、YAML 查看、重启、扩缩容、镜像调整、受限 Deployment 配置、ConfigMap 编辑、Service 端口维护 |
 | 服务器 | 主机与连接管理、WebSSH、SFTP 文件操作、node_exporter 即时指标 |
 | PostgreSQL | 实例信息；SQL／ZIP／服务器文件导入、按文件后台执行、遇错停止、失败重试、停止、跳过和历史；独立视图依赖变更、恢复与验证 |
 | 基础设施部署 | 组件及主机绑定、参数配置、冲突检查、部署预览、SSH 执行、日志、回滚、离线包管理 |
@@ -24,6 +24,18 @@
 使用同一套代码和二进制，在“系统设置 → 全局参数 → 使用场景”切换：机房支持服务器本机源码编译及制品更新；客户现场只走 JAR／ZIP 制品更新，不依赖 Git、JDK、Gradle、Maven 或 Node。新安装默认客户现场模式，已有安装保留当前设置。
 
 Docker 用于制作和推送应用部署镜像，不再用于运行编译工具。部署环境为“本地”时，镜像推送成功后自动滚动更新；其他环境保留镜像制作和滚动更新两步操作，详见 [使用场景](docs/usage-scenarios.md)。
+
+## Kubernetes 应用配置
+
+管理页面的 namespace 固定读取环境配置。Deployment 操作中的“配置”使用居中弹窗，默认以基本配置、容器资源和健康检查分组展示“可修改配置”；可切换“完整 Deployment”按原有字段层级查看全部内容，切换保留编辑草稿。“展开全部／收起全部”仅出现在完整视图；默认表单同时显示只读更新策略、maxSurge／maxUnavailable 及进度期限；可修改副本数，并按容器修改 CPU／内存的 requests、limits，已有 startupProbe／readinessProbe／livenessProbe 的 initialDelaySeconds，以及 startupProbe.failureThreshold。留空资源值表示移除该项，探针未配置时只展示“未配置”。其余字段置灰只读，包含 env／envFrom、volumeMounts／volumes、metadata、status 等；敏感值脱敏展示。列表不再保留独立“扩缩容”按钮。
+
+默认 Java Deployment 的 startupProbe、readinessProbe、livenessProbe 均使用 TCP 8080，不依赖 `/actuator/health`，保留原有等待周期和失败阈值。未改动过的旧默认模板会自动升级；自定义模板保留。此项仅影响新建 Deployment 的模板，已有 Deployment 的镜像更新继续保留其现有探针配置。TCP 检查仅确认端口可连接，不验证业务健康，也不会关闭应用的 Actuator 接口。
+
+`df-cdc` 固定使用 Recreate，其他已登记的 Java 微服务使用 RollingUpdate；无应用登记的第三方 Deployment 保持已有策略。策略由后端执行规则，页面不提供自由切换；镜像发布与回滚使用同一规则。既有 Deployment 不会在系统启动时批量改写，规则在相应更新提交时生效。
+
+提交前展示变更差异并调用 Kubernetes dry-run，正式提交使用 UID／resourceVersion 检查，防止覆盖期间发生的其他修改。配置记录保存操作者、字段差异和提交结果；保存后跟踪控制器与副本状态，“已提交”与“已就绪”分别显示。配置记录不提供自动恢复功能，已有“回滚”操作仍是镜像回滚。
+
+启动等待变长时自动上调不足的 progressDeadlineSeconds，平台部署等待按探针、进度期限及终止宽限时间计算，取消原固定 300 秒。流水线仍受全局构建超时约束（默认 30 分钟）；超过该范围的慢启动需要同步调整全局超时。
 
 ## 技术栈与结构
 
