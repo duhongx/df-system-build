@@ -116,13 +116,16 @@ func validateSchemaName(name string) error {
 	return nil
 }
 
-func (s *PostgreSQLService) getDB() (*sql.DB, error) {
+func (s *PostgreSQLService) getDB(expectedTargets ...string) (*sql.DB, error) {
 	s.dbPoolMu.Lock()
 	defer s.dbPoolMu.Unlock()
 
 	cfg, _, err := s.loadSQLExecutionConfig()
 	if err != nil {
 		return nil, err
+	}
+	if len(expectedTargets) > 0 && expectedTargets[0] != "" && releaseSQLTarget(cfg) != expectedTargets[0] {
+		return nil, fmt.Errorf("数据库连接目标已变化，不能执行原数据库的视图任务")
 	}
 	cfgHash := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join([]string{cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password}, "\x00"))))
 
@@ -624,11 +627,15 @@ func (s *PostgreSQLService) AnalyzeSQLViewDependencyTask(ctx context.Context, id
 	}
 	defer settleViewTaskPhase(id, "ANALYZING", username)
 	task := *claimed
+	if err := s.ensureSQLViewSourceContext(ctx, &task); err != nil {
+		_, saveErr := markSQLViewDependencyTaskStatus(id, "FAILED", err.Error(), username)
+		return nil, nil, errors.Join(err, saveErr)
+	}
 	changes, err := ensureSQLViewDependencyChanges(task)
 	if err != nil {
 		return nil, nil, err
 	}
-	db, err := s.getDB()
+	db, err := s.getDB(task.DatabaseTarget)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -709,7 +716,7 @@ func (s *PostgreSQLService) PrecheckSQLViewDependencyTask(ctx context.Context, i
 		_, saveErr := markSQLViewDependencyTaskStatus(id, "FAILED", err.Error(), username)
 		return nil, nil, errors.Join(err, saveErr)
 	}
-	db, err := s.getDB()
+	db, err := s.getDB(task.DatabaseTarget)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -750,8 +757,8 @@ func (s *PostgreSQLService) PrecheckSQLViewDependencyTask(ctx context.Context, i
 	return updated, items, nil
 }
 
-func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id uint, username string) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
-	taskForPrecheck, itemsForPrecheck, err := s.GetSQLViewDependencyTask(id)
+func (s *PostgreSQLService) prepareSQLViewDependencyExecution(ctx context.Context, id uint, username string) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
+	taskForPrecheck, _, err := s.GetSQLViewDependencyTask(id)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -762,20 +769,35 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 		if _, _, err := s.PrecheckSQLViewDependencyTask(ctx, id, username); err != nil {
 			return nil, nil, err
 		}
-	} else if len(itemsForPrecheck) == 0 {
-		return nil, nil, fmt.Errorf("请先分析依赖并生成备份计划")
 	}
 	task, items, err := s.markSQLViewDependencyTaskRunning(id, "EXECUTING", "开始执行字段变更", username, ensureSQLViewDependencyTaskCanExecute)
 	if err != nil {
 		return nil, nil, err
 	}
+	return task, items, nil
+}
+
+func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id uint, username string) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
+	task, items, err := s.prepareSQLViewDependencyExecution(ctx, id, username)
+	if err != nil {
+		return nil, nil, err
+	}
+	return s.executeClaimedSQLViewDependencyTask(ctx, task, items, username)
+}
+
+func (s *PostgreSQLService) executeClaimedSQLViewDependencyTask(ctx context.Context, task *model.SQLViewDependencyTask, items []model.SQLViewDependencyItem, username string) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
+	id := task.ID
 	defer settleViewTaskPhase(id, "EXECUTING", username)
+	if err := s.ensureSQLViewSourceContext(ctx, task); err != nil {
+		updated, saveErr := markSQLViewDependencyTaskStatus(id, "FAILED", err.Error(), username)
+		return updated, items, errors.Join(err, saveErr)
+	}
 	changes, err := ensureSQLViewDependencyChanges(*task)
 	if err != nil {
 		_, saveErr := markSQLViewDependencyTaskStatus(id, "FAILED", err.Error(), username)
 		return nil, nil, errors.Join(err, saveErr)
 	}
-	db, err := s.getDB()
+	db, err := s.getDB(task.DatabaseTarget)
 	if err != nil {
 		_, saveErr := markSQLViewDependencyTaskStatus(id, "FAILED", err.Error(), username)
 		return nil, nil, errors.Join(err, saveErr)
@@ -822,6 +844,9 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 		}
 		return updated, items, err
 	}
+	if err := db.QueryRowContext(ctx, "SELECT current_user").Scan(&task.DatabaseUser); err != nil {
+		return nil, nil, err
+	}
 	now := time.Now()
 	task.Status = "SUCCESS"
 	task.Operator = strings.TrimSpace(username)
@@ -832,19 +857,22 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 		task.ExecuteMessage = fmt.Sprintf("分步执行完成，字段变更 %d 条，恢复视图 %d 个", len(changes), len(items))
 	}
 	if err := repository.DB.Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&model.SQLViewDependencyTask{}).Where("id = ? AND status = ? AND is_deleted = false", task.ID, "EXECUTING").Updates(map[string]any{"status": task.Status, "operator": task.Operator, "executed_at": task.ExecutedAt, "execute_message": task.ExecuteMessage})
+		result := tx.Model(&model.SQLViewDependencyTask{}).Where("id = ? AND status = ? AND is_deleted = false", task.ID, "EXECUTING").Updates(map[string]any{"status": task.Status, "operator": task.Operator, "executed_at": task.ExecutedAt, "execute_message": task.ExecuteMessage, "database_user": task.DatabaseUser})
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
 			return fmt.Errorf("视图任务执行权已失效")
 		}
-		return tx.Model(&model.SQLViewDependencyChange{}).
+		if err := tx.Model(&model.SQLViewDependencyChange{}).
 			Where("task_id = ?", task.ID).
 			Updates(map[string]interface{}{
 				"status":        "SUCCESS",
 				"error_message": "",
-			}).Error
+			}).Error; err != nil {
+			return err
+		}
+		return completeSQLViewTaskSource(tx, task, username)
 	}); err != nil {
 		return nil, nil, err
 	}
@@ -857,13 +885,13 @@ func (s *PostgreSQLService) RestoreSQLViewDependencyTask(ctx context.Context, id
 		return nil, nil, err
 	}
 	defer settleViewTaskPhase(id, "RESTORING", username)
-	db, err := s.getDB()
+	db, err := s.getDB(task.DatabaseTarget)
 	if err != nil {
 		_, saveErr := markSQLViewDependencyTaskStatus(id, "FAILED", err.Error(), username)
 		return nil, nil, errors.Join(err, saveErr)
 	}
 	steps := BuildSQLViewDependencyRestoreTransactionalSteps(*task, items)
-	err = s.runSQLViewDependencyStepsOnDB(ctx, db, task.ID, steps)
+	err = s.runSQLViewDependencyAdhocStepsOnDB(ctx, db, task.ID, steps)
 	if err != nil {
 		msg := "恢复视图失败，请查看备份并恢复视图: " + err.Error()
 		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "RESTORE_FAILED", msg, username)
@@ -889,7 +917,7 @@ func (s *PostgreSQLService) RestoreSQLViewDependencyItem(ctx context.Context, ta
 	if len(steps) == 0 {
 		return nil, nil, fmt.Errorf("依赖对象 %s.%s 没有可恢复的备份 SQL", item.ObjectSchema, item.ObjectName)
 	}
-	db, err := s.getDB()
+	db, err := s.getDB(task.DatabaseTarget)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -917,7 +945,7 @@ func (s *PostgreSQLService) VerifySQLViewDependencyItem(ctx context.Context, tas
 	if len(steps) == 0 {
 		return nil, nil, fmt.Errorf("依赖对象 %s.%s 没有可校验的 SQL", item.ObjectSchema, item.ObjectName)
 	}
-	db, err := s.getDB()
+	db, err := s.getDB(task.DatabaseTarget)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -993,9 +1021,10 @@ func viewDependencyQualifiedName(item model.SQLViewDependencyItem) string {
 }
 
 type sqlConnViewDependencyExecutor struct {
-	ctx     context.Context
-	conn    *sql.Conn
-	timeout time.Duration
+	ctx         context.Context
+	conn        *sql.Conn
+	timeout     time.Duration
+	nameContext *sqlViewConnectionContext
 }
 
 func (e sqlConnViewDependencyExecutor) Exec(sqlText string) error {
@@ -1005,6 +1034,9 @@ func (e sqlConnViewDependencyExecutor) Exec(sqlText string) error {
 		ctx, cancel = context.WithTimeout(ctx, e.timeout)
 	}
 	defer cancel()
+	if err := e.nameContext.apply(ctx, e.conn, sqlText); err != nil {
+		return err
+	}
 	_, err := e.conn.ExecContext(ctx, sqlText)
 	return err
 }
@@ -1034,7 +1066,19 @@ func runLoggedViewSQL(ctx context.Context, db *sql.DB, taskID uint, steps []stri
 		return err
 	}
 	defer cleanup()
-	executor := sqlConnViewDependencyExecutor{ctx: ctx, conn: conn, timeout: timeout}
+	var nameContext *sqlViewConnectionContext
+	for _, step := range steps {
+		if releaseSQLNode(step).GetAlterTableStmt() != nil {
+			setupCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			nameContext, err = newSQLViewConnectionContext(setupCtx, conn, task)
+			cancel()
+			if err != nil {
+				return err
+			}
+			break
+		}
+	}
+	executor := sqlConnViewDependencyExecutor{ctx: ctx, conn: conn, timeout: timeout, nameContext: nameContext}
 	inTx := false
 	var txSteps []uint
 	defer func() {
@@ -1100,6 +1144,12 @@ func (s *PostgreSQLService) runSQLViewDependencyStepExecutionOnDB(ctx context.Co
 		return err
 	}
 	defer cleanup()
+	setupCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	nameContext, err := newSQLViewConnectionContext(setupCtx, conn, plan.sourceTask)
+	cancel()
+	if err != nil {
+		return err
+	}
 	var recoveryConn *sql.Conn
 	var recoveryCleanup func()
 	defer func() {
@@ -1124,7 +1174,11 @@ func (s *PostgreSQLService) runSQLViewDependencyStepExecutionOnDB(ctx context.Co
 			}
 			stepConn = recoveryConn
 		}
-		err := (sqlConnViewDependencyExecutor{ctx: stepCtx, conn: stepConn, timeout: timeout}).Exec(text)
+		stepContext := nameContext
+		if recovering {
+			stepContext = nil // Recovery runs only backup SQL in the original admin context.
+		}
+		err := (sqlConnViewDependencyExecutor{ctx: stepCtx, conn: stepConn, timeout: timeout, nameContext: stepContext}).Exec(text)
 		status, message := "SUCCESS", ""
 		if err != nil {
 			status, message = "FAILED", err.Error()
@@ -1220,6 +1274,11 @@ func (s *PostgreSQLService) markSQLViewDependencyTaskRunning(id uint, status, me
 		if viewTaskBusy(task.Status) {
 			return fmt.Errorf("任务正在执行中，请勿重复提交")
 		}
+		if status == "RESTORING" {
+			if err := ensureSQLViewDependencyTaskCanRestore(task, items); err != nil {
+				return err
+			}
+		}
 		if task.Status == "UNKNOWN" {
 			task.OutcomeUncertain = true
 		}
@@ -1237,6 +1296,9 @@ func (s *PostgreSQLService) markSQLViewDependencyTaskRunning(id uint, status, me
 			if applied > 0 {
 				return fmt.Errorf("任务已有字段变更生效或结果待核实，不能重放；请核实并创建新的变更任务")
 			}
+		}
+		if err := validateSQLViewTaskSource(tx, task, status); err != nil {
+			return err
 		}
 		if validate != nil {
 			if err := validate(task, items); err != nil {
@@ -1273,7 +1335,7 @@ func replaceSQLViewDependencySteps(taskID uint, steps []string) ([]model.SQLView
 			}
 			stepModels = append(stepModels, stepModel)
 		}
-		return nil
+		return bindSQLViewChangesToSteps(tx, taskID, stepModels)
 	})
 	return stepModels, err
 }
@@ -1338,34 +1400,12 @@ func inferSQLViewDependencyStepName(step string) string {
 
 func markSQLViewDependencyStepRunning(id uint) error {
 	now := time.Now()
-	result := repository.DB.Model(&model.SQLViewDependencyStep{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"status":        "RUNNING",
-		"started_at":    &now,
-		"error_message": "",
-	})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return fmt.Errorf("视图执行步骤记录不存在")
-	}
-	return nil
+	return updateSQLViewStepAndChanges(id, map[string]any{"status": "RUNNING", "started_at": &now, "error_message": ""}, "RUNNING", "")
 }
 
 func markSQLViewDependencyStepFinished(id uint, status, message string) error {
 	now := time.Now()
-	result := repository.DB.Model(&model.SQLViewDependencyStep{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"status":        status,
-		"finished_at":   &now,
-		"error_message": message,
-	})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return fmt.Errorf("视图执行步骤记录不存在")
-	}
-	return nil
+	return updateSQLViewStepAndChanges(id, map[string]any{"status": status, "finished_at": &now, "error_message": message}, status, message)
 }
 
 func appendSQLViewDependencyRollbackStep(taskID uint) error {
@@ -1397,6 +1437,11 @@ func markSQLViewDependencyTaskStatus(id uint, status, message, username string) 
 	}
 	if result.RowsAffected != 1 {
 		return nil, fmt.Errorf("视图任务执行权已失效")
+	}
+	if status == "UNKNOWN" {
+		if err := repository.DB.Model(&model.SQLViewDependencyChange{}).Where("task_id = ? AND status IN ?", id, []string{"RUNNING", "APPLIED"}).Updates(map[string]any{"status": "UNKNOWN", "error_message": message}).Error; err != nil {
+			return nil, err
+		}
 	}
 	var task model.SQLViewDependencyTask
 	if err := repository.DB.First(&task, id).Error; err != nil {
@@ -1761,6 +1806,9 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 		if !previous.IsDeleted && !req.Overwrite {
 			return nil, nil, fmt.Errorf("SQL 文件已存在")
 		}
+		if err := guardSQLFileViewTask(db, previous.ID, true); err != nil {
+			return nil, nil, err
+		}
 		if previous.ExecuteStatus == "RUNNING" || previous.ExecuteStatus == "QUEUED" {
 			return nil, nil, fmt.Errorf("SQL 文件正在执行中，不能覆盖")
 		}
@@ -1776,7 +1824,7 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 			return nil, nil, err
 		}
 	}
-	file := &model.SQLChangeFile{DatabaseTarget: target, FileName: req.FileName, FileContent: req.Content, Version: version, GroupSortNo: order, SchemaName: schema, SchemaConfigured: configErr == nil, CreatedUser: req.CreatedUser, ImportMessage: importMessage, ExecuteStatus: "PENDING"}
+	file := &model.SQLChangeFile{ExecutionStartedAt: previous.ExecutionStartedAt, DatabaseTarget: target, FileName: req.FileName, FileContent: req.Content, Version: version, GroupSortNo: order, SchemaName: schema, SchemaConfigured: configErr == nil, CreatedUser: req.CreatedUser, ImportMessage: importMessage, ExecuteStatus: "PENDING"}
 	file.ImportMessage = ""
 	if splitErr != nil {
 		file.ImportMessage = splitErr.Error()
@@ -1787,17 +1835,12 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 		return nil, nil, err
 	}
 	// Match repeated statements by occurrence, so one old success never marks several new statements as successful.
-	old := make(map[string][]model.SQLChangeStatement)
-	for _, stmt := range previousStatements {
-		old[stmt.SQLContent] = append(old[stmt.SQLContent], stmt)
-	}
+	inheritance := releaseSQLInheritanceCandidates(previousStatements, parsed)
 	for i := range parsed {
 		stmt := &parsed[i]
 		var inherited *model.SQLChangeStatement
 		stmt.FileID = file.ID
-		if matches := old[stmt.SQLContent]; len(matches) > 0 {
-			prior := matches[0]
-			old[stmt.SQLContent] = matches[1:]
+		if prior, ok := inheritance[i]; ok {
 			if prior.ExecuteStatus == "SUCCESS" || prior.ExecuteStatus == "SKIPPED" {
 				inherited = &prior
 				if err := ensureLegacySQLStatementRecord(db, &previous, prior); err != nil {
@@ -1811,6 +1854,8 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 				stmt.SQLState = prior.SQLState
 				stmt.DurationMs = prior.DurationMs
 				stmt.AffectedRows = prior.AffectedRows
+				stmt.TransactionOutcome = prior.TransactionOutcome
+				stmt.DatabaseUser = prior.DatabaseUser
 			}
 		}
 		if err := db.Create(stmt).Error; err != nil {
@@ -1831,6 +1876,41 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 			}
 		}
 	}
+	// Normalize after the first inheritance pass: completed old compound SQL
+	// stays completed. A second pass matches already normalized prior uploads,
+	// including whole committed BEGIN/COMMIT groups.
+	parsed, _, err = normalizeReleaseSQLAddColumns(db, file, parsed, req.CreatedUser)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i, prior := range releaseSQLInheritanceCandidates(previousStatements, parsed) {
+		if parsed[i].ExecuteStatus != "PENDING" || (prior.ExecuteStatus != "SUCCESS" && prior.ExecuteStatus != "SKIPPED") {
+			continue
+		}
+		if err := ensureLegacySQLStatementRecord(db, &previous, prior); err != nil {
+			return nil, nil, err
+		}
+		stmt := &parsed[i]
+		stmt.ExecuteStatus, stmt.SkipKind, stmt.ExecuteMessage = prior.ExecuteStatus, sqlSkipKind(prior), prior.ExecuteMessage
+		stmt.ExecuteTime, stmt.ExecuteUser, stmt.SQLState = prior.ExecuteTime, prior.ExecuteUser, prior.SQLState
+		stmt.DurationMs, stmt.AffectedRows, stmt.TransactionOutcome = prior.DurationMs, prior.AffectedRows, prior.TransactionOutcome
+		stmt.DatabaseUser = prior.DatabaseUser
+		if err := db.Save(stmt).Error; err != nil {
+			return nil, nil, err
+		}
+		record := newSQLStatementRecord(file, *stmt, "INHERIT", req.CreatedUser)
+		no, now := false, time.Now()
+		record.Submitted, record.FinishedAt, record.Status = &no, &now, stmt.ExecuteStatus
+		record.SkipKind, record.SourceStatementID = stmt.SkipKind, prior.ID
+		record.Message = fmt.Sprintf("沿用前一文件版本的已完成结果（来源语句 %d）", prior.ID)
+		if err := db.Create(&record).Error; err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := saveImportedSQLFileSummary(db, file, parsed); err != nil {
+		return nil, nil, err
+	}
+	annotateReleaseSQLTransactionGroups(parsed)
 	return file, parsed, nil
 }
 
@@ -1845,7 +1925,12 @@ func (s *PostgreSQLService) createSQLStatementsForFile(db *gorm.DB, fileID uint,
 			return nil, err
 		}
 	}
-	return items, nil
+	var file model.SQLChangeFile
+	if err := db.First(&file, fileID).Error; err != nil {
+		return nil, err
+	}
+	items, _, err = normalizeReleaseSQLAddColumns(db, &file, items, file.CreatedUser)
+	return items, err
 }
 
 func (s *PostgreSQLService) analyzeSQLForChangeStatement(schemaName, sqlText string) (RiskAnalysis, []ViewDependency, SQLExecutionStrategy) {
@@ -1955,6 +2040,9 @@ func (s *PostgreSQLService) UpdateSQLFileContent(fileID uint, req UpdateSQLFileC
 
 		createdStatements, err := s.createSQLStatementsForFile(tx, existing.ID, req.Content, schemaName, parsedStatements)
 		if err != nil {
+			return err
+		}
+		if err := tx.First(&existing, existing.ID).Error; err != nil {
 			return err
 		}
 		if existing.BatchID > 0 {
@@ -3031,6 +3119,9 @@ func (s *PostgreSQLService) prepareQueuedSQLFileExecution(fileID, batchID uint, 
 		if err != nil {
 			return err
 		}
+		if err := guardSQLFileViewTask(tx, file.ID, false); err != nil {
+			return err
+		}
 		if file.ExecuteStatus == "RUNNING" || (file.ExecuteStatus == "QUEUED" && (batchID == 0 || file.ExecutionBatchID != batchID)) {
 			return fmt.Errorf("SQL 文件正在执行或等待执行中")
 		}
@@ -3062,8 +3153,16 @@ func (s *PostgreSQLService) prepareQueuedSQLFileExecution(fileID, batchID uint, 
 			}
 			file.DatabaseTarget = target
 		}
+		statements, _, err = normalizeReleaseSQLAddColumns(tx, file, statements, username)
+		if err != nil {
+			return err
+		}
 		now := time.Now()
-		if err := tx.Model(file).Updates(map[string]any{"database_target": file.DatabaseTarget, "execute_status": "RUNNING", "execute_message": "后台执行中", "execute_user": username, "execute_time": now, "execution_batch_id": batchID}).Error; err != nil {
+		if err := tx.Model(file).Updates(map[string]any{"database_target": file.DatabaseTarget, "execute_status": "RUNNING", "execute_message": "后台执行中", "execute_user": username, "execute_time": now, "execution_started_at": gorm.Expr("COALESCE(execution_started_at, ?)", now), "execution_batch_id": batchID}).Error; err != nil {
+			return err
+		}
+		file.ImportMessage = ""
+		if err := tx.Model(file).Update("import_message", "").Error; err != nil {
 			return err
 		}
 		file.ExecutionBatchID = batchID
@@ -3314,6 +3413,12 @@ func (s *PostgreSQLService) SkipSQLStatement(statementID uint, username string) 
 		if err := tx.First(&stmt, statementID).Error; err != nil {
 			return err
 		}
+		if err := guardSQLStatementViewTask(stmt); err != nil {
+			return err
+		}
+		if err := guardSQLFileViewTask(tx, file.ID, false); err != nil {
+			return err
+		}
 		if file.ExecuteStatus == "RUNNING" || file.ExecuteStatus == "QUEUED" || stmt.ExecuteStatus == "RUNNING" {
 			return fmt.Errorf("SQL 正在执行中，不能手工跳过")
 		}
@@ -3323,20 +3428,39 @@ func (s *PostgreSQLService) SkipSQLStatement(statementID uint, username string) 
 		if stmt.ExecuteStatus == "SKIPPED" {
 			return nil
 		}
-		if err := ensureLegacySQLStatementRecord(tx, file, stmt); err != nil {
-			return err
-		}
-		if err := appendSQLActionRecord(tx, file, stmt, "MANUAL_SKIP", username, "SKIPPED", "手动跳过此句"); err != nil {
+		rows, err := releaseSQLActionGroup(tx, file, stmt)
+		if err != nil {
 			return err
 		}
 		now := time.Now()
-		stmt.ExecuteStatus = "SKIPPED"
-		stmt.SkipKind = "MANUAL"
-		stmt.ExecuteMessage = "手工标记不执行: " + username
-		stmt.ExecuteTime = &now
-		stmt.ExecuteUser = username
-		if err := tx.Save(&stmt).Error; err != nil {
-			return err
+		for i := range rows {
+			row := &rows[i]
+			if row.ExecuteStatus == "SKIPPED" {
+				continue
+			}
+			if err := ensureLegacySQLStatementRecord(tx, file, *row); err != nil {
+				return err
+			}
+			message := "手动跳过此句"
+			if row.TransactionStartLine > 0 {
+				message = fmt.Sprintf("手动跳过第 %d-%d 行整个事务组", row.TransactionStartLine, row.TransactionEndLine)
+				row.TransactionOutcome = "SKIPPED"
+			}
+			if err := appendSQLActionRecord(tx, file, *row, "MANUAL_SKIP", username, "SKIPPED", message); err != nil {
+				return err
+			}
+			row.ExecuteStatus = "SKIPPED"
+			row.ManualFailure = false
+			row.SkipKind = "MANUAL"
+			row.ExecuteMessage = "手工标记不执行: " + username + "；" + message
+			row.ExecuteTime = &now
+			row.ExecuteUser = username
+			if err := tx.Save(row).Error; err != nil {
+				return err
+			}
+			if row.ID == stmt.ID {
+				stmt = *row
+			}
 		}
 		_, err = recomputeSQLFileStatusWithDB(tx, stmt.FileID, username)
 		return err
@@ -3347,6 +3471,368 @@ func (s *PostgreSQLService) SkipSQLStatement(statementID uint, username string) 
 	return &stmt, nil
 }
 
+// MarkSQLStatementFailed defers a statement without pretending it was skipped.
+// The statement remains in the failed set and may be retried independently.
+func (s *PostgreSQLService) MarkSQLStatementFailed(statementID uint, username string) (*model.SQLChangeStatement, error) {
+	var stmt model.SQLChangeStatement
+	err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&stmt, statementID).Error; err != nil {
+			return err
+		}
+		file, err := lockSQLFile(tx, stmt.FileID)
+		if err != nil {
+			return err
+		}
+		if err := tx.First(&stmt, statementID).Error; err != nil {
+			return err
+		}
+		if err := guardSQLStatementViewTask(stmt); err != nil {
+			return err
+		}
+		if err := guardSQLFileViewTask(tx, file.ID, false); err != nil {
+			return err
+		}
+		if file.ExecuteStatus == "RUNNING" || file.ExecuteStatus == "QUEUED" || stmt.ExecuteStatus == "RUNNING" {
+			return fmt.Errorf("SQL 正在执行中，不能标记失败")
+		}
+		if stmt.ExecuteStatus == "UNKNOWN" {
+			return fmt.Errorf("执行结果待核实，不能标记失败；请先核实数据库状态")
+		}
+		if stmt.ExecuteStatus == "SUCCESS" || stmt.ExecuteStatus == "SKIPPED" {
+			return fmt.Errorf("成功或已跳过的 SQL 不能标记失败")
+		}
+		rows, err := releaseSQLActionGroup(tx, file, stmt)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		for i := range rows {
+			row := &rows[i]
+			if row.ExecuteStatus == "UNKNOWN" || row.ExecuteStatus == "RUNNING" || row.ExecuteStatus == "SUCCESS" || row.ExecuteStatus == "SKIPPED" {
+				return fmt.Errorf("语句组中存在结果待核实、执行中、成功或已跳过的语句，不能整体标记失败")
+			}
+			if row.ManualFailure {
+				if row.ID == stmt.ID {
+					stmt = *row
+				}
+				continue
+			}
+			if err := ensureLegacySQLStatementRecord(tx, file, *row); err != nil {
+				return err
+			}
+			message := "手动标记失败，已暂缓执行，可在失败清单中单独重试"
+			if row.TransactionStartLine > 0 {
+				message = fmt.Sprintf("第 %d-%d 行整个事务组已标记失败并暂缓，可稍后整组重试", row.TransactionStartLine, row.TransactionEndLine)
+				row.TransactionOutcome = "MANUAL_FAILED"
+			}
+			if row.ExecuteStatus == "FAILED" && strings.TrimSpace(row.ExecuteMessage) != "" {
+				message += "；最近一次错误：" + row.ExecuteMessage
+			}
+			if err := appendSQLActionRecord(tx, file, *row, "MANUAL_FAIL", username, "FAILED", message); err != nil {
+				return err
+			}
+			row.ExecuteStatus = "FAILED"
+			row.ManualFailure = true
+			row.SkipKind = ""
+			row.ExecuteMessage = message
+			row.ExecuteUser = username
+			row.ExecuteTime = &now
+			if err := tx.Save(row).Error; err != nil {
+				return err
+			}
+			if row.ID == stmt.ID {
+				stmt = *row
+			}
+		}
+		_, err = recomputeSQLFileStatusWithDB(tx, stmt.FileID, username)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &stmt, nil
+}
+
+// releaseSQLActionGroup returns the selected statement and, when it is one
+// half of an adjacent view replacement pair, its still-actionable partner.
+// Previously committed/skipped statements stay untouched for legacy files.
+func releaseSQLActionGroup(tx *gorm.DB, file *model.SQLChangeFile, selected model.SQLChangeStatement) ([]model.SQLChangeStatement, error) {
+	var rows []model.SQLChangeStatement
+	if err := tx.Where("file_id = ?", file.ID).Order("line_number ASC, id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	selectedIndex := -1
+	for i := range rows {
+		if rows[i].ID == selected.ID {
+			selectedIndex = i
+			break
+		}
+	}
+	if selectedIndex < 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	group, err := releaseSQLTransactionGroupAt(rows, selectedIndex)
+	if err != nil {
+		return nil, err
+	}
+	if group != nil {
+		annotateReleaseSQLTransactionGroups(rows)
+		for _, row := range rows[group.Start : group.End+1] {
+			if row.ExecuteStatus == "SUCCESS" || row.ExecuteStatus == "RUNNING" {
+				return nil, fmt.Errorf("事务组包含已成功或执行中的语句，不能只处理其中一部分")
+			}
+		}
+		return rows[group.Start : group.End+1], nil
+	}
+	partnerIndex := releaseSQLViewPairIndex(rows, selectedIndex, file.SchemaName)
+	if partnerIndex < 0 {
+		return []model.SQLChangeStatement{rows[selectedIndex]}, nil
+	}
+	partner := rows[partnerIndex]
+	if partner.ExecuteStatus == "SUCCESS" || partner.ExecuteStatus == "SKIPPED" || partner.ExecuteStatus == "UNKNOWN" || partner.ExecuteStatus == "RUNNING" {
+		return []model.SQLChangeStatement{rows[selectedIndex]}, nil
+	}
+	if selectedIndex < partnerIndex {
+		return []model.SQLChangeStatement{rows[selectedIndex], partner}, nil
+	}
+	return []model.SQLChangeStatement{partner, rows[selectedIndex]}, nil
+}
+
+// StartReleaseSQLStatementExecution retries one failed release statement and
+// leaves every other statement in the file untouched.
+func (s *PostgreSQLService) StartReleaseSQLStatementExecution(ctx context.Context, statementID uint, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	return s.StartReleaseSQLStatementExecutionWithAccount(ctx, statementID, username, options, nil)
+}
+
+func (s *PostgreSQLService) StartReleaseSQLStatementExecutionWithAccount(ctx context.Context, statementID uint, username string, options SQLExecuteOptions, account *SQLRetryExecutionAccount) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	options = s.applySQLExecuteSettings(options)
+	target, err := currentReleaseSQLTarget()
+	if err != nil {
+		return nil, nil, err
+	}
+	var identity model.SQLChangeStatement
+	if err := repository.DB.First(&identity, statementID).Error; err != nil {
+		return nil, nil, err
+	}
+	var retryConfig *PostgreSQLConfig
+	originalSchema := ""
+	if account != nil {
+		if identity.ExecuteStatus != "FAILED" {
+			return nil, nil, fmt.Errorf("只有执行失败的 SQL 可以切换账号重试")
+		}
+		var original model.SQLChangeFile
+		if err := repository.DB.Where("is_deleted = false").First(&original, identity.FileID).Error; err != nil {
+			return nil, nil, err
+		}
+		if err := validateSchemaName(original.SchemaName); original.SchemaName == "" || err != nil {
+			return nil, nil, fmt.Errorf("原文件 schema 无效，请先配置执行 schema")
+		}
+		cfg, err := s.loadSQLRetryAccountConfig(*account)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := requireReleaseSQLTarget(&original, releaseSQLTarget(cfg)); err != nil {
+			return nil, nil, err
+		}
+		if err := verifySQLRetryAccount(ctx, cfg); err != nil {
+			return nil, nil, err
+		}
+		retryConfig, originalSchema = &cfg, original.SchemaName
+	}
+	executionCtx, cancel := context.WithCancel(context.Background())
+	if s.cancelReg != nil && !s.cancelReg.register(identity.FileID, cancel) {
+		cancel()
+		return nil, nil, fmt.Errorf("SQL 文件正在执行中")
+	}
+	launched := false
+	defer func() {
+		if !launched {
+			cancel()
+			if s.cancelReg != nil {
+				s.cancelReg.unregister(identity.FileID)
+			}
+		}
+	}()
+	var file model.SQLChangeFile
+	var stmt model.SQLChangeStatement
+	var allStatements []model.SQLChangeStatement
+	var retryStatements []model.SQLChangeStatement
+	err = repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&stmt, statementID).Error; err != nil {
+			return err
+		}
+		locked, err := lockSQLFile(tx, stmt.FileID)
+		if err != nil {
+			return err
+		}
+		file = *locked
+		if retryConfig != nil {
+			if file.SchemaName != originalSchema {
+				return fmt.Errorf("SQL 或 schema 已发生变化，请重新加载后选择重试账号")
+			}
+			if err := requireReleaseSQLTarget(&file, releaseSQLTarget(*retryConfig)); err != nil {
+				return err
+			}
+		}
+		if err := guardSQLStatementViewTask(stmt); err != nil {
+			return err
+		}
+		if err := guardSQLFileViewTask(tx, file.ID, false); err != nil {
+			return err
+		}
+		if file.ExecuteStatus == "RUNNING" || file.ExecuteStatus == "QUEUED" {
+			return fmt.Errorf("SQL 文件正在执行或等待执行中")
+		}
+		if err := tx.First(&stmt, statementID).Error; err != nil {
+			return err
+		}
+		if retryConfig != nil && identity.SQLContent != stmt.SQLContent {
+			return fmt.Errorf("SQL 已发生变化，请重新加载后选择重试账号")
+		}
+		if stmt.ExecuteStatus != "FAILED" {
+			return fmt.Errorf("只有执行失败的 SQL 可以单独重试")
+		}
+		if err := validateSchemaName(file.SchemaName); err != nil {
+			return fmt.Errorf("SQL 文件执行账号/schema 无效: %w", err)
+		}
+		if err := requireReleaseSQLTarget(&file, target); err != nil {
+			return err
+		}
+		if file.DatabaseTarget == "" && stmt.ExecuteStatus != "PENDING" {
+			return fmt.Errorf("旧文件的数据库目标未确认，不能单独重试，请先迁移执行目标")
+		}
+		if err := tx.Where("file_id = ?", file.ID).Order("line_number ASC, id ASC").Find(&allStatements).Error; err != nil {
+			return err
+		}
+		if err := ensureLegacySQLStatementRecord(tx, &file, stmt); err != nil {
+			return err
+		}
+		retryStatements = []model.SQLChangeStatement{stmt}
+		selectedIndex := -1
+		for i := range allStatements {
+			if allStatements[i].ID == stmt.ID {
+				selectedIndex = i
+				break
+			}
+		}
+		if selectedIndex >= 0 {
+			group, err := releaseSQLTransactionGroupAt(allStatements, selectedIndex)
+			if err != nil {
+				return err
+			}
+			if group != nil {
+				if err := validateReleaseSQLTransactionStates(allStatements); err != nil {
+					return err
+				}
+				for _, row := range allStatements[group.Start : group.End+1] {
+					if row.ExecuteStatus == "SUCCESS" || row.ExecuteStatus == "SKIPPED" || row.ExecuteStatus == "UNKNOWN" || row.ExecuteStatus == "RUNNING" {
+						return fmt.Errorf("事务组有已完成或待核实的语句，不能重试")
+					}
+				}
+				retryStatements = nil
+				retryStatements = append(retryStatements, allStatements[group.Start:group.End+1]...)
+			}
+			partnerIndex := -1
+			if group == nil {
+				partnerIndex = releaseSQLViewPairIndex(allStatements, selectedIndex, file.SchemaName)
+			}
+			if partnerIndex >= 0 {
+				partner := allStatements[partnerIndex]
+				// Retry the atomic pair only when both halves failed. A legacy
+				// DROP that already committed must not be replayed.
+				if partner.ExecuteStatus == "FAILED" {
+					if selectedIndex < partnerIndex {
+						retryStatements = []model.SQLChangeStatement{allStatements[selectedIndex], partner}
+					} else {
+						retryStatements = []model.SQLChangeStatement{partner, allStatements[selectedIndex]}
+					}
+				}
+			}
+		}
+		annotateReleaseSQLTransactionGroups(allStatements)
+		if len(retryStatements) > 0 {
+			firstID := retryStatements[0].ID
+			prefix := []model.SQLChangeStatement{}
+			for _, row := range allStatements {
+				if row.ID == firstID {
+					break
+				}
+				if row.ExecuteStatus == "SUCCESS" && isReleaseSQLSessionSetting(row.SQLContent) {
+					if retryConfig != nil && isReleaseSQLAccountSetting(row.SQLContent) {
+						if err := recordSQLRetrySkippedAccountSetting(tx, &file, row, *retryConfig, username); err != nil {
+							return err
+						}
+						continue
+					}
+					prefix = append(prefix, row)
+				}
+			}
+			retryStatements = append(prefix, retryStatements...)
+		}
+		annotateReleaseSQLTransactionGroups(retryStatements)
+		for i := range retryStatements {
+			if retryConfig != nil && retryStatements[i].ExecuteStatus != "SUCCESS" && retryStatements[i].ExecuteStatus != "SKIPPED" {
+				if err := recordSQLRetryAccount(tx, &file, retryStatements[i], *retryConfig, username); err != nil {
+					return err
+				}
+			}
+			retryStatements[i].ManualFailure = false
+			if err := tx.Save(&retryStatements[i]).Error; err != nil {
+				return err
+			}
+			for j := range allStatements {
+				if allStatements[j].ID == retryStatements[i].ID {
+					allStatements[j] = retryStatements[i]
+					break
+				}
+			}
+			if retryStatements[i].ID == stmt.ID {
+				stmt = retryStatements[i]
+			}
+		}
+		now := time.Now()
+		message := "后台 SQL / 事务组重试中"
+		if retryConfig != nil {
+			message = fmt.Sprintf("后台 SQL / 事务组重试中；连接账号 %s，原文件 schema %s", retryConfig.User, file.SchemaName)
+		}
+		if err := tx.Model(&model.SQLChangeFile{}).Where("id = ?", file.ID).Updates(map[string]any{
+			"execute_status": "RUNNING", "execute_message": message, "execute_user": username, "execute_time": now, "execution_started_at": gorm.Expr("COALESCE(execution_started_at, ?)", now), "import_message": "",
+		}).Error; err != nil {
+			return err
+		}
+		file.ExecuteStatus, file.ExecuteMessage, file.ExecuteUser, file.ExecuteTime = "RUNNING", message, username, &now
+		file.ImportMessage = ""
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	fileForExecution := file
+	fileForExecution.ExecutionBatchID = 0
+	annotateReleaseSQLTransactionGroups(allStatements)
+	go func() {
+		defer cancel()
+		if s.cancelReg != nil {
+			defer s.cancelReg.unregister(file.ID)
+		}
+		_, _, runErr := s.runReleaseSQLFileWithConfig(executionCtx, &fileForExecution, retryStatements, username, options, retryConfig)
+		if runErr != nil {
+			s.markSQLFileExecutionFailed(file.ID, username, runErr)
+		}
+		// A single-statement retry only contains one row. Clear the temporary
+		// file status written by runReleaseSQLFile before summarizing all rows.
+		if err := repository.DB.Model(&model.SQLChangeFile{}).Where("id = ?", file.ID).Update("execute_status", "PENDING").Error; err != nil {
+			log.Printf("单条 SQL 重试后重置文件状态失败: %v", err)
+			return
+		}
+		if _, err := recomputeSQLFileStatus(file.ID, username); err != nil {
+			log.Printf("单条 SQL 重试后更新文件状态失败: %v", err)
+		}
+	}()
+	launched = true
+	return &file, allStatements, nil
+}
+
 func (s *PostgreSQLService) SkipSQLFile(fileID uint, username string) (*model.SQLChangeFile, error) {
 	var file model.SQLChangeFile
 	err := repository.DB.Transaction(func(tx *gorm.DB) error {
@@ -3355,6 +3841,9 @@ func (s *PostgreSQLService) SkipSQLFile(fileID uint, username string) (*model.SQ
 			return err
 		}
 		file = *locked
+		if err := guardSQLFileViewTask(tx, file.ID, true); err != nil {
+			return err
+		}
 		if file.ExecuteStatus == "SUCCESS" {
 			return fmt.Errorf("已成功的 SQL 文件不能跳过")
 		}
@@ -3365,20 +3854,29 @@ func (s *PostgreSQLService) SkipSQLFile(fileID uint, username string) (*model.SQ
 			return nil
 		}
 		var rows []model.SQLChangeStatement
-		if err := tx.Where("file_id = ? AND execute_status NOT IN ?", fileID, []string{"SUCCESS", "SKIPPED"}).Find(&rows).Error; err != nil {
+		if err := tx.Where("file_id = ?", fileID).Order("line_number ASC, id ASC").Find(&rows).Error; err != nil {
 			return err
 		}
+		annotateReleaseSQLTransactionGroups(rows)
+		now := time.Now()
 		for _, stmt := range rows {
+			if stmt.ExecuteStatus == "SUCCESS" || stmt.ExecuteStatus == "SKIPPED" {
+				continue
+			}
 			if err := ensureLegacySQLStatementRecord(tx, &file, stmt); err != nil {
 				return err
+			}
+			if stmt.TransactionStartLine > 0 {
+				stmt.TransactionOutcome = "SKIPPED"
 			}
 			if err := appendSQLActionRecord(tx, &file, stmt, "FILE_SKIP", username, "SKIPPED", "手动跳过文件"); err != nil {
 				return err
 			}
-		}
-		now := time.Now()
-		if err := tx.Model(&model.SQLChangeStatement{}).Where("file_id = ? AND execute_status NOT IN ?", fileID, []string{"SUCCESS", "SKIPPED"}).Updates(map[string]any{"execute_status": "SKIPPED", "skip_kind": "MANUAL", "execute_message": "手工标记不执行: " + username, "execute_time": &now, "execute_user": username}).Error; err != nil {
-			return err
+			stmt.ExecuteStatus, stmt.ManualFailure, stmt.SkipKind = "SKIPPED", false, "MANUAL"
+			stmt.ExecuteMessage, stmt.ExecuteTime, stmt.ExecuteUser = "手工标记不执行: "+username, &now, username
+			if err := tx.Save(&stmt).Error; err != nil {
+				return err
+			}
 		}
 		file.ExecuteStatus = "SKIPPED"
 		file.ExecuteMessage = "手工标记不执行: " + username
@@ -3734,9 +4232,9 @@ func (s *PostgreSQLService) ListSQLFilesByStatus(page, pageSize int, statusGroup
 	}
 	switch statusGroup {
 	case "todo":
-		query = query.Where("execute_status IN ?", []string{"PENDING", "QUEUED", "RUNNING", "FAILED", "PARTIAL_FAILED", "NOT_EXECUTABLE", "CANCELED", "UNKNOWN"})
+		query = query.Where("NOT " + sqlFileHasAttempt)
 	case "done":
-		query = query.Where("execute_status IN ?", []string{"SUCCESS", "SKIPPED"})
+		query = query.Where(sqlFileHasAttempt)
 	}
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -3746,6 +4244,19 @@ func (s *PostgreSQLService) ListSQLFilesByStatus(page, pageSize int, statusGroup
 	if err := query.Omit("file_content").Find(&files).Error; err != nil {
 		return nil, 0, err
 	}
+	if err := populateSQLFileCounts(repository.DB, files); err != nil {
+		return nil, 0, err
+	}
+	if len(filters) > 0 && filters[0].Status != "" {
+		filtered := files[:0]
+		for _, f := range files {
+			if f.ResultStatus == filters[0].Status {
+				filtered = append(filtered, f)
+			}
+		}
+		files = filtered
+	}
+	total = int64(len(files))
 	sort.SliceStable(files, func(i, j int) bool {
 		if statusGroup == "done" {
 			return lessSQLFiles(files[j], files[i])
@@ -3775,6 +4286,16 @@ func (s *PostgreSQLService) GetSQLFile(id uint) (*model.SQLChangeFile, []model.S
 	if err := repository.DB.Where("file_id = ?", id).Order("line_number ASC, id ASC").Find(&statements).Error; err != nil {
 		return nil, nil, err
 	}
+	annotateReleaseSQLTransactionGroups(statements)
+	decorated := []model.SQLChangeFile{file}
+	if err := populateSQLFileCounts(repository.DB, decorated); err != nil {
+		return nil, nil, err
+	}
+	file = decorated[0]
+	file.ImportMessage = ""
+	if issue := releaseSQLExecutionIssue(&file, statements); issue != nil {
+		file.ImportMessage = issue.Error()
+	}
 	return &file, statements, nil
 }
 
@@ -3782,6 +4303,9 @@ func (s *PostgreSQLService) DeleteSQLFile(id uint) error {
 	return repository.DB.Transaction(func(tx *gorm.DB) error {
 		file, err := lockSQLFile(tx, id)
 		if err != nil {
+			return err
+		}
+		if err := guardSQLFileViewTask(tx, file.ID, true); err != nil {
 			return err
 		}
 		if file.ExecuteStatus == "SUCCESS" {
@@ -3810,6 +4334,13 @@ func (s *PostgreSQLService) ExecuteSQLContent(ctx context.Context, req ExecuteSQ
 }
 
 func (s *PostgreSQLService) ImportServerSQL(req ImportServerSQLRequest) (int, error) {
+	environment, err := s.settingsRepo.Read("customer_env", false)
+	if err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(environment) != "本地" {
+		return 0, fmt.Errorf("仅部署环境为本地时允许导入服务器文件，请使用上传 SQL 文件")
+	}
 	path := strings.TrimSpace(req.FilePath)
 	if path == "" {
 		return 0, fmt.Errorf("文件路径不能为空")
@@ -4488,6 +5019,7 @@ func maskPassword(password string) string {
 }
 
 type SQLFileFilter struct {
+	Status     string
 	Version    string
 	SchemaName string
 	FileName   string

@@ -1,6 +1,10 @@
 import axios, { type AxiosInstance, type AxiosResponse } from 'axios'
 import { ElMessage } from 'element-plus'
 
+declare module 'axios' {
+  interface AxiosRequestConfig { silentError?: boolean }
+}
+
 const TOKEN_KEY = 'df-token'
 
 export function getToken(): string {
@@ -34,7 +38,7 @@ request.interceptors.response.use(
     if (code === 0) {
       return data
     }
-    ElMessage.error(message || '请求失败')
+    if (!response.config.silentError) ElMessage.error(message || '请求失败')
     return Promise.reject(new Error(message || '请求失败'))
   },
   (error) => {
@@ -45,7 +49,7 @@ request.interceptors.response.use(
       }
       return Promise.reject(error)
     }
-    ElMessage.error(error.message || '网络错误')
+    if (!error.config?.silentError) ElMessage.error(error.message || '网络错误')
     return Promise.reject(error)
   }
 )

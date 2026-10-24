@@ -27,6 +27,13 @@ type Client struct {
 	cli *client.Client
 }
 
+func (c *Client) Close() error {
+	if c == nil || c.cli == nil {
+		return nil
+	}
+	return c.cli.Close()
+}
+
 // NewClient creates a Docker client via SDK
 func NewClient(ctx context.Context, host string) (*Client, error) {
 	if err := ctx.Err(); err != nil {

@@ -28,6 +28,11 @@ const deployRecords = ref<ArtifactDeployRecord[]>([])
 const rolloutSubmitting = ref(false)
 const rollbackSubmitting = ref(false)
 const rollbacking = computed(() => rollbackSubmitting.value || deployBatch.value?.status === 'rolling_back')
+const canRollback = computed(() => !rollbacking.value && deployRecords.value.some(record =>
+  Boolean(record.beforeImage && record.afterImage)
+  && !['pending', 'waiting', 'skipped', 'not_started'].includes(record.deployStatus)
+  && !['success', 'skipped'].includes(record.rollbackStatus),
+))
 let rollbackPoll: ReturnType<typeof setTimeout> | undefined
 let disposed = false
 const itemOperatingId = ref<number | null>(null)
@@ -91,7 +96,7 @@ async function loadDeployBatch() {
 function sourceTypeText(type?: string) {
   if (type === 'upload') return '本地上传'
   if (type === 'download') return '服务器下载'
-  if (type === 'artifact') return '制品库选择'
+  if (type === 'artifact') return '历史制品导入'
   return type || '-'
 }
 
@@ -106,6 +111,18 @@ function statusType(status?: string) {
   if (status === 'available' || status === 'ready' || status === 'success') return 'success'
   if (status === 'failed') return 'danger'
   return 'warning'
+}
+
+function versionStatusText(current: ArtifactVersion) {
+  if (current.deployableCount > 0 && current.remainingDeployableCount === 0) return '已提交更新'
+  if (current.status === 'available' && current.deployableCount === 0) return '无可更新文件'
+  return statusText(current.status)
+}
+
+function versionStatusType(current: ArtifactVersion) {
+  if (current.deployableCount > 0 && current.remainingDeployableCount === 0) return 'warning'
+  if (current.status === 'available' && current.deployableCount === 0) return 'warning'
+  return statusType(current.status)
 }
 
 function validateTag(item: ArtifactVersionItem) {
@@ -335,7 +352,7 @@ function applyVersionResult(result: { version: ArtifactVersion; items: ArtifactV
 }
 
 async function handleDeleteItem(item: ArtifactVersionItem) {
-  await ElMessageBox.confirm(`确定删除制品 "${item.fileName}" 吗？该操作只影响当前更新版本。`, '删除制品', { type: 'warning' })
+  await ElMessageBox.confirm(`确定删除文件 "${item.fileName}" 吗？该操作只影响当前更新记录。`, '删除文件', { type: 'warning' })
   itemOperatingId.value = item.id
   try {
     applyVersionResult(await deleteArtifactVersionItem(versionNo.value, item.id))
@@ -396,7 +413,7 @@ async function handleRollout() {
 
 async function handleRollback() {
   if (!deployBatch.value || rollbacking.value) return
-  await ElMessageBox.confirm(`确定整体回滚版本 "${deployBatch.value.versionNo}" 吗？会在后台把本版本涉及的 Deployment 恢复到记录的可回滚镜像；未提交部署的目标无需回滚。`, '整体回滚', { type: 'warning' })
+  await ElMessageBox.confirm(`确定整体回滚版本 "${deployBatch.value.versionNo}" 吗？系统会按部署目标恢复到本次更新前记录的镜像；尚未开始部署的目标会跳过。`, '整体回滚', { type: 'warning' })
   rollbackSubmitting.value = true
   try {
     const result = await rollbackArtifactDeployBatch(deployBatch.value.deployBatchNo)
@@ -413,18 +430,18 @@ async function handleRollback() {
   <div class="version-detail-page" v-loading="loading">
     <div class="page-header">
       <div>
-        <h4>更新版本详情</h4>
+        <h4>更新记录详情</h4>
       </div>
-      <el-button @click="router.push('/artifacts/versions')">返回更新版本</el-button>
+      <el-button @click="router.push('/artifacts/versions')">返回更新记录</el-button>
     </div>
 
     <el-card v-if="version" shadow="never" class="summary-card">
       <div class="summary-top">
         <div>
-          <span>版本号</span>
+          <span>记录编号</span>
           <strong>{{ version.versionNo }}</strong>
         </div>
-        <el-tag :type="statusType(version.status)" size="large">{{ statusText(version.status) }}</el-tag>
+        <el-tag :type="versionStatusType(version)" size="large">{{ versionStatusText(version) }}</el-tag>
       </div>
       <div class="summary-grid">
         <div><span>来源</span><strong>{{ sourceTypeText(version.sourceType) }}</strong></div>
@@ -444,7 +461,7 @@ async function handleRollback() {
     <el-card shadow="never" class="table-card">
       <template #header>
         <div class="table-header">
-          <strong>制品文件</strong>
+          <strong>更新文件</strong>
           <el-button :loading="loading" @click="loadDetail">刷新</el-button>
         </div>
       </template>
@@ -522,12 +539,14 @@ async function handleRollback() {
             <span v-if="deployBatch">部署批次 {{ deployBatch.deployBatchNo }}，状态 {{ deployRecordStatusText(deployBatch.status) }}</span>
             <span v-else-if="deployRecords.length">待部署</span>
             <span v-else>暂无部署目标</span>
+            <span class="section-hint">镜像准备完成后，滚动更新会逐步替换 Deployment 的 Pod。</span>
+            <span class="section-hint">整体回滚按 Deployment 恢复更新前镜像；共享的 web-main 只回滚一次。</span>
           </div>
           <div class="header-actions">
-            <el-button :loading="deployLoading" @click="loadDeployBatch">刷新</el-button>
-            <el-button v-if="deployBatch && deployRecords.some(record => record.status === 'image_ready')" type="primary" :loading="rolloutSubmitting" @click="handleRollout">第二步：滚动更新</el-button>
+            <el-button :loading="deployLoading" @click="loadDeployBatch">刷新状态</el-button>
+            <el-button v-if="deployBatch && deployRecords.some(record => record.status === 'image_ready')" type="primary" :loading="rolloutSubmitting" @click="handleRollout">第二步：开始滚动更新</el-button>
             <el-button
-              v-if="deployBatch && deployRecords.length"
+              v-if="deployBatch && canRollback"
               type="warning"
               :loading="rollbacking"
               @click="handleRollback"
@@ -554,7 +573,7 @@ async function handleRollback() {
             <strong class="deployment-target">{{ row.deploymentTarget }}</strong>
           </template>
         </el-table-column>
-        <el-table-column prop="fileName" label="制品" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="fileName" label="更新文件" min-width="150" show-overflow-tooltip />
         <el-table-column prop="appName" label="应用" min-width="150" show-overflow-tooltip />
         <el-table-column label="状态" width="200">
           <template #default="{ row }">
@@ -693,6 +712,7 @@ async function handleRollback() {
 }
 .table-header strong { display: block; margin-bottom: 4px; }
 .table-header span { color: #8a9099; font-size: 12px; }
+.table-header .section-hint { color: #6b7280; }
 .header-actions { display: flex; gap: 8px; }
 .deployment-target {
   color: #1f2937;

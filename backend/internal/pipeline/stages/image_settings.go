@@ -1,6 +1,9 @@
 package stages
 
-import "df-build-server/internal/repository"
+import (
+	"df-build-server/internal/registryutil"
+	"df-build-server/internal/repository"
+)
 
 type imageSettingsReader interface {
 	GetByKey(string) (string, error)
@@ -31,5 +34,10 @@ func readImageRegistry(reader imageSettingsReader) (imageRegistry, error) {
 		}
 		*item.dest = value
 	}
+	host, _, err := registryutil.Endpoint(result.url)
+	if err != nil {
+		return imageRegistry{}, err
+	}
+	result.url = host
 	return result, nil
 }

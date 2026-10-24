@@ -1,7 +1,0 @@
-{
-  "backend/internal/service/sql_file_execution.go": "b26b68a306b012a03ce36242f42aa2ab6f7dbaeca046e79fa443facd8bf6ef5f",
-  "backend/internal/service/postgresql_service.go": "df06afa1b3398d3c0a9838a5a086d2eefcd3dfd00d89f4dfe6023c66a47d468d",
-  "backend/internal/service/sql_view_dependency.go": "fff1d8541880ad600059d02b57dd3a7704224babdd717f5cc5c316593c607ff7",
-  "backend/internal/handler/postgresql.go": "93907c44e572a19f47e3980ea52aa9df5fa4be008f8a2337088d09f457b89f64",
-  "frontend/src/views/PostgreSQLSQLExecutionView.vue": "f8689e50010d9058949cbc2fa234b473b780bb1f29dbe0b5ab889db6c6bc2326"
-}

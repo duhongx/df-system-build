@@ -76,6 +76,14 @@ func main() {
 	if err := service.BackfillSQLExecutionTargets(); err != nil {
 		logger.Log.Fatalf("迁移 SQL 执行目标失败: %v", err)
 	}
+	if n, err := service.BackfillSQLAddColumnStatements(); err != nil {
+		logger.Log.Warnf("自动拆分既有 ADD COLUMN 记录失败: %v", err)
+	} else if n > 0 {
+		logger.Log.Infof("已将 %d 个 SQL 文件的多个 ADD COLUMN 拆分为独立记录", n)
+	}
+	if err := service.BackfillImportedSQLFileStatuses(); err != nil {
+		logger.Log.Fatalf("修复 SQL 重复导入状态失败: %v", err)
+	}
 
 	// Finalize any deployment runs left "in flight" by a previous crash.
 	if n, err := deployrepo.FinalizeOrphanedRuns(repository.DB); err != nil {

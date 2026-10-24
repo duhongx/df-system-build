@@ -158,6 +158,11 @@ func parseSingleAlterColumnTypeRef(sqlText string) (alterColumnRef, error) {
 }
 
 func parseAlterColumnTypeRefs(sqlText string) ([]alterColumnRef, error) {
+	return parseViewAlterColumnRefs(sqlText, false)
+}
+
+// Compound statements are produced internally after validation; uploads remain one column per statement.
+func parseViewAlterColumnRefs(sqlText string, compound bool) ([]alterColumnRef, error) {
 	tree, err := pg_query.Parse(sqlText)
 	if err != nil {
 		return nil, fmt.Errorf("ALTER SQL 解析失败: %w", err)
@@ -174,22 +179,24 @@ func parseAlterColumnTypeRefs(sqlText string) ([]alterColumnRef, error) {
 			return nil, fmt.Errorf("第 %d 条 SQL 只支持 ALTER TABLE 修改字段类型语句", idx+1)
 		}
 		cmds := alterStmt.GetCmds()
-		if len(cmds) != 1 {
+		if len(cmds) == 0 || (!compound && len(cmds) != 1) {
 			return nil, fmt.Errorf("第 %d 条 SQL 只允许单个字段类型变更，不允许在同一 ALTER TABLE 中包含其他操作", idx+1)
 		}
-		cmd := cmds[0].GetAlterTableCmd()
-		if cmd == nil || cmd.GetSubtype() != pg_query.AlterTableType_AT_AlterColumnType {
-			return nil, fmt.Errorf("第 %d 条 SQL 只支持 ALTER TABLE 修改字段类型语句", idx+1)
+		for _, node := range cmds {
+			cmd := node.GetAlterTableCmd()
+			if cmd == nil || cmd.GetSubtype() != pg_query.AlterTableType_AT_AlterColumnType {
+				return nil, fmt.Errorf("第 %d 条 SQL 只支持 ALTER TABLE 修改字段类型语句", idx+1)
+			}
+			relation := alterStmt.GetRelation()
+			refs = append(refs, alterColumnRef{
+				schema: strings.TrimSpace(relation.GetSchemaname()),
+				table:  strings.TrimSpace(relation.GetRelname()),
+				column: strings.TrimSpace(cmd.GetName()),
+				sql:    extractRawStatementSQL(sqlText, raw),
+				line:   lineNumberAtOffset(sqlText, int(raw.GetStmtLocation())),
+				order:  len(refs) + 1,
+			})
 		}
-		relation := alterStmt.GetRelation()
-		refs = append(refs, alterColumnRef{
-			schema: strings.TrimSpace(relation.GetSchemaname()),
-			table:  strings.TrimSpace(relation.GetRelname()),
-			column: strings.TrimSpace(cmd.GetName()),
-			sql:    extractRawStatementSQL(sqlText, raw),
-			line:   lineNumberAtOffset(sqlText, int(raw.GetStmtLocation())),
-			order:  idx + 1,
-		})
 	}
 	return refs, nil
 }
@@ -202,8 +209,6 @@ func extractRawStatementSQL(sqlText string, raw *pg_query.RawStmt) string {
 	end := len(sqlText)
 	if stmtLen := int(raw.GetStmtLen()); stmtLen > 0 && start+stmtLen <= len(sqlText) {
 		end = start + stmtLen
-	} else if semicolon := strings.Index(sqlText[start:], ";"); semicolon >= 0 {
-		end = start + semicolon + 1
 	}
 	statement := strings.TrimSpace(sqlText[start:end])
 	if statement == "" {
@@ -309,6 +314,7 @@ func BuildSQLViewDependencyTransactionalSteps(task model.SQLViewDependencyTask, 
 type SQLViewDependencyRestoreGroup struct{ DropIndex, Start, End int }
 type SQLViewDependencyStepExecutionPlan struct {
 	LockTimeout, StatementTimeout string
+	sourceTask                    model.SQLViewDependencyTask
 	RestoreGroups                 []SQLViewDependencyRestoreGroup
 	DropSteps                     []string
 	AlterSteps                    []string
@@ -324,7 +330,7 @@ func (p SQLViewDependencyStepExecutionPlan) AllSteps() []string {
 }
 
 func BuildSQLViewDependencyStepExecutionPlan(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) SQLViewDependencyStepExecutionPlan {
-	plan := SQLViewDependencyStepExecutionPlan{LockTimeout: task.LockTimeout, StatementTimeout: task.StatementTimeout}
+	plan := SQLViewDependencyStepExecutionPlan{LockTimeout: task.LockTimeout, StatementTimeout: task.StatementTimeout, sourceTask: task}
 	dropIndices := map[string]int{}
 	for _, item := range orderedViewDependencyDropItems(items) {
 		if strings.TrimSpace(item.DropSQL) == "" {
@@ -359,7 +365,7 @@ func alterSQLStatementsForTask(task model.SQLViewDependencyTask) []string {
 	for _, ref := range refs {
 		statements = append(statements, ref.sql)
 	}
-	return statements
+	return mergeViewAlterStatements(statements)
 }
 
 func BuildSQLViewDependencyRestoreTransactionalSteps(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) []string {
@@ -724,7 +730,7 @@ func viewDependencyObjectKey(schemaName, objectName, kind string) string {
 }
 
 func ensureSQLViewDependencyTaskHasPlan(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) error {
-	if task.Status == "CREATED" || len(items) == 0 {
+	if task.Status == "CREATED" || (task.AnalyzedAt == nil && len(items) == 0) {
 		return fmt.Errorf("请先分析依赖并生成备份计划")
 	}
 	return nil

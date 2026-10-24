@@ -22,7 +22,7 @@ async function save() {
 
     <el-form label-width="190px">
       <el-form-item label="已存在字段跳过"><el-switch v-model="form.sql_execute_skip_exists_column" /></el-form-item>
-      <el-form-item label="表 / 索引已存在跳过"><el-switch v-model="form.sql_execute_skip_exists_table" /></el-form-item>
+      <el-form-item label="表 / 索引 / 约束已存在跳过"><el-switch v-model="form.sql_execute_skip_exists_table" /></el-form-item>
       <el-form-item label="INSERT 唯一冲突跳过"><el-switch v-model="form.sql_execute_skip_unique_constraint" /></el-form-item>
       <el-form-item><el-button type="primary" :loading="saving" @click="save">保存</el-button></el-form-item>
     </el-form>

@@ -181,7 +181,7 @@ async function refreshExecution() {
   try {
     const results = await Promise.allSettled(submittedIds.value.map(async id => {
       const pipeline = await getPipeline(id)
-      if (pipeline.batchId !== batchId.value) throw new Error('任务不属于当前更新版本')
+      if (pipeline.batchId !== batchId.value) throw new Error('任务不属于当前更新记录')
       return pipeline
     }))
     if (disposed) return
@@ -265,7 +265,7 @@ async function activateVersion(versionNo: string) {
 
 async function selectVersion(version: ArtifactVersion) {
   if (!isVersionReady(version)) {
-    ElMessage.warning('请选择可部署的更新版本')
+    ElMessage.warning('请选择可部署的更新记录')
     return
   }
   sourceMode.value = 'existing'
@@ -309,7 +309,7 @@ function versionItemToMatchResult(item: ArtifactVersionItem): MatchResult {
 function sourceTypeText(type: string) {
   if (type === 'upload') return '本地上传'
   if (type === 'download') return '服务器下载'
-  if (type === 'artifact') return '制品库选择'
+  if (type === 'artifact') return '历史制品导入'
   return type || '-'
 }
 
@@ -579,7 +579,7 @@ async function pollDownload(jobId: string) {
   const job = await getDownloadProgress(jobId)
   activeDownloadJob.value = job
   if (job.status === 'success') {
-    ElMessage.success('下载完成，已生成更新版本')
+    ElMessage.success('下载完成，已生成更新记录')
     await loadLocalDownloadDir(job.targetPath || job.localDir)
     activeDownloadJob.value = null
     await loadVersions()
@@ -677,7 +677,7 @@ function formatDownloadSize(size?: number) {
       </div>
       <div class="header-actions">
         <el-button v-if="hasSubmitted" :disabled="executing || rolling || executionLoading" type="primary" @click="startNewTask">新建任务</el-button>
-        <el-button @click="router.push('/artifacts/versions')">更新版本库</el-button>
+        <el-button @click="router.push('/artifacts/versions')">更新记录</el-button>
         <el-button @click="router.push('/build-queue')">查看任务队列</el-button>
       </div>
     </div>
@@ -698,7 +698,7 @@ function formatDownloadSize(size?: number) {
           :options="[
             { label: '离线上传', value: 'upload' },
             { label: '服务器下载', value: 'download' },
-            { label: '选择更新版本', value: 'existing' },
+            { label: '选择更新记录', value: 'existing' },
           ]"
         />
       </div>

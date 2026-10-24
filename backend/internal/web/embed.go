@@ -46,13 +46,24 @@ func RegisterSPA(r *gin.Engine) {
 
 		if f, err := distFS.Open(filePath); err == nil {
 			f.Close()
+			if strings.HasPrefix(filePath, "assets/") {
+				c.Header("Cache-Control", "public, max-age=31536000, immutable")
+			} else {
+				c.Header("Cache-Control", "no-cache")
+			}
 			fileServer.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		if strings.HasPrefix(filePath, "assets/") {
+			c.Header("Cache-Control", "no-cache")
+			c.Status(http.StatusNotFound)
 			return
 		}
 
 		// File not found in dist — serve index.html (SPA fallback)
 		// This enables Vue Router history mode
 		c.Request.URL.Path = "/"
+		c.Header("Cache-Control", "no-cache")
 		fileServer.ServeHTTP(c.Writer, c.Request)
 	})
 }

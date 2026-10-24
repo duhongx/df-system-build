@@ -55,7 +55,7 @@ func releaseSQLExecutionIssue(file *model.SQLChangeFile, statements []model.SQLC
 		}
 		return fmt.Errorf("SQL 文件没有可执行的语句")
 	}
-	return validateReleaseSQLTransactions(statements)
+	return validateReleaseSQLTransactionStates(statements)
 }
 
 func splitReleaseSQL(content string) ([]model.SQLChangeStatement, error) {
@@ -164,7 +164,10 @@ func (s *PostgreSQLService) loadReleaseSQLConfig(schema string) (PostgreSQLConfi
 
 func openReleaseSQLDatabase(cfg PostgreSQLConfig) (*sql.DB, error) {
 	u := url.URL{Scheme: "postgresql", User: url.UserPassword(cfg.User, cfg.Password)}
-	q := url.Values{"host": {cfg.Host}, "port": {cfg.Port}, "dbname": {cfg.Database}, "sslmode": {"disable"}, "connect_timeout": {"5"}}
+	// The managed PostgreSQL instance requires TLS (hostssl rules in
+	// pg_hba.conf). Keep this connection encrypted for admin probes, business
+	// account checks, and SQL execution.
+	q := url.Values{"host": {cfg.Host}, "port": {cfg.Port}, "dbname": {cfg.Database}, "sslmode": {"require"}, "connect_timeout": {"5"}}
 	u.RawQuery = q.Encode()
 	db, err := sql.Open("pgx", u.String())
 	if err != nil {
@@ -193,9 +196,266 @@ func saveReleaseSQLFile(file *model.SQLChangeFile, status, message, username str
 	})
 }
 
+const releaseSQLViewPairRollbackMessage = "视图组合事务失败：DROP VIEW 已回滚，原视图保持不变"
+
+func releaseSQLNode(sqlText string) *pg_query.Node {
+	tree, err := pg_query.Parse(sqlText)
+	if err != nil || len(tree.Stmts) != 1 {
+		return nil
+	}
+	return tree.Stmts[0].Stmt
+}
+
+func releaseSQLViewName(parts []string, defaultSchema string) (string, string, bool) {
+	switch len(parts) {
+	case 1:
+		return defaultSchema, parts[0], defaultSchema != "" && parts[0] != ""
+	case 2:
+		return parts[0], parts[1], parts[0] != "" && parts[1] != ""
+	default:
+		return "", "", false
+	}
+}
+
+func releaseSQLDropViewName(node *pg_query.Node) ([]string, bool) {
+	drop := node.GetDropStmt()
+	if drop == nil || drop.GetRemoveType() != pg_query.ObjectType_OBJECT_VIEW || drop.GetConcurrent() || len(drop.GetObjects()) != 1 {
+		return nil, false
+	}
+	list := drop.GetObjects()[0].GetList()
+	if list == nil || len(list.GetItems()) == 0 {
+		return nil, false
+	}
+	parts := make([]string, 0, len(list.GetItems()))
+	for _, item := range list.GetItems() {
+		ident := item.GetString_()
+		if ident == nil || ident.GetSval() == "" {
+			return nil, false
+		}
+		parts = append(parts, ident.GetSval())
+	}
+	return parts, true
+}
+
+func isReleaseSQLViewPair(drop, create model.SQLChangeStatement, schema string) bool {
+	dropParts, ok := releaseSQLDropViewName(releaseSQLNode(drop.SQLContent))
+	if !ok {
+		return false
+	}
+	createNode := releaseSQLNode(create.SQLContent)
+	view := createNode.GetViewStmt()
+	if view == nil || view.GetView() == nil || view.GetView().GetCatalogname() != "" {
+		return false
+	}
+	dropSchema, dropName, ok := releaseSQLViewName(dropParts, schema)
+	if !ok {
+		return false
+	}
+	createSchema := view.GetView().GetSchemaname()
+	if createSchema == "" {
+		createSchema = schema
+	}
+	return createSchema == dropSchema && view.GetView().GetRelname() == dropName
+}
+
+func releaseSQLViewPairIndex(statements []model.SQLChangeStatement, index int, schema string) int {
+	if index < 0 || index >= len(statements) {
+		return -1
+	}
+	if index > 0 && isReleaseSQLViewPair(statements[index-1], statements[index], schema) {
+		return index - 1
+	}
+	if index+1 < len(statements) && isReleaseSQLViewPair(statements[index], statements[index+1], schema) {
+		return index + 1
+	}
+	return -1
+}
+
+// executeReleaseSQLViewPair executes a matching DROP VIEW and CREATE VIEW as
+// one PostgreSQL transaction, so a failed create restores the prior view.
+func executeReleaseSQLViewPair(ctx context.Context, file *model.SQLChangeFile, drop, create *model.SQLChangeStatement, conn *sql.Conn, cfg PostgreSQLConfig, username string, index, total int) error {
+	progress := fmt.Sprintf("数据库 %s，连接账号 %s，schema %s，文件 %s，第 %d-%d/%d 句（视图 DROP + CREATE 事务）", cfg.Database, cfg.User, file.SchemaName, file.FileName, index+1, index+2, total)
+	if err := saveReleaseSQLFile(file, "RUNNING", progress, username); err != nil {
+		return err
+	}
+	beforeDrop, beforeCreate := *drop, *create
+	dropRecord := newSQLStatementRecord(file, beforeDrop, "EXECUTE", username)
+	createRecord := newSQLStatementRecord(file, beforeCreate, "EXECUTE", username)
+	for _, record := range []*model.SQLStatementRecord{&dropRecord, &createRecord} {
+		record.BatchID = file.ExecutionBatchID
+		record.DatabaseHost, record.DatabasePort, record.DatabaseName, record.DatabaseUser = cfg.Host, cfg.Port, cfg.Database, cfg.User
+		record.Status = "RUNNING"
+	}
+	drop.DatabaseUser = cfg.User
+	drop.ExecuteStatus, drop.ExecuteMessage, drop.ExecuteUser, drop.SkipKind = "RUNNING", "视图事务执行中", username, ""
+	create.DatabaseUser = cfg.User
+	create.ExecuteStatus, create.ExecuteMessage, create.ExecuteUser, create.SkipKind = "RUNNING", "视图事务执行中", username, ""
+	if err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := ensureLegacySQLStatementRecord(tx, file, beforeDrop); err != nil {
+			return err
+		}
+		if err := ensureLegacySQLStatementRecord(tx, file, beforeCreate); err != nil {
+			return err
+		}
+		if err := tx.Create(&dropRecord).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&createRecord).Error; err != nil {
+			return err
+		}
+		if err := tx.Save(drop).Error; err != nil {
+			return err
+		}
+		return tx.Save(create).Error
+	}); err != nil {
+		return fmt.Errorf("视图组合执行前保存记录失败，未执行 DROP/CREATE: %w", err)
+	}
+
+	started := time.Now()
+	execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseSQLStatementTimeout+5*time.Second)
+	defer cancel()
+	transaction, err := conn.BeginTx(execCtx, nil)
+	if err != nil {
+		return saveReleaseSQLViewPairResult(drop, create, &dropRecord, &createRecord, err, false, false, time.Since(started), username)
+	}
+	defer transaction.Rollback()
+	// A missing view is an allowed DROP outcome. Use a savepoint so the
+	// PostgreSQL transaction remains usable after that error.
+	if _, err := transaction.ExecContext(execCtx, "SAVEPOINT dfops_view_drop"); err != nil {
+		return saveReleaseSQLViewPairResult(drop, create, &dropRecord, &createRecord, err, false, false, time.Since(started), username, transaction.Rollback())
+	}
+	dropStarted := time.Now()
+	_, dropErr := transaction.ExecContext(execCtx, drop.SQLContent)
+	drop.DurationMs = time.Since(dropStarted).Milliseconds()
+	dropAbsent := pgState(dropErr) == "42P01"
+	if dropAbsent {
+		_, dropErr = transaction.ExecContext(execCtx, "ROLLBACK TO SAVEPOINT dfops_view_drop")
+	}
+	if dropErr != nil {
+		rollbackErr := transaction.Rollback()
+		return saveReleaseSQLViewPairResult(drop, create, &dropRecord, &createRecord, dropErr, true, false, time.Since(started), username, rollbackErr)
+	}
+	if _, err := transaction.ExecContext(execCtx, "RELEASE SAVEPOINT dfops_view_drop"); err != nil {
+		return saveReleaseSQLViewPairResult(drop, create, &dropRecord, &createRecord, err, true, false, time.Since(started), username, transaction.Rollback())
+	}
+	createStarted := time.Now()
+	_, createErr := transaction.ExecContext(execCtx, create.SQLContent)
+	create.DurationMs = time.Since(createStarted).Milliseconds()
+	if createErr != nil {
+		rollbackErr := transaction.Rollback()
+		return saveReleaseSQLViewPairResult(drop, create, &dropRecord, &createRecord, createErr, true, true, time.Since(started), username, rollbackErr)
+	}
+	if commitErr := transaction.Commit(); commitErr != nil {
+		return saveReleaseSQLViewPairResult(drop, create, &dropRecord, &createRecord, commitErr, true, true, time.Since(started), username, commitErr)
+	}
+	now := time.Now()
+	for _, stmt := range []*model.SQLChangeStatement{drop, create} {
+		stmt.ExecuteStatus, stmt.ExecuteMessage, stmt.SQLState = "SUCCESS", "视图组合事务执行成功", ""
+		stmt.ManualFailure, stmt.SkipKind = false, ""
+		stmt.ExecuteTime, stmt.ExecuteUser = &now, username
+	}
+	for _, record := range []*model.SQLStatementRecord{&dropRecord, &createRecord} {
+		yes := true
+		record.Submitted = &yes
+		record.Status, record.Message, record.FinishedAt = "SUCCESS", "视图组合事务执行成功", &now
+		record.DurationMs = time.Since(started).Milliseconds()
+	}
+	if dropAbsent {
+		drop.ExecuteStatus, drop.SkipKind, drop.ExecuteMessage = "SKIPPED", "AUTO", "视图不存在；后续 CREATE VIEW 已在同一事务中成功提交"
+		drop.SQLState = "42P01"
+		dropRecord.Status, dropRecord.Action, dropRecord.SkipKind = "SKIPPED", "AUTO_SKIP", "AUTO"
+		dropRecord.Message, dropRecord.SQLState = drop.ExecuteMessage, drop.SQLState
+	}
+	return saveReleaseSQLViewPairStates(drop, create, &dropRecord, &createRecord)
+}
+
+func saveReleaseSQLViewPairResult(drop, create *model.SQLChangeStatement, dropRecord, createRecord *model.SQLStatementRecord, execErr error, dropSubmitted, createSubmitted bool, elapsed time.Duration, username string, rollbackErrors ...error) error {
+	now := time.Now()
+	rollbackErr := errors.Join(rollbackErrors...)
+	status := "FAILED"
+	if rollbackErr != nil {
+		status = "UNKNOWN"
+	}
+	drop.ExecuteStatus, create.ExecuteStatus = status, status
+	drop.ManualFailure, create.ManualFailure = false, false
+	drop.ExecuteUser, create.ExecuteUser = username, username
+	drop.ExecuteTime, create.ExecuteTime = &now, &now
+	drop.SQLState, create.SQLState = "", ""
+	if dropSubmitted && !createSubmitted {
+		drop.SQLState = pgState(execErr)
+	}
+	if createSubmitted {
+		create.SQLState = pgState(execErr)
+	}
+	drop.ExecuteMessage = releaseSQLViewPairRollbackMessage
+	create.ExecuteMessage = "CREATE VIEW 失败，组合事务已回滚：" + execErr.Error()
+	if status == "UNKNOWN" {
+		drop.ExecuteMessage = "视图组合事务回滚结果待核实：" + rollbackErr.Error()
+		create.ExecuteMessage = "视图组合事务结果待核实：" + execErr.Error() + "；回滚失败：" + rollbackErr.Error()
+	}
+	if !dropSubmitted {
+		drop.ExecuteMessage = "视图组合事务未能启动：" + execErr.Error()
+	}
+	if dropSubmitted && !createSubmitted {
+		create.ExecuteMessage = "未执行 CREATE VIEW，因为 DROP VIEW 失败；事务已回滚：" + execErr.Error()
+	}
+	dropRecord.Status, dropRecord.Message, dropRecord.SQLState, dropRecord.FinishedAt = drop.ExecuteStatus, drop.ExecuteMessage, drop.SQLState, &now
+	createRecord.Status, createRecord.Message, createRecord.SQLState, createRecord.FinishedAt = create.ExecuteStatus, create.ExecuteMessage, create.SQLState, &now
+	no, yes := false, true
+	dropRecord.Submitted, createRecord.Submitted = &no, &no
+	if dropSubmitted {
+		dropRecord.Submitted = &yes
+	}
+	if createSubmitted {
+		createRecord.Submitted = &yes
+	}
+	dropRecord.DurationMs, createRecord.DurationMs = drop.DurationMs, create.DurationMs
+	dropRecord.Action, createRecord.Action = "EXECUTE", "EXECUTE"
+	if status == "UNKNOWN" {
+		drop.ExecuteStatus, create.ExecuteStatus = "UNKNOWN", "UNKNOWN"
+	}
+	if err := saveReleaseSQLViewPairStates(drop, create, dropRecord, createRecord); err != nil {
+		return err
+	}
+	return fmt.Errorf("DROP/CREATE 事务失败，SQLSTATE %s：%s", pgState(execErr), create.ExecuteMessage)
+}
+
+func saveReleaseSQLViewPairStates(drop, create *model.SQLChangeStatement, dropRecord, createRecord *model.SQLStatementRecord) error {
+	if err := repository.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(drop).Error; err != nil {
+			return err
+		}
+		if err := tx.Save(create).Error; err != nil {
+			return err
+		}
+		if err := tx.Save(dropRecord).Error; err != nil {
+			return err
+		}
+		return tx.Save(createRecord).Error
+	}); err != nil {
+		drop.ExecuteStatus, create.ExecuteStatus = "UNKNOWN", "UNKNOWN"
+		drop.ExecuteMessage = "视图组合执行结果已提交或回滚，但保存记录失败，请核实数据库对象后再操作：" + err.Error()
+		create.ExecuteMessage = drop.ExecuteMessage
+		_ = repository.DB.Transaction(func(tx *gorm.DB) error {
+			if saveErr := tx.Save(drop).Error; saveErr != nil {
+				return saveErr
+			}
+			return tx.Save(create).Error
+		})
+		return fmt.Errorf("视图组合执行结果保存失败，执行状态待核实: %w", err)
+	}
+	return nil
+}
+
 // Ordinary release SQL uses the schema account, one connection per file and
 // per-statement autocommit. No risk analysis, rewriting or automatic owner fix.
 func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.SQLChangeFile, statements []model.SQLChangeStatement, username string, options SQLExecuteOptions) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
+	return s.runReleaseSQLFileWithConfig(ctx, file, statements, username, options, nil)
+}
+
+// An alternate login is confined to one explicit retry. The original file's
+// schema/search_path, identity and subsequent execution configuration stay intact.
+func (s *PostgreSQLService) runReleaseSQLFileWithConfig(ctx context.Context, file *model.SQLChangeFile, statements []model.SQLChangeStatement, username string, options SQLExecuteOptions, retryConfig *PostgreSQLConfig) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
 	failed := func(err error) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
 		message := fmt.Sprintf("文件 %s 执行失败: %v", file.FileName, err)
 		if saveErr := saveReleaseSQLFile(file, "FAILED", message, username); saveErr != nil {
@@ -203,6 +463,15 @@ func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.S
 		}
 		return file, statements, nil
 	}
+	if err := validateReleaseSQLTransactionStates(statements); err != nil {
+		return failed(err)
+	}
+	groups, _ := releaseSQLTransactionGroups(statements)
+	groupsByStart := map[int]releaseSQLTransactionGroup{}
+	for _, group := range groups {
+		groupsByStart[group.Start] = group
+	}
+	annotateReleaseSQLTransactionGroups(statements)
 	target, err := currentReleaseSQLTarget()
 	if err != nil {
 		return failed(err)
@@ -211,17 +480,30 @@ func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.S
 		return failed(err)
 	}
 	remaining := 0
+	deferredFailures := 0
 	for _, stmt := range statements {
+		if stmt.ManualFailure && stmt.ExecuteStatus == "FAILED" {
+			deferredFailures++
+			continue
+		}
 		if stmt.ExecuteStatus != "SUCCESS" && stmt.ExecuteStatus != "SKIPPED" {
 			remaining++
 		}
 	}
 	if remaining == 0 {
+		if deferredFailures > 0 {
+			return file, statements, saveReleaseSQLFile(file, "FAILED", fmt.Sprintf("执行完成：仍有 %d 条 SQL 已标记失败，待单独重试", deferredFailures), username)
+		}
 		return file, statements, saveReleaseSQLFile(file, "SUCCESS", "文件内所有 SQL 已成功或跳过", username)
 	}
-	cfg, err := s.loadReleaseSQLConfig(file.SchemaName)
-	if err != nil {
-		return failed(err)
+	var cfg PostgreSQLConfig
+	if retryConfig != nil {
+		cfg = *retryConfig
+	} else {
+		cfg, err = s.loadReleaseSQLConfig(file.SchemaName)
+		if err != nil {
+			return failed(err)
+		}
 	}
 	if err := requireReleaseSQLTarget(file, releaseSQLTarget(cfg)); err != nil {
 		return failed(err)
@@ -233,19 +515,47 @@ func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.S
 	defer db.Close()
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return failed(fmt.Errorf("连接数据库 %s（账号/schema：%s）失败: %w", cfg.Database, cfg.User, err))
+		return failed(fmt.Errorf("连接数据库 %s（连接账号：%s）失败: %w", cfg.Database, cfg.User, err))
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "SELECT set_config('search_path', $1, false)", quoteIdent(file.SchemaName)); err != nil {
-		return failed(err)
+	// Keep the login's database/role defaults (including public or a configured
+	// extension schema). Replacing the path with only the business schema hides
+	// unqualified extension functions such as uuid_generate_v1(). The script's
+	// later SET/RESET commands still take precedence and are restored on retry.
+	if _, err := conn.ExecContext(ctx, `SELECT pg_catalog.set_config('search_path',
+		$1 || CASE WHEN pg_catalog.current_setting('search_path') = '' THEN ''
+		ELSE ', ' || pg_catalog.current_setting('search_path') END, false)`, quoteIdent(file.SchemaName)); err != nil {
+		return failed(fmt.Errorf("初始化 SQL 搜索路径失败: %w", err))
 	}
 	if _, err := conn.ExecContext(ctx, "SET statement_timeout = '60s'"); err != nil {
 		return failed(err)
 	}
-	for i := range statements {
+	for i := 0; i < len(statements); i++ {
 		stmt := &statements[i]
-		restoreSession := stmt.ExecuteStatus == "SUCCESS" && isReleaseSQLSessionSetting(stmt.SQLContent)
-		if (stmt.ExecuteStatus == "SUCCESS" || stmt.ExecuteStatus == "SKIPPED") && !restoreSession {
+		if group, ok := groupsByStart[i]; ok {
+			block := statements[group.Start : group.End+1]
+			if block[0].ExecuteStatus == "SUCCESS" || block[0].ExecuteStatus == "SKIPPED" {
+				if !group.Rollback && block[0].TransactionOutcome == "COMMITTED" {
+					for _, row := range block {
+						if row.ExecuteStatus == "SUCCESS" && isReleaseSQLSessionSetting(row.SQLContent) {
+							if err := restoreReleaseSQLSession(ctx, conn, file, row, cfg, username); err != nil {
+								return failed(err)
+							}
+						}
+					}
+				}
+			} else if !(block[0].ManualFailure && block[0].ExecuteStatus == "FAILED") {
+				if err := executeReleaseSQLTransactionGroup(ctx, file, block, conn, cfg, username, options); err != nil {
+					if errors.Is(err, errReleaseSQLTransactionStopped) {
+						return file, statements, saveReleaseSQLFile(file, "CANCELED", err.Error(), username)
+					}
+					return failed(err)
+				}
+			}
+			i = group.End
+			continue
+		}
+		if stmt.ManualFailure && stmt.ExecuteStatus == "FAILED" {
 			continue
 		}
 		stop, stopErr := releaseSQLBatchStopped(ctx, file.ExecutionBatchID)
@@ -255,13 +565,31 @@ func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.S
 		if stop {
 			return file, statements, saveReleaseSQLFile(file, "CANCELED", "执行已停止，已成功提交的 SQL 不会撤销", username)
 		}
+		if i+1 < len(statements) && stmt.ExecuteStatus != "SUCCESS" && stmt.ExecuteStatus != "SKIPPED" &&
+			statements[i+1].ExecuteStatus != "SUCCESS" && statements[i+1].ExecuteStatus != "SKIPPED" &&
+			!stmt.ManualFailure && !statements[i+1].ManualFailure &&
+			isReleaseSQLViewPair(*stmt, statements[i+1], file.SchemaName) {
+			if err := executeReleaseSQLViewPair(ctx, file, stmt, &statements[i+1], conn, cfg, username, i, len(statements)); err != nil {
+				return failed(fmt.Errorf("第 %d-%d 行视图组合执行失败: %w", stmt.LineNumber, statements[i+1].LineNumber, err))
+			}
+			i++
+			continue
+		}
+		restoreSession := stmt.ExecuteStatus == "SUCCESS" && isReleaseSQLSessionSetting(stmt.SQLContent)
+		if (stmt.ExecuteStatus == "SUCCESS" || stmt.ExecuteStatus == "SKIPPED") && !restoreSession {
+			continue
+		}
 		if restoreSession {
 			if err := restoreReleaseSQLSession(ctx, conn, file, *stmt, cfg, username); err != nil {
 				return failed(err)
 			}
 			continue
 		}
-		progress := fmt.Sprintf("数据库 %s，账号/schema %s，文件 %s，第 %d/%d 句（原文件第 %d 行）", cfg.Database, cfg.User, file.FileName, i+1, len(statements), stmt.LineNumber)
+		executable, err := releaseSQLColumnExecutionText(stmt.SQLContent)
+		if err != nil {
+			return failed(err)
+		}
+		progress := fmt.Sprintf("数据库 %s，连接账号 %s，schema %s，文件 %s，第 %d/%d 句（原文件第 %d 行）", cfg.Database, cfg.User, file.SchemaName, file.FileName, i+1, len(statements), stmt.LineNumber)
 		if err := saveReleaseSQLFile(file, "RUNNING", progress, username); err != nil {
 			return file, statements, err
 		}
@@ -270,6 +598,7 @@ func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.S
 		record.BatchID = file.ExecutionBatchID
 		record.DatabaseHost, record.DatabasePort, record.DatabaseName, record.DatabaseUser = cfg.Host, cfg.Port, cfg.Database, cfg.User
 		record.Status = "RUNNING"
+		stmt.DatabaseUser = cfg.User
 		stmt.ExecuteStatus, stmt.ExecuteMessage, stmt.ExecuteUser, stmt.SkipKind = "RUNNING", "执行中", username, ""
 		if err := repository.DB.Transaction(func(tx *gorm.DB) error {
 			if err := ensureLegacySQLStatementRecord(tx, file, before); err != nil {
@@ -285,7 +614,7 @@ func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.S
 		started := time.Now()
 		// Stop at a statement boundary: let the current statement return its result.
 		execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseSQLStatementTimeout+5*time.Second)
-		result, execErr := conn.ExecContext(execCtx, stmt.SQLContent)
+		result, execErr := conn.ExecContext(execCtx, executable)
 		cancel()
 		now := time.Now()
 		stmt.ExecuteTime = &now
@@ -299,13 +628,17 @@ func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.S
 			skip, skipMessage = skipReleaseSQLError(stmt.SQLContent, execErr, options)
 		}
 		var indexErr error
-		if execErr == nil || (skip && stmt.SQLState == "42P07") {
+		if execErr == nil {
 			indexErr = validateReleaseSQLIndex(ctx, conn, stmt.SQLContent)
+		} else if skip {
+			indexErr = validateReleaseSQLSkip(ctx, conn, stmt.SQLContent, stmt.SQLState)
 		}
 		if indexErr != nil {
-			stmt.ExecuteStatus, stmt.ExecuteMessage = "FAILED", indexErr.Error()
+			stmt.ExecuteStatus = "FAILED"
 			if execErr != nil {
-				stmt.ExecuteMessage = execErr.Error() + "；" + stmt.ExecuteMessage
+				stmt.ExecuteMessage = fmt.Sprintf("数据库原始错误：%s；dfops 校验：%s；未自动跳过本条 SQL", execErr.Error(), indexErr.Error())
+			} else {
+				stmt.ExecuteMessage = "数据库已返回执行成功，但 dfops 索引状态校验未通过：" + indexErr.Error()
 			}
 		} else if execErr == nil {
 			stmt.AffectedRows, _ = result.RowsAffected()
@@ -353,7 +686,7 @@ func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.S
 			return failed(fmt.Errorf("第 %d 行 SQL：%s\nSQLSTATE：%s\n%s；后续语句未执行", stmt.LineNumber, stmt.SQLContent, stmt.SQLState, stmt.ExecuteMessage))
 		}
 	}
-	success, skipped := 0, 0
+	success, skipped, deferredFailures := 0, 0, 0
 	for _, stmt := range statements {
 		if stmt.ExecuteStatus == "SUCCESS" {
 			success++
@@ -361,6 +694,12 @@ func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.S
 		if stmt.ExecuteStatus == "SKIPPED" {
 			skipped++
 		}
+		if stmt.ManualFailure && stmt.ExecuteStatus == "FAILED" {
+			deferredFailures++
+		}
+	}
+	if deferredFailures > 0 {
+		return file, statements, saveReleaseSQLFile(file, "FAILED", fmt.Sprintf("执行完成：成功 %d，跳过 %d，%d 条 SQL 已标记失败，待单独重试", success, skipped, deferredFailures), username)
 	}
 	return file, statements, saveReleaseSQLFile(file, "SUCCESS", fmt.Sprintf("执行完成：成功 %d，跳过 %d", success, skipped), username)
 }
@@ -373,13 +712,19 @@ func RecoverInterruptedSQLFiles() error {
 			return err
 		}
 		now := time.Now()
+		if err := tx.Model(&model.SQLStatementRecord{}).Where("status = ? AND transaction_group_id > 0", "RUNNING").Update("transaction_outcome", "UNKNOWN").Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&model.SQLChangeStatement{}).Where("execute_status = ? AND transaction_outcome <> ''", "RUNNING").Update("transaction_outcome", "UNKNOWN").Error; err != nil {
+			return err
+		}
 		if err := tx.Model(&model.SQLStatementRecord{}).Where("status = ?", "RUNNING").Updates(map[string]any{"status": "UNKNOWN", "message": "服务中断，执行结果待核实", "finished_at": now}).Error; err != nil {
 			return err
 		}
 		if err := tx.Model(&model.SQLChangeFile{}).Where("execute_status = ?", "QUEUED").Updates(map[string]any{"execute_status": "CANCELED", "execute_message": "服务中断，等待中的文件未执行"}).Error; err != nil {
 			return err
 		}
-		if err := tx.Model(&model.SQLChangeBatch{}).Where("execute_status = ? AND file_ids_json <> ''", "RUNNING").Updates(map[string]any{"execute_status": "FAILED", "execute_message": "服务中断，队列已停止，请核实后重新选择文件执行"}).Error; err != nil {
+		if err := tx.Model(&model.SQLChangeBatch{}).Where("execute_status = ? AND file_ids_json <> ''", "RUNNING").Updates(map[string]any{"execute_status": "FAILED", "outcome": "INTERRUPTED", "finished_at": now, "execute_message": "服务中断，队列已停止，请核实后重新选择文件执行"}).Error; err != nil {
 			return err
 		}
 		if err := tx.Model(&model.SQLChangeStatement{}).Where("execute_status = ?", "RUNNING").Updates(map[string]any{"execute_status": "UNKNOWN", "execute_message": "服务中断，执行结果待核实；确认已生效后可手工跳过"}).Error; err != nil {
@@ -403,6 +748,9 @@ func RecoverInterruptedSQLFiles() error {
 		if err := tx.Model(&model.SQLViewDependencyTask{}).Where("status IN ?", []string{"ANALYZING", "PRECHECKING"}).Updates(map[string]any{"status": "FAILED", "execute_message": "服务中断，分析或预检未完成"}).Error; err != nil {
 			return err
 		}
+		if err := tx.Model(&model.SQLViewDependencyChange{}).Where("status IN ? AND task_id IN (SELECT id FROM sql_view_dependency_tasks WHERE status = ?)", []string{"RUNNING", "APPLIED"}, "UNKNOWN").Updates(map[string]any{"status": "UNKNOWN", "error_message": "服务中断，字段变更结果待核实"}).Error; err != nil {
+			return err
+		}
 		return tx.Model(&model.SQLViewDependencyStep{}).Where("status = ?", "RUNNING").Updates(map[string]any{"status": "UNKNOWN", "error_message": "服务中断，步骤结果待核实"}).Error
 	})
 }
@@ -422,7 +770,7 @@ func skipReleaseSQLError(sqlText string, err error, options SQLExecuteOptions) (
 		return true, "表已存在"
 	case stmt.GetIndexStmt() != nil && options.SkipExistsTable && code == "42P07":
 		return true, "索引已存在"
-	case stmt.GetAlterTableStmt() != nil && options.SkipExistsColumn && code == "42701":
+	case stmt.GetAlterTableStmt() != nil && (options.SkipExistsColumn || releaseSQLColumnMissingOK(stmt)) && code == "42701":
 		if len(stmt.GetAlterTableStmt().Cmds) != 1 {
 			return false, ""
 		}
@@ -432,6 +780,10 @@ func skipReleaseSQLError(sqlText string, err error, options SQLExecuteOptions) (
 			}
 		}
 		return true, "字段已存在"
+	case options.SkipExistsTable && code == "42710":
+		if _, constraint := releaseSQLAddedConstraint(sqlText); constraint != nil {
+			return true, "约束已存在，已确认目标表及约束定义一致"
+		}
 	case stmt.GetDropStmt() != nil && stmt.GetDropStmt().RemoveType == pg_query.ObjectType_OBJECT_VIEW && len(stmt.GetDropStmt().Objects) == 1 && code == "42P01":
 		return true, "视图不存在"
 	}

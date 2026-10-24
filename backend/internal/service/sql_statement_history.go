@@ -34,7 +34,11 @@ func sqlSkipKind(stmt model.SQLChangeStatement) string {
 	return "UNKNOWN"
 }
 func newSQLStatementRecord(file *model.SQLChangeFile, stmt model.SQLChangeStatement, action, username string) model.SQLStatementRecord {
-	return model.SQLStatementRecord{FileID: file.ID, StatementID: stmt.ID, FileName: file.FileName, SchemaName: file.SchemaName, DatabaseUser: file.SchemaName, SQLHash: sqlContentHash(stmt.SQLContent), SQLContent: stmt.SQLContent, LineNumber: stmt.LineNumber, Action: action, Operator: username, StartedAt: time.Now(), BeforeStatus: stmt.ExecuteStatus, BeforeMessage: stmt.ExecuteMessage, BeforeSQLState: stmt.SQLState, BeforeOperator: stmt.ExecuteUser, BeforeTime: stmt.ExecuteTime}
+	databaseUser := stmt.DatabaseUser
+	if databaseUser == "" {
+		databaseUser = file.SchemaName
+	}
+	return model.SQLStatementRecord{TransactionGroupID: stmt.TransactionGroupID, TransactionOutcome: stmt.TransactionOutcome, FileID: file.ID, StatementID: stmt.ID, FileName: file.FileName, SchemaName: file.SchemaName, DatabaseUser: databaseUser, SQLHash: sqlContentHash(stmt.SQLContent), SQLContent: stmt.SQLContent, LineNumber: stmt.LineNumber, Action: action, Operator: username, StartedAt: time.Now(), BeforeStatus: stmt.ExecuteStatus, BeforeMessage: stmt.ExecuteMessage, BeforeSQLState: stmt.SQLState, BeforeOperator: stmt.ExecuteUser, BeforeTime: stmt.ExecuteTime}
 }
 func appendSQLActionRecord(tx *gorm.DB, file *model.SQLChangeFile, stmt model.SQLChangeStatement, action, username, status, message string) error {
 	record := newSQLStatementRecord(file, stmt, action, username)
@@ -44,8 +48,21 @@ func appendSQLActionRecord(tx *gorm.DB, file *model.SQLChangeFile, stmt model.SQ
 	record.FinishedAt = &now
 	record.Status = status
 	record.Message = message
+	if action == "FILE_FAIL" && record.TransactionGroupID == 0 {
+		record.TransactionOutcome = ""
+	}
 	if action == "MANUAL_SKIP" || action == "FILE_SKIP" {
 		record.SkipKind = "MANUAL"
+	}
+	if record.TransactionGroupID > 0 {
+		switch action {
+		case "MANUAL_SKIP", "FILE_SKIP":
+			record.TransactionOutcome = "SKIPPED"
+		case "MANUAL_FAIL", "FILE_FAIL":
+			record.TransactionOutcome = "MANUAL_FAILED"
+		case "EDIT":
+			record.TransactionOutcome = ""
+		}
 	}
 	return tx.Create(&record).Error
 }
@@ -153,6 +170,8 @@ func (s *PostgreSQLService) ListSQLStatementRecords(page, size int, filter SQLRe
 		q = q.Where("status = ?", filter.Status)
 	}
 	switch filter.Action {
+	case "MANUAL_FAIL":
+		q = q.Where("action IN ?", []string{"MANUAL_FAIL", "FILE_FAIL"})
 	case "MANUAL_SKIP":
 		q = q.Where("(action IN ? OR (action = ? AND skip_kind = ?))", []string{"MANUAL_SKIP", "FILE_SKIP"}, "LEGACY_SNAPSHOT", "MANUAL")
 	case "AUTO_SKIP":
@@ -176,8 +195,10 @@ func createSQLExecutionSnapshot(tx *gorm.DB, batchID uint, file model.SQLChangeF
 	for i := range base {
 		base[i].ResultOrigin = "PREVIOUS"
 		if base[i].ExecuteStatus != "SUCCESS" && base[i].ExecuteStatus != "SKIPPED" {
+			base[i].TransactionOutcome = ""
 			base[i].ResultOrigin = "NOT_EXECUTED"
 			base[i].ExecuteStatus = "PENDING"
+			base[i].ManualFailure = false
 			base[i].ExecuteMessage = ""
 			base[i].ExecuteTime = nil
 			base[i].ExecuteUser = ""
@@ -240,7 +261,9 @@ func (s *PostgreSQLService) GetSQLBatchFile(batchID, fileID uint) (*model.SQLCha
 			rows[i].SkipKind = r.SkipKind
 			rows[i].AffectedRows = r.AffectedRows
 			rows[i].DurationMs = r.DurationMs
+			rows[i].TransactionOutcome = r.TransactionOutcome
 		}
 	}
+	annotateReleaseSQLTransactionGroups(rows)
 	return &file, rows, nil
 }

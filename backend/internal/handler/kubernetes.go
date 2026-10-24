@@ -12,6 +12,7 @@ import (
 
 	"df-build-server/internal/k8s"
 	"df-build-server/internal/middleware"
+	"df-build-server/internal/registryutil"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/service"
 	"df-build-server/pkg/response"
@@ -597,7 +598,7 @@ func (h *KubernetesHandler) DeleteService(c *gin.Context) {
 	response.OKWithMessage(c, "Service 已删除", nil)
 }
 
-// GetImageTags queries Nexus Docker Registry for available tags
+// GetImageTags queries a Docker Registry V2 endpoint for available tags.
 func (h *KubernetesHandler) GetImageTags(c *gin.Context) {
 	cs, err := k8s.GetClient()
 	if err != nil {
@@ -622,33 +623,42 @@ func (h *KubernetesHandler) GetImageTags(c *gin.Context) {
 	}
 
 	currentImage := dep.Spec.Template.Spec.Containers[0].Image
-	registryURL, _ := h.settingsRepo.GetByKey("docker_registry_url")
-	if registryURL == "" {
+	registryAddress, _ := h.settingsRepo.GetByKey("docker_registry_url")
+	if registryAddress == "" {
 		response.Fail(c, 12318, "Docker 镜像仓库未配置")
+		return
+	}
+	registryHost, registryBaseURL, err := registryutil.Endpoint(registryAddress)
+	if err != nil {
+		response.Fail(c, 12318, err.Error())
 		return
 	}
 
 	// Extract repo name
 	repoName := currentImage
-	if strings.HasPrefix(repoName, registryURL+"/") {
-		repoName = strings.TrimPrefix(repoName, registryURL+"/")
+	if strings.HasPrefix(repoName, registryHost+"/") {
+		repoName = strings.TrimPrefix(repoName, registryHost+"/")
 	}
 	if idx := strings.LastIndex(repoName, ":"); idx > 0 {
 		repoName = repoName[:idx]
 	}
 
-	// Query Nexus V2 API
 	registryUser, _ := h.settingsRepo.GetByKey("docker_registry_user")
 	registryPass, _ := h.settingsRepo.GetByKey("docker_registry_password")
+	registryCACert, _ := h.settingsRepo.GetByKey("docker_registry_ca_cert")
 
-	tagsURL := fmt.Sprintf("http://%s/v2/%s/tags/list", registryURL, repoName)
-	client := &http.Client{Timeout: 10 * time.Second}
-	req2, _ := http.NewRequest("GET", tagsURL, nil)
+	httpClient, err := registryutil.HTTPClient(registryCACert, 10*time.Second)
+	if err != nil {
+		response.Fail(c, 12318, err.Error())
+		return
+	}
+	tagsURL := fmt.Sprintf("%s/v2/%s/tags/list", registryBaseURL, repoName)
+	req2, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, tagsURL, nil)
 	if registryUser != "" && registryPass != "" {
 		req2.SetBasicAuth(registryUser, registryPass)
 	}
 
-	resp, err := client.Do(req2)
+	resp, err := httpClient.Do(req2)
 	if err != nil {
 		response.Fail(c, 12318, "查询镜像仓库失败: "+err.Error())
 		return
@@ -668,7 +678,7 @@ func (h *KubernetesHandler) GetImageTags(c *gin.Context) {
 
 	var images []string
 	for i := len(tagsResp.Tags) - 1; i >= 0; i-- {
-		images = append(images, fmt.Sprintf("%s/%s:%s", registryURL, repoName, tagsResp.Tags[i]))
+		images = append(images, fmt.Sprintf("%s/%s:%s", registryHost, repoName, tagsResp.Tags[i]))
 	}
 
 	response.OK(c, gin.H{"currentImage": currentImage, "repository": repoName, "images": images})

@@ -247,14 +247,14 @@ func findDeploymentRuntimeVersion(db *gorm.DB, record model.ArtifactDeployRecord
 
 func upsertDeploymentRuntimeVersion(row model.DeploymentRuntimeVersion) error {
 	var existing model.DeploymentRuntimeVersion
-	err := repository.DB.
+	result := repository.DB.
 		Where("namespace = ? AND deployment_name = ? AND app_name = ? AND runtime_version_path = ?",
 			row.Namespace, row.DeploymentName, row.AppName, row.RuntimeVersionPath).
-		First(&existing).Error
-	if err != nil && err != gorm.ErrRecordNotFound {
-		return err
+		Limit(1).Find(&existing)
+	if result.Error != nil {
+		return result.Error
 	}
-	if err == gorm.ErrRecordNotFound {
+	if result.RowsAffected == 0 {
 		return repository.DB.Create(&row).Error
 	}
 	return repository.DB.Model(&existing).Updates(map[string]any{

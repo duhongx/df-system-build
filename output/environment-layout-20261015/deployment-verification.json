@@ -1,9 +1,0 @@
-{
-  "serviceCommit": "47324bc",
-  "embeddedFilesVerified": 78,
-  "health": {
-    "database": "healthy",
-    "service": "df-build-server",
-    "status": "ok"
-  }
-}

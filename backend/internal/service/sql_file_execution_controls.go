@@ -210,6 +210,11 @@ func (s *PostgreSQLService) GetCurrentSQLBatchFiles(id uint) (*model.SQLChangeBa
 	if batch.FileIDsJSON == "" {
 		return s.GetSQLBatch(id)
 	}
+	if batch.FilteredFilesJSON != "" {
+		if err := json.Unmarshal([]byte(batch.FilteredFilesJSON), &batch.FilteredFiles); err != nil {
+			return nil, nil, fmt.Errorf("读取批次未入队文件清单失败: %w", err)
+		}
+	}
 	var ids []uint
 	if err := json.Unmarshal([]byte(batch.FileIDsJSON), &ids); err != nil {
 		return nil, nil, err

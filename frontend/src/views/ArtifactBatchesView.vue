@@ -5,14 +5,12 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   deleteArtifactVersion,
   listArtifactVersions,
-  syncArtifactVersionsFromWorkspace,
   type ArtifactVersion,
 } from '../api/batch-deploy'
 import { formatBeijingTime } from '../utils/time'
 
 const router = useRouter()
 const loading = ref(false)
-const syncing = ref(false)
 const batches = ref<ArtifactVersion[]>([])
 
 const readyBatches = computed(() => batches.value.filter(batch => isReady(batch)))
@@ -27,31 +25,6 @@ async function loadBatches() {
     batches.value = sortArtifactVersions(result.versions || [])
   } finally {
     loading.value = false
-  }
-}
-
-async function syncWorkspaceVersions() {
-  try {
-    await ElMessageBox.confirm(
-      '同步工作区会扫描历史上传、下载和制品目录，并重新校验制品文件。目录或制品较多时可能耗时较长，确认继续？',
-      '同步历史更新版本',
-      {
-        type: 'warning',
-        confirmButtonText: '开始同步',
-        cancelButtonText: '取消',
-      },
-    )
-  } catch (err) {
-    if (err === 'cancel' || err === 'close') return
-    throw err
-  }
-  syncing.value = true
-  try {
-    const result = await syncArtifactVersionsFromWorkspace()
-    batches.value = sortArtifactVersions(result.versions || [])
-    ElMessage.success('工作区版本同步完成')
-  } finally {
-    syncing.value = false
   }
 }
 
@@ -70,6 +43,7 @@ function isReady(batch: ArtifactVersion) {
 function statusType(batch: ArtifactVersion) {
   if (isReady(batch)) return 'success'
   if (batch.status === 'failed') return 'danger'
+  if (batch.status === 'available' && batch.deployableCount === 0) return 'warning'
   return 'warning'
 }
 
@@ -79,13 +53,15 @@ function statusText(batch: ArtifactVersion) {
   if (batch.status === 'failed') return '失败'
   if (batch.status === 'collecting' || batch.status === 'running') return '采集中'
   if (batch.status === 'pending') return '等待中'
+  if (batch.status === 'available' && batch.deployableCount === 0) return '无可更新文件'
+  if (batch.status === 'available') return '可用'
   return batch.status || '未知'
 }
 
 function sourceTypeText(type: string) {
   if (type === 'upload') return '本地上传'
   if (type === 'download') return '服务器下载'
-  if (type === 'artifact') return '制品库选择'
+  if (type === 'artifact') return '历史制品导入'
   return type || '-'
 }
 
@@ -96,8 +72,8 @@ function showDetail(batch: ArtifactVersion) {
 async function deleteVersion(batch: ArtifactVersion) {
   try {
     await ElMessageBox.confirm(
-      `确认删除版本 ${batch.versionNo}？这会清理工作区文件和版本记录，已有部署批次或正在下载的版本不能删除。`,
-      '删除更新版本',
+        `确认删除更新记录 ${batch.versionNo}？这会清理工作区文件和记录，已有部署批次或正在下载的记录不能删除。`,
+      '删除更新记录',
       {
         type: 'warning',
         confirmButtonText: '删除',
@@ -105,7 +81,7 @@ async function deleteVersion(batch: ArtifactVersion) {
       },
     )
     await deleteArtifactVersion(batch.versionNo)
-    ElMessage.success('已删除更新版本')
+    ElMessage.success('已删除更新记录')
     await loadBatches()
   } catch (err) {
     if (err === 'cancel' || err === 'close') return
@@ -118,33 +94,32 @@ async function deleteVersion(batch: ArtifactVersion) {
   <div class="artifact-batches-page viewport-table-page">
     <div class="page-header">
       <div>
-        <h4>更新版本</h4>
+        <h4>更新记录</h4>
       </div>
       <div class="page-actions">
-        <el-button :loading="syncing" @click="syncWorkspaceVersions">同步工作区</el-button>
         <el-button type="primary" :loading="loading" @click="loadBatches">刷新</el-button>
       </div>
     </div>
 
     <div class="summary-row">
       <div class="summary-card">
-        <span>全部版本</span>
+        <span>全部记录</span>
         <strong>{{ batches.length }}</strong>
       </div>
       <div class="summary-card">
-        <span>可用版本</span>
+        <span>可更新记录</span>
         <strong>{{ readyBatches.length }}</strong>
       </div>
       <div class="summary-card">
-        <span>异常版本</span>
+        <span>异常记录</span>
         <strong>{{ failedBatches.length }}</strong>
       </div>
     </div>
 
     <el-card shadow="never" class="table-card">
       <el-table height="100%" :data="batches" v-loading="loading" border stripe>
-        <el-table-column prop="versionNo" label="版本号" min-width="220" show-overflow-tooltip />
-        <el-table-column label="来源" width="120">
+        <el-table-column prop="versionNo" label="记录编号" min-width="220" show-overflow-tooltip />
+        <el-table-column label="文件来源" width="120">
           <template #default="{ row }">{{ sourceTypeText(row.sourceType) }}</template>
         </el-table-column>
         <el-table-column label="状态" width="110">
@@ -152,8 +127,8 @@ async function deleteVersion(batch: ArtifactVersion) {
             <el-tag :type="statusType(row)" size="small">{{ statusText(row) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="count" label="制品数" width="90" />
-        <el-table-column prop="remainingDeployableCount" label="可更新" width="90" />
+        <el-table-column prop="count" label="文件数" width="90" />
+        <el-table-column prop="remainingDeployableCount" label="剩余可更新" width="110" />
         <el-table-column prop="invalidCount" label="不可读" width="90" />
         <el-table-column prop="unmatchedCount" label="未匹配" width="90" />
         <el-table-column label="本机目录" min-width="300" show-overflow-tooltip>

@@ -42,7 +42,9 @@ func StartRollbackDeployBatch(batchNo string, rollbacker DeploymentRollbacker, r
 		if err := tx.Model(&batch).Updates(map[string]any{"status": "rolling_back", "error_message": "", "finished_at": nil, "rolled_back_count": 0}).Error; err != nil {
 			return err
 		}
-		if err := tx.Model(&model.ArtifactDeployRecord{}).Where("deploy_batch_no = ?", batchNo).Updates(map[string]any{"rollback_status": "pending", "rolled_back_at": nil}).Error; err != nil {
+		if err := tx.Model(&model.ArtifactDeployRecord{}).
+			Where("deploy_batch_no = ? AND rollback_status NOT IN ?", batchNo, []string{"success", "skipped"}).
+			Updates(map[string]any{"rollback_status": "pending", "rolled_back_at": nil}).Error; err != nil {
 			return err
 		}
 		start = true

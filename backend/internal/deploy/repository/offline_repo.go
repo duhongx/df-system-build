@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"df-build-server/internal/model"
@@ -21,12 +20,12 @@ func NewOfflineRepo(db *gorm.DB) *OfflineRepo { return &OfflineRepo{db: db} }
 // GetCurrent returns the most recently installed bundle, or nil if none.
 func (r *OfflineRepo) GetCurrent(ctx context.Context) (*model.OfflineBundle, error) {
 	var row model.OfflineBundle
-	err := r.db.WithContext(ctx).Order("id desc").First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
+	result := r.db.WithContext(ctx).Order("id desc").Limit(1).Find(&row)
+	if result.Error != nil {
+		return nil, result.Error
 	}
-	if err != nil {
-		return nil, err
+	if result.RowsAffected == 0 {
+		return nil, nil
 	}
 	return &row, nil
 }

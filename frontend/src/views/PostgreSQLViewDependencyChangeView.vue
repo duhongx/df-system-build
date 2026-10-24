@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { createViewTaskPoller, viewStageProgress, viewTaskIsBusy } from '../utils/sql-view-progress'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   analyzeSQLViewDependencyTask,
@@ -16,8 +18,15 @@ import {
   type SQLViewDependencyTaskResult,
 } from '../api/postgresql'
 import { getSettings } from '../api/settings'
+import {cancelSQLViewTaskTransfer} from '../api/postgresql'
+async function cancelTransfer(){if(!currentTask.value)return;try{await ElMessageBox.confirm('撤回后原 SQL 仍保留失败，可返回文件编辑或单独重试。执行中、生效或待核实的任务不能撤回。','撤回转入',{type:'warning'})}catch{return};await cancelSQLViewTaskTransfer(currentTask.value.id);await refreshCurrentTask();ElMessage.success('已撤回关联，原 SQL 保留失败状态')}
 
-const loading = ref(false)
+const route = useRoute()
+const router = useRouter()
+const pollError = ref('')
+const taskLoading = ref(false)
+let disposed = false
+let routeLoadGeneration = 0
 const analyzing = ref(false)
 const executing = ref(false)
 const restoring = ref(false)
@@ -30,6 +39,7 @@ const dependencyChanges = ref<SQLViewDependencyChange[]>([])
 const dependencyItems = ref<SQLViewDependencyItem[]>([])
 const executionSteps = ref<SQLViewDependencyStep[]>([])
 const lastTaskSQL = ref('')
+const plannedAlterBatches = ref(0)
 
 const form = ref({
   alterSql: '',
@@ -41,10 +51,15 @@ const form = ref({
 const dependencyCount = computed(() => dependencyItems.value.length)
 const changeCount = computed(() => dependencyChanges.value.length)
 const materializedCount = computed(() => dependencyItems.value.filter(item => item.objectKind === 'm').length)
-const taskBusy = computed(() => analyzing.value || executing.value || restoring.value || backupActionLoading.value || ['ANALYZING', 'PRECHECKING', 'EXECUTING', 'RESTORING', 'VERIFYING'].includes(currentTask.value?.status || ''))
-const sameTaskBlocked = computed(() => lastTaskSQL.value === form.value.alterSql.trim() && (taskUncertain.value || currentTask.value?.status === 'SUCCESS' || executionSteps.value.some(s => s.stepName === 'ALTER_TABLE' && ['SUCCESS', 'UNKNOWN', 'RUNNING'].includes(s.status))))
+const taskBusy = computed(() => analyzing.value || executing.value || restoring.value || backupActionLoading.value || taskLoading.value || viewTaskIsBusy(currentTask.value?.status))
+const sameTaskBlocked = computed(() => currentTask.value?.sourceSyncStatus==='CANCELED'||lastTaskSQL.value === form.value.alterSql.trim() && (taskUncertain.value || currentTask.value?.status === 'SUCCESS' || executionSteps.value.some(s => s.stepName === 'ALTER_TABLE' && ['SUCCESS', 'UNKNOWN', 'RUNNING'].includes(s.status))))
 const taskUncertain = computed(() => currentTask.value?.outcomeUncertain || currentTask.value?.status === 'UNKNOWN')
-const canRestore = computed(() => Boolean(currentTask.value?.id && dependencyItems.value.length > 0))
+const canRestore = computed(() => Boolean(
+  currentTask.value?.id &&
+  currentTask.value.sourceSyncStatus !== 'CANCELED' &&
+  dependencyItems.value.length > 0 &&
+  ['FAILED', 'RESTORE_FAILED', 'VERIFY_FAILED', 'UNKNOWN'].includes(currentTask.value.status),
+))
 const hasAnalysisResult = computed(() => {
   const status = currentTask.value?.status || ''
   return Boolean(
@@ -56,7 +71,7 @@ const hasAnalysisResult = computed(() => {
   )
 })
 
-type ProcessStageStatus = 'pending' | 'running' | 'success' | 'failed'
+type ProcessStageStatus = 'pending' | 'running' | 'success' | 'failed' | 'skipped' | 'unneeded'
 
 function stageStatusText(status: ProcessStageStatus) {
   return ({
@@ -64,6 +79,8 @@ function stageStatusText(status: ProcessStageStatus) {
     running: '执行中',
     success: '完成',
     failed: '失败',
+    skipped: '未执行',
+    unneeded: '无需处理',
   } as Record<ProcessStageStatus, string>)[status]
 }
 
@@ -74,25 +91,50 @@ function stageStatusType(status: ProcessStageStatus) {
   return 'info'
 }
 
-function stageFromStepNames(names: string[]): { status: ProcessStageStatus; count: number; error: string } {
-  const matched = executionSteps.value.filter(step => names.includes(step.stepName))
-  if (matched.some(step => ['FAILED', 'UNKNOWN', 'ROLLED_BACK'].includes(step.status))) {
-    return { status: 'failed', count: matched.length, error: matched.find(step => ['FAILED', 'UNKNOWN', 'ROLLED_BACK'].includes(step.status))?.errorMessage || '' }
-  }
-  if (matched.some(step => step.status === 'RUNNING')) {
-    return { status: 'running', count: matched.length, error: '' }
-  }
-  if (matched.length > 0 && matched.every(step => step.status === 'SUCCESS')) {
-    return { status: 'success', count: matched.length, error: '' }
-  }
-  return { status: 'pending', count: matched.length, error: '' }
+function stageFromStepNames(names: string[]) {
+  return viewStageProgress(executionSteps.value, names)
+}
+function completedStageSummary(stage: ReturnType<typeof viewStageProgress>) {
+  return `已完成 ${stage.completed}/${stage.count}${stage.skipped ? `，未执行 ${stage.skipped}` : ''}`
+}
+
+const completedChanges = computed(() => dependencyChanges.value.filter(change => change.status === 'SUCCESS').length)
+const alterBatchCount = computed(() => executionSteps.value.filter(step => step.stepName === 'ALTER_TABLE').length || plannedAlterBatches.value)
+const currentStep = computed(() => executionSteps.value.find(step => step.status === 'RUNNING'))
+function stepDuration(step: SQLViewDependencyStep) {
+  if (!step.startedAt) return '-'
+  const seconds = Math.max(0, Math.floor(((step.finishedAt ? Date.parse(step.finishedAt) : Date.now()) - Date.parse(step.startedAt)) / 1000))
+  return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+}
+const poller = createViewTaskPoller(
+  id => getSQLViewDependencyTask(id, true),
+  data => {
+    if (data.task.id !== currentTask.value?.id) return
+    const previous = currentTask.value.status
+    applyTaskResult(data)
+    pollError.value = ''
+    if (viewTaskIsBusy(previous) && !viewTaskIsBusy(data.task.status)) notifyTaskResult(data)
+    if (!taskBusy.value) poller.stop()
+  },
+  error => { pollError.value = error instanceof Error ? error.message : '进度刷新失败' },
+)
+watch([() => currentTask.value?.id, () => taskBusy.value], ([id, busy]) => {
+  if (!disposed && id && busy) poller.start(id)
+  else poller.stop()
+}, { flush: 'sync' })
+onBeforeUnmount(() => { disposed = true; poller.stop() })
+function notifyTaskResult(data: SQLViewDependencyTaskResult) {
+  if (data.task.status === 'SUCCESS') ElMessage.success(data.task.executeMessage || '执行完成')
+  else if (data.task.status === 'RESTORED') ElMessage.warning(data.task.executeMessage || '视图已恢复')
+  else if (['FAILED', 'PRECHECK_FAILED', 'UNKNOWN', 'RESTORE_FAILED'].includes(data.task.status)) ElMessage.error(data.task.executeMessage || '执行失败')
 }
 
 const executionStages = computed(() => {
   const backupStatus: ProcessStageStatus = hasAnalysisResult.value ? 'success' : 'pending'
+  const noViews = Boolean(currentTask.value?.analyzedAt) && dependencyCount.value === 0
   const drop = stageFromStepNames(['DROP_DEPENDENCY'])
   const alter = stageFromStepNames(['ALTER_TABLE'])
-  const restore = stageFromStepNames(['RESTORE_OBJECT', 'REFRESH_MATERIALIZED_VIEW', 'RESTORE_COMMENT', 'RESTORE_GRANT'])
+  const restore = stageFromStepNames(['RESTORE_OBJECT', 'REFRESH_MATERIALIZED_VIEW', 'RESTORE_COMMENT', 'RESTORE_GRANT', 'SQL'])
   const verify = stageFromStepNames(['VERIFY'])
   return [
     {
@@ -100,15 +142,15 @@ const executionStages = computed(() => {
       order: 1,
       title: '备份视图',
       status: backupStatus,
-      summary: backupStatus === 'success' ? `已保存 ${dependencyItems.value.length} 个依赖对象定义、权限、注释和索引信息` : '分析后生成依赖对象备份',
+      summary: noViews ? '分析完成，没有依赖视图需要备份' : backupStatus === 'success' ? `已保存 ${dependencyItems.value.length} 个依赖对象定义、权限、注释和索引信息` : '分析后生成依赖对象备份',
       error: '',
     },
     {
       key: 'drop',
       order: 2,
       title: '删除视图',
-      status: drop.status,
-      summary: drop.count > 0 ? `已处理 ${drop.count} 条删除依赖对象 SQL` : '执行时按依赖层级删除阻塞对象',
+      status: noViews ? 'unneeded' as const : drop.status,
+      summary: noViews ? '没有依赖视图需要删除' : drop.count > 0 ? completedStageSummary(drop) : '执行时按依赖层级删除阻塞对象',
       error: drop.error,
     },
     {
@@ -116,23 +158,23 @@ const executionStages = computed(() => {
       order: 3,
       title: '执行SQL',
       status: alter.status,
-      summary: alter.count > 0 ? `已处理 ${alter.count} 条字段变更 SQL` : '删除依赖后执行原始字段变更 SQL',
+      summary: alter.count > 0 ? `已完成 ${completedChanges.value}/${changeCount.value} 列，${alter.completed}/${alter.count} 批` : '等待字段变更',
       error: alter.error,
     },
     {
       key: 'restore',
       order: 4,
       title: '恢复视图',
-      status: restore.status,
-      summary: restore.count > 0 ? `已处理 ${restore.count} 条重建、权限和注释恢复 SQL` : '字段变更后按备份恢复视图和附属对象',
+      status: noViews ? 'unneeded' as const : restore.status,
+      summary: noViews ? '没有依赖视图需要恢复' : restore.count > 0 ? completedStageSummary(restore) : '字段变更后按备份恢复视图和附属对象',
       error: restore.error,
     },
     {
       key: 'verify',
       order: 5,
       title: '视图检测',
-      status: verify.status,
-      summary: verify.count > 0 ? `已处理 ${verify.count} 条存在性检测 SQL` : '恢复后校验视图存在并可访问',
+      status: noViews ? 'unneeded' as const : verify.status,
+      summary: noViews ? '没有依赖视图需要检测' : verify.count > 0 ? completedStageSummary(verify) : '恢复后校验视图存在并可访问',
       error: verify.error,
     },
   ]
@@ -147,6 +189,9 @@ function taskStatusText(status?: string) {
     PRECHECK_FAILED: '预检失败',
     EXECUTING: '执行中',
     SUCCESS: '成功',
+    APPLIED: '待提交',
+    RUNNING: '执行中',
+    PENDING: '待执行',
     FAILED: '失败',
     UNKNOWN: '结果待核实',
     ANALYZING: '分析中',
@@ -163,7 +208,7 @@ function taskStatusText(status?: string) {
 function taskStatusType(status?: string) {
   if (status === 'SUCCESS' || status === 'RESTORED') return 'success'
   if (status === 'UNKNOWN' || status === 'ROLLED_BACK' || status === 'FAILED' || status === 'PRECHECK_FAILED' || status === 'RESTORE_FAILED') return 'danger'
-  if (status === 'EXECUTING' || status === 'RESTORING' || status === 'PRECHECK_PASSED') return 'warning'
+  if (status === 'RUNNING' || status === 'APPLIED' || status === 'EXECUTING' || status === 'RESTORING' || status === 'PRECHECK_PASSED') return 'warning'
   return 'info'
 }
 
@@ -247,6 +292,7 @@ async function handleRestoreBackupItem(item?: SQLViewDependencyItem) {
     ElMessage.warning('请先选择一个视图备份')
     return
   }
+  if (!canRestore.value || taskBusy.value) return
   backupActionLoading.value = true
   try {
     await ElMessageBox.confirm(`将按备份恢复 ${backupObjectName(target)}，确认继续？`, '恢复当前视图', {
@@ -290,10 +336,14 @@ async function handleVerifyBackupItem(item?: SQLViewDependencyItem) {
 }
 
 function applyTaskResult(data: SQLViewDependencyTaskResult) {
+  if (disposed || (route.query.taskId && String(data.task.id) !== String(route.query.taskId))) return
+  // A fast background completion can arrive before the submission response.
+  if (data.task.id === currentTask.value?.id && Date.parse(data.task.updatedAt) < Date.parse(currentTask.value.updatedAt)) return
   currentTask.value = data.task
   dependencyItems.value = data.items || []
   dependencyChanges.value = data.changes || []
   executionSteps.value = data.steps || []
+  plannedAlterBatches.value = data.alterBatchCount || 0
   syncSelectedBackupItem()
 }
 
@@ -308,6 +358,7 @@ async function loadSQLExecutionSettings() {
 }
 
 async function ensureTaskForCurrentSQL() {
+  if(currentTask.value?.sourceFileId&&form.value.alterSql.trim()!==lastTaskSQL.value){ElMessage.warning('关联源 SQL 不可在此修改，请处理原任务');return null}
   const sql = form.value.alterSql.trim()
   if (!sql) {
     ElMessage.warning('请输入需要处理视图依赖的 SQL')
@@ -323,16 +374,17 @@ async function ensureTaskForCurrentSQL() {
     statementTimeout: form.value.statementTimeout,
   })
   currentTask.value = task
+  await router.replace({ query: { ...route.query, taskId: String(task.id) } })
   dependencyChanges.value = []
   dependencyItems.value = []
   executionSteps.value = []
+  plannedAlterBatches.value = 0
   lastTaskSQL.value = sql
   return task
 }
 
 async function handleAnalyze() {
   analyzing.value = true
-  loading.value = true
   try {
     const task = await ensureTaskForCurrentSQL()
     if (!task) return
@@ -343,36 +395,37 @@ async function handleAnalyze() {
     ElMessage.error(err instanceof Error ? err.message : '分析失败')
   } finally {
     analyzing.value = false
-    loading.value = false
   }
 }
 
 async function handleExecute() {
   executing.value = true
-  loading.value = true
   try {
     let task = await ensureTaskForCurrentSQL()
     if (!task) return
-    if (dependencyItems.value.length === 0) {
+    if (!task.analyzedAt) {
       const data = await analyzeSQLViewDependencyTask(task.id)
       applyTaskResult(data)
       task = data.task
     }
     await ElMessageBox.confirm(
-      `系统会处理 ${dependencyChanges.value.length || 1} 条字段变更：先备份并删除依赖视图，再执行字段变更 SQL，最后按备份重建视图。执行期间相关视图会短暂不可用，确认继续？`,
+      dependencyItems.value.length === 0
+        ? `分析未发现依赖视图，将执行 ${dependencyChanges.value.length || 1} 条字段变更，无需删除或重建视图。确认继续？`
+        : `系统会处理 ${dependencyChanges.value.length || 1} 条字段变更，按 ${alterBatchCount.value || dependencyChanges.value.length || 1} 批执行：先备份并删除依赖视图，再执行字段变更 SQL，最后按备份重建视图。执行期间相关视图会短暂不可用，确认继续？`,
       '执行确认',
       { type: 'warning', confirmButtonText: '执行' },
     )
     const result = await executeSQLViewDependencyTask(task.id)
     applyTaskResult(result)
-    ElMessage.success(result.task.executeMessage || '执行完成')
+    if (viewTaskIsBusy(result.task.status)) ElMessage.success('任务已提交')
+    else notifyTaskResult(result)
   } catch (err) {
     if (err !== 'cancel') {
+      await refreshCurrentTask()
       ElMessage.error(err instanceof Error ? err.message : '执行失败')
     }
   } finally {
     executing.value = false
-    loading.value = false
   }
 }
 
@@ -381,8 +434,8 @@ async function handleRestore() {
     ElMessage.warning('请先分析或执行一个 SQL')
     return
   }
+  if (!canRestore.value || taskBusy.value) return
   restoring.value = true
-  loading.value = true
   try {
     await ElMessageBox.confirm('将按当前任务的备份信息恢复依赖视图，确认恢复？', '恢复确认', { type: 'warning', confirmButtonText: '恢复' })
     const result = await restoreSQLViewDependencyTask(currentTask.value.id)
@@ -390,29 +443,61 @@ async function handleRestore() {
     ElMessage.success(result.task.executeMessage || '恢复完成')
   } catch (err) {
     if (err !== 'cancel') {
+      await refreshCurrentTask()
       ElMessage.error(err instanceof Error ? err.message : '恢复失败')
     }
   } finally {
     restoring.value = false
-    loading.value = false
   }
 }
 
 async function refreshCurrentTask() {
-  if (!currentTask.value?.id) return
-  try {
-    const data = await getSQLViewDependencyTask(currentTask.value.id)
-    applyTaskResult(data)
-  } catch (err) {
-    ElMessage.error(err instanceof Error ? err.message : '刷新任务失败')
-  }
+  if (!currentTask.value?.id || disposed) return
+  await poller.start(currentTask.value.id)
 }
 
-onMounted(loadSQLExecutionSettings)
+async function loadRouteTask() {
+  const id = Number(route.query.taskId)
+  if (id === currentTask.value?.id) return
+  const generation = ++routeLoadGeneration
+  currentTask.value = null
+  dependencyChanges.value = []
+  dependencyItems.value = []
+  executionSteps.value = []
+  plannedAlterBatches.value = 0
+  lastTaskSQL.value = ''
+  poller.stop()
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    form.value.alterSql = ''
+    taskLoading.value = false
+    return
+  }
+  taskLoading.value = true
+  try {
+    const data = await getSQLViewDependencyTask(id)
+    if (disposed || generation !== routeLoadGeneration) return
+    form.value.alterSql = data.task.alterSql
+    form.value.executionMode = data.task.executionMode || 'STEP'
+    form.value.lockTimeout = data.task.lockTimeout || form.value.lockTimeout
+    form.value.statementTimeout = data.task.statementTimeout || form.value.statementTimeout
+    lastTaskSQL.value = data.task.alterSql.trim()
+    applyTaskResult(data)
+  } catch (error) {
+    if (!disposed && generation === routeLoadGeneration) ElMessage.error(error instanceof Error ? error.message : '加载任务失败')
+  } finally {
+    if (generation === routeLoadGeneration) taskLoading.value = false
+  }
+}
+watch(() => route.query.taskId, loadRouteTask)
+onMounted(async () => {
+  await loadSQLExecutionSettings()
+  if (!disposed) await loadRouteTask()
+})
+
 </script>
 
 <template>
-  <div class="view-dependency-page" v-loading="loading">
+  <div class="view-dependency-page">
     <section class="work-card">
       <div class="sql-header">
         <div>
@@ -422,12 +507,13 @@ onMounted(loadSQLExecutionSettings)
         <div class="actions">
           <el-button :disabled="taskBusy || sameTaskBlocked" :loading="analyzing" @click="handleAnalyze">分析</el-button>
           <el-button type="primary" :disabled="taskBusy || sameTaskBlocked" :loading="executing" @click="handleExecute">执行</el-button>
-          <el-button type="warning" :disabled="!canRestore || taskBusy" :loading="restoring" @click="handleRestore">恢复</el-button>
+          <el-button :type="canRestore ? 'warning' : 'info'" :disabled="!canRestore || taskBusy" :loading="restoring" @click="handleRestore">恢复</el-button>
         </div>
       </div>
       <el-input
         type="textarea"
         v-model="form.alterSql"
+        :disabled="taskBusy||!!currentTask?.sourceFileId"
         :rows="8"
         resize="vertical"
         class="sql-input"
@@ -435,13 +521,20 @@ onMounted(loadSQLExecutionSettings)
       />
     </section>
 
+    <div v-if="currentTask?.sourceFileId" class="source-task-note">来源：{{currentTask.sourceFileName}} · 任务 #{{currentTask.id}} · {{currentTask.sourceSyncStatus==='SUCCESS'?'已回写源 SQL 成功状态':currentTask.sourceSyncStatus==='CANCELED'?'已撤回，原 SQL 保留失败':'等待字段变更、视图恢复与校验完成后回写源 SQL'}}<el-button link type="primary" @click="router.push({name:'PostgreSQLSQLExecution',query:{fileId:String(currentTask.sourceFileId)}})">返回原 SQL 文件</el-button><el-button v-if="currentTask.sourceSyncStatus==='WAITING'&&!taskBusy&&!taskUncertain" link type="warning" @click="cancelTransfer">撤回转入</el-button></div>
     <el-alert v-if="taskUncertain" title="字段变更结果待核实，禁止重放变更。可按备份恢复并校验视图；恢复视图不会确认字段变更结果。" type="warning" :closable="false" />
+    <el-alert v-if="pollError" :title="`进度刷新失败：${pollError}，正在重试`" type="warning" :closable="false" />
     <section v-if="hasAnalysisResult" class="process-card">
       <div class="table-header">
         <div>
-          <h3>执行过程</h3>
+          <h3>执行过程<span v-if="alterBatchCount" class="progress-count">{{ completedChanges }}/{{ changeCount }} 列 · {{ alterBatchCount }} 批</span></h3>
         </div>
         <el-button size="small" :disabled="!currentTask" @click="refreshCurrentTask">刷新</el-button>
+      </div>
+      <div v-if="currentStep" class="current-step">
+        <el-tag type="warning">{{ taskStatusText(currentTask?.status) }}</el-tag>
+        <span class="step-sql" :title="currentStep.sqlContent">{{ currentStep.sqlContent }}</span>
+        <span class="step-duration">{{ stepDuration(currentStep) }}</span>
       </div>
       <div class="stage-list">
         <div v-for="stage in executionStages" :key="stage.key" :class="['stage-item', `is-${stage.status}`]">
@@ -509,6 +602,9 @@ onMounted(loadSQLExecutionSettings)
             <el-tag size="small" :type="taskStatusType(row.status)">{{ taskStatusText(row.status) }}</el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="执行批次" width="100" align="center">
+          <template #default="{ row }">{{ executionSteps.find(step => step.id === row.executionStepId)?.stepOrder || '-' }}</template>
+        </el-table-column>
         <el-table-column prop="alterSql" label="SQL" min-width="420" show-overflow-tooltip />
         <el-table-column prop="errorMessage" label="错误" min-width="220" show-overflow-tooltip />
       </el-table>
@@ -539,7 +635,7 @@ onMounted(loadSQLExecutionSettings)
         <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openBackupDrawer(row)">查看备份</el-button>
-            <el-button link type="warning" size="small" :disabled="taskBusy" :loading="backupActionLoading" @click="handleRestoreBackupItem(row)">恢复</el-button>
+            <el-button link :type="canRestore ? 'warning' : 'info'" size="small" :disabled="!canRestore || taskBusy" :loading="backupActionLoading" @click="handleRestoreBackupItem(row)">恢复</el-button>
             <el-button link type="success" size="small" :disabled="taskBusy" :loading="backupActionLoading" @click="handleVerifyBackupItem(row)">校验</el-button>
           </template>
         </el-table-column>
@@ -619,7 +715,7 @@ onMounted(loadSQLExecutionSettings)
 
         <div class="backup-footer">
           <el-button :disabled="taskBusy" :loading="backupActionLoading" @click="handleVerifyBackupItem()">校验当前视图</el-button>
-          <el-button type="warning" :disabled="taskBusy" :loading="backupActionLoading" @click="handleRestoreBackupItem()">恢复当前视图</el-button>
+          <el-button :type="canRestore ? 'warning' : 'info'" :disabled="!canRestore || taskBusy" :loading="backupActionLoading" @click="handleRestoreBackupItem()">恢复当前视图</el-button>
         </div>
       </div>
     </el-drawer>
@@ -627,6 +723,8 @@ onMounted(loadSQLExecutionSettings)
 </template>
 
 <style scoped>
+.source-task-note{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;padding:12px;border:1px solid var(--el-border-color);border-radius:6px;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+
 .view-dependency-page {
   display: flex;
   flex-direction: column;
@@ -692,6 +790,31 @@ onMounted(loadSQLExecutionSettings)
 .process-card {
   padding: 16px 18px;
 }
+
+.progress-count {
+  margin-left: 12px;
+  color: #606266;
+  font-size: 13px;
+  font-weight: 400;
+}
+.current-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  background: #f5f7fa;
+}
+.step-sql {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, monospace;
+}
+.step-duration { flex-shrink: 0; color: #606266; }
 
 .stage-list {
   display: grid;

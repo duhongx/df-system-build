@@ -29,6 +29,14 @@ export interface PostgreSQLInstanceInfo {
 }
 
 export interface SQLChangeFile {
+ executionStartedAt?: string
+ resultStatus?: string
+ totalStatements?: number
+ successStatements?: number
+ failedStatements?: number
+ pendingStatements?: number
+ skippedStatements?: number
+ unknownStatements?: number
   schemaConfigured?: boolean
   importMessage?: string
   createdUser?: string
@@ -50,9 +58,14 @@ export interface SQLChangeFile {
   createdAt: string
 }
 
-export interface SQLExecutionFileFilter { id: number; fileName: string; reason: string }
+export interface SQLExecutionFileFilter { id: number; fileName: string; reason: string; code?: string }
 
 export interface SQLChangeBatch {
+  outcome?: 'COMPLETED' | 'ERROR' | 'CANCELED' | 'INTERRUPTED'
+  finishedAt?: string
+  stoppedFileId?: number
+  stoppedFileName?: string
+  deferredFiles?: number
   stopRequested?: boolean
   stopUser?: string
   stopTime?: string
@@ -72,7 +85,14 @@ export interface SQLChangeBatch {
 }
 
 export interface SQLChangeStatement {
+ viewDependencyTaskId?: number
+  databaseUser?: string
+  transactionGroupId?: number
+  transactionStartLine?: number
+  transactionEndLine?: number
+  transactionOutcome?: string
   resultOrigin?: string
+  manualFailure?: boolean
   skipKind?: string
   id: number
   fileId: number
@@ -118,6 +138,11 @@ export interface ParseSQLBatchFile {
 }
 
 export interface SQLViewDependencyTask {
+ sourceFileId?: number
+ sourceFileName?: string
+ sourceSyncStatus?: string
+ databaseTarget?: string
+ databaseUser?: string
   outcomeUncertain?: boolean
   id: number
   schemaName: string
@@ -135,6 +160,7 @@ export interface SQLViewDependencyTask {
   analyzedAt?: string
   executedAt?: string
   createdAt: string
+  updatedAt: string
 }
 
 export interface SQLViewDependencyItem {
@@ -170,6 +196,7 @@ export interface SQLViewDependencyItem {
 }
 
 export interface SQLViewDependencyChange {
+  executionStepId?: number
   id: number
   taskId: number
   changeOrder: number
@@ -199,6 +226,7 @@ export interface SQLViewDependencyStep {
 }
 
 export interface SQLViewDependencyTaskResult {
+  alterBatchCount?: number
   task: SQLViewDependencyTask
   items: SQLViewDependencyItem[]
   changes: SQLViewDependencyChange[]
@@ -224,26 +252,29 @@ export const listSQLViewDependencyTasks = (page = 1, pageSize = 20) =>
 export const createSQLViewDependencyTask = (data: SQLViewDependencyTaskRequest) =>
   request.post<any, SQLViewDependencyTask>('/postgresql/view-dependency-tasks', data)
 
-export const getSQLViewDependencyTask = (id: number) =>
-  request.get<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}`)
+export const getSQLViewDependencyTask = (id: number, silentError = false) =>
+  request.get<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}`, { silentError })
+
+// 多步 DDL 同步等待服务端完成；执行时限由服务端 lock_timeout / statement_timeout 控制。
+const viewDependencyOperationOptions = { timeout: 0 }
 
 export const analyzeSQLViewDependencyTask = (id: number) =>
-  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}/analyze`)
+  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}/analyze`, undefined, viewDependencyOperationOptions)
 
 export const precheckSQLViewDependencyTask = (id: number) =>
-  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}/precheck`)
+  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}/precheck`, undefined, viewDependencyOperationOptions)
 
 export const executeSQLViewDependencyTask = (id: number) =>
-  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}/execute`)
+  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}/execute`, undefined, viewDependencyOperationOptions)
 
 export const restoreSQLViewDependencyTask = (id: number) =>
-  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}/restore`)
+  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}/restore`, undefined, viewDependencyOperationOptions)
 
 export const restoreSQLViewDependencyItem = (taskId: number, itemId: number) =>
-  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${taskId}/items/${itemId}/restore`)
+  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${taskId}/items/${itemId}/restore`, undefined, viewDependencyOperationOptions)
 
 export const verifySQLViewDependencyItem = (taskId: number, itemId: number) =>
-  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${taskId}/items/${itemId}/verify`)
+  request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${taskId}/items/${itemId}/verify`, undefined, viewDependencyOperationOptions)
 
 export const parseSQLFile = (data: ParseSQLRequest) =>
   request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/parse', data)
@@ -269,10 +300,10 @@ export const getSQLBatch = (id: number, current = false) =>
 export const listSQLFiles = (page = 1, pageSize = 20) =>
   request.get<any, PageResult<SQLChangeFile>>('/postgresql/sql-files', { params: { page, pageSize } })
 
-export const listTodoSQLFiles = (page = 1, pageSize = 20, filters: { version?: string; schemaName?: string; fileName?: string } = {}) =>
+export const listTodoSQLFiles = (page = 1, pageSize = 20, filters: { version?: string; schemaName?: string; fileName?: string; status?: string } = {}) =>
   request.get<any, PageResult<SQLChangeFile>>('/postgresql/sql-files/todo', { params: { page, pageSize, ...filters } })
 
-export const listDoneSQLFiles = (page = 1, pageSize = 20, filters: { version?: string; schemaName?: string; fileName?: string } = {}) =>
+export const listDoneSQLFiles = (page = 1, pageSize = 20, filters: { version?: string; schemaName?: string; fileName?: string; status?: string } = {}) =>
   request.get<any, PageResult<SQLChangeFile>>('/postgresql/sql-files/done', { params: { page, pageSize, ...filters } })
 
 export const getSQLFile = (id: number) =>
@@ -281,8 +312,63 @@ export const getSQLFile = (id: number) =>
 export const skipSQLStatement = (id: number) =>
   request.post<any, SQLChangeStatement>(`/postgresql/sql-statements/${id}/skip`)
 
+export const markSQLStatementFailed = (id: number) =>
+  request.post<any, SQLChangeStatement>(`/postgresql/sql-statements/${id}/fail`)
+
+export interface SQLFileFailureResult {
+  file: SQLChangeFile
+  statements: SQLChangeStatement[]
+  markedCount: number
+  deferredCount: number
+  preservedCount: number
+  linkedCount: number
+}
+export const markSQLFileFailed = (id: number) =>
+  request.post<any, SQLFileFailureResult>(`/postgresql/sql-files/${id}/fail`)
+
+export interface SQLRetryExecutionAccount {
+  username: string
+  passwordSource: 'configured' | 'manual'
+  password?: string
+}
+export interface SQLRetryAccountChoice { username: string; passwordSource: 'admin' | 'common' | 'override' }
+export interface SQLRetryTarget {
+  statementId: number
+  fileId: number
+  fileName: string
+  lineNumber: number
+  schemaName: string
+  originalAccount?: string
+  transactionLabel?: string
+}
+export const listSQLRetryAccounts = () => request.get<any, SQLRetryAccountChoice[]>('/postgresql/sql-retry-accounts')
+export const executeFailedSQLStatement = (id: number, options: SQLExecuteOptions, account?: SQLRetryExecutionAccount) =>
+  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-statements/${id}/execute`, { options, account }, { timeout: 30000 })
+
 export const editSQLStatement = (id: number, content: string, originalContent: string) =>
   request.put<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-statements/${id}/content`, { content, originalContent })
+
+export interface SQLFileEdit {
+  id: number
+  fileId: number
+  fileName: string
+  schemaName: string
+  beforeStatus: string
+  preservedStatements: number
+  newStatements: number
+  removedStatements: number
+  editor: string
+  createdAt: string
+  beforeContent?: string
+  afterContent?: string
+}
+export interface SQLFileEditResult { file: SQLChangeFile; statements: SQLChangeStatement[]; edit: SQLFileEdit }
+export const editSQLFile = (id: number, content: string, originalContent: string) =>
+  request.put<any, SQLFileEditResult>(`/postgresql/sql-files/${id}/content`, {content, originalContent}, {timeout: 60000, silentError: true})
+export const listSQLFileEdits = (id: number, page = 1, pageSize = 20) =>
+  request.get<any, PageResult<SQLFileEdit>>(`/postgresql/sql-files/${id}/edits`, {params: {page, pageSize}})
+export const getSQLFileEdit = (id: number, editId: number) =>
+  request.get<any, {edit: SQLFileEdit; beforeStatements: SQLChangeStatement[]}>(`/postgresql/sql-files/${id}/edits/${editId}`)
 
 export const skipSQLFile = (id: number) =>
   request.post<any, SQLChangeFile>(`/postgresql/sql-files/${id}/skip`)
@@ -330,6 +416,7 @@ export const executeSelectedSQLFiles = (fileIds: number[], options: SQLExecuteOp
  request.post<any, {batch: SQLChangeBatch; files: SQLChangeFile[]}>('/postgresql/sql-files/execute', {fileIds, options})
 
 export interface SQLStatementRecord {
+  transactionGroupId?: number; transactionOutcome?: string;
   id: number; batchId: number; fileId: number; statementId: number; sourceStatementId?: number; fileName: string; schemaName: string;
   databaseHost: string; databasePort: string; databaseName: string; databaseUser: string;
   sqlHash: string; sqlContent: string; lineNumber: number; action: string; skipKind?: string; status: string;
@@ -350,3 +437,41 @@ export const getSQLBatchFile = (batchId: number, fileId: number) =>
  request.get<any, {file: SQLChangeFile; statements: SQLChangeStatement[]}>(`/postgresql/sql-batches/${batchId}/files/${fileId}`)
 export const listSQLExecutionBatches = (page = 1, pageSize = 30) =>
  request.get<any, PageResult<SQLChangeBatch>>('/postgresql/sql-batches', {params:{page,pageSize,executionOnly:true}})
+
+export interface SQLCurrentFailure extends SQLChangeStatement {
+ fileName: string; schemaName: string; version: string; taskStatus?: string; taskMessage?: string;
+}
+export const listCurrentFailedSQL = (page=1,pageSize=30,filters: {keyword?:string;fileName?:string;schemaName?:string;handling?:string;fileId?:number}={}) =>
+ request.get<any,PageResult<SQLCurrentFailure>>('/postgresql/sql-failures',{params:{page,pageSize,...filters}})
+export const transferFailedSQLToViewTask = (id:number) =>
+ request.post<any,SQLViewDependencyTask>(`/postgresql/sql-statements/${id}/view-dependency`)
+
+export interface SQLFileViewTransferTarget {
+  fileId: number
+  all?: boolean
+  statementIds?: number[]
+}
+export interface SQLViewTransferUnit {
+  id: number
+  startLine: number
+  endLine: number
+  transaction: boolean
+  changeCount: number
+  tables: string[]
+  targets: string[]
+  statements: SQLChangeStatement[]
+  contextKey: string
+}
+export interface SQLFileViewTransferPreview {
+  fileId: number
+  fileName: string
+  units: SQLViewTransferUnit[]
+  excluded: {id: number; startLine: number; endLine: number; reason: string}[]
+  previewHash: string
+}
+export const previewSQLFileViewTransfer = (target: SQLFileViewTransferTarget) =>
+  request.post<any, SQLFileViewTransferPreview>(`/postgresql/sql-files/${target.fileId}/view-dependency/preview`, {all: !!target.all, statementIds: target.statementIds})
+export const transferSQLFileToViewTask = (target: SQLFileViewTransferTarget, selectedIds: number[], previewHash: string) =>
+  request.post<any, SQLViewDependencyTask>(`/postgresql/sql-files/${target.fileId}/view-dependency`, {all: !!target.all, statementIds: target.statementIds, selectedIds, previewHash})
+
+export const cancelSQLViewTaskTransfer=(id:number)=>request.post<any,null>(`/postgresql/view-dependency-tasks/${id}/cancel-transfer`)

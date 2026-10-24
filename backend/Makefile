@@ -2,7 +2,7 @@
 
 # Build the binary
 build:
-	go build -o bin/df-build-server ./cmd/server
+	bash ../scripts/build_dfops.sh
 
 # Run in development mode (auto-creates required dirs)
 run: init

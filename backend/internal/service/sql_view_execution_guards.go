@@ -20,15 +20,36 @@ func viewTaskBusy(status string) bool {
 	return false
 }
 
+func ensureSQLViewDependencyTaskCanRestore(task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) error {
+	if task.Status == "SUCCESS" {
+		return fmt.Errorf("任务已执行成功，无需恢复视图")
+	}
+	if len(items) == 0 {
+		return fmt.Errorf("任务没有可恢复的依赖视图")
+	}
+	switch task.Status {
+	case "FAILED", "RESTORE_FAILED", "VERIFY_FAILED", "UNKNOWN":
+		return ensureSQLViewDependencyTaskHasPlan(task, items)
+	default:
+		return fmt.Errorf("仅任务执行失败、恢复失败、校验失败或结果待核实时可恢复视图")
+	}
+}
+
 // A claimed phase remains exclusive until its terminal state has been stored.
 func settleViewTaskPhase(id uint, phase, username string) {
 	status, message := "FAILED", "任务未完成，请查看错误后重新处理"
 	if phase == "EXECUTING" || phase == "RESTORING" || phase == "VERIFYING" {
 		status, message = "UNKNOWN", "操作未完成，数据库结果待核实；请核实目标对象并使用备份恢复，不能直接重放变更"
 	}
-	if err := repository.DB.Model(&model.SQLViewDependencyTask{}).Where("id = ? AND status = ?", id, phase).Updates(map[string]any{"status": status, "execute_message": message, "operator": username, "outcome_uncertain": status == "UNKNOWN"}).Error; err != nil {
+	result := repository.DB.Model(&model.SQLViewDependencyTask{}).Where("id = ? AND status = ?", id, phase).Updates(map[string]any{"status": status, "execute_message": message, "operator": username, "outcome_uncertain": status == "UNKNOWN"})
+	if err := result.Error; err != nil {
 		// Startup recovery will retain the uncertainty if the platform DB is unavailable.
 		log.Printf("保存视图任务 %d 中断状态失败: %v", id, err)
+	}
+	if result.Error == nil && result.RowsAffected == 1 && status == "UNKNOWN" {
+		if err := repository.DB.Model(&model.SQLViewDependencyChange{}).Where("task_id = ? AND status IN ?", id, []string{"RUNNING", "APPLIED"}).Updates(map[string]any{"status": "UNKNOWN", "error_message": message}).Error; err != nil {
+			log.Printf("保存视图任务 %d 字段中断状态失败: %v", id, err)
+		}
 	}
 }
 

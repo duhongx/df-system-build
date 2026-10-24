@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -40,12 +42,21 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/sql-files/todo", h.ListTodoSQLFiles)
 		g.GET("/sql-files/done", h.ListDoneSQLFiles)
 		g.GET("/sql-files/:id", h.GetSQLFile)
+		g.PUT("/sql-files/:id/content", h.EditReleaseSQLFile)
+		g.GET("/sql-files/:id/edits", h.ListSQLFileEdits)
+		g.GET("/sql-files/:id/edits/:editId", h.GetSQLFileEdit)
 		g.GET("/sql-files/:id/not-executable.sql", h.ExportNotExecutableSQL)
 		g.GET("/sql-batches", h.ListSQLBatches)
 		g.GET("/sql-batches/:id", h.GetSQLBatch)
 		g.GET("/sql-batches/:id/files/:fileId", h.GetSQLBatchFile)
 		g.POST("/sql-batches/:id/cancel", h.CancelSQLFileSequence)
+		g.POST("/view-dependency-tasks/:id/cancel-transfer", h.CancelSQLViewTaskTransfer)
+		g.GET("/sql-failures", h.ListCurrentFailedSQL)
+		g.POST("/sql-statements/:id/view-dependency", h.TransferFailedSQLToViewTask)
+		g.POST("/sql-files/:id/view-dependency/preview", h.PreviewSQLFileViewTransfer)
+		g.POST("/sql-files/:id/view-dependency", h.TransferSQLFileToViewTask)
 		g.GET("/sql-records", h.ListSQLStatementRecords)
+		g.GET("/sql-retry-accounts", h.ListSQLRetryAccounts)
 		g.PUT("/sql-files/:id/execution-config", h.SetSQLFileExecutionConfig)
 		g.POST("/sql-batches/parse", h.ParseSQLBatch)
 		g.POST("/sql-files/parse", h.ParseSQL)
@@ -55,8 +66,11 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.POST("/sql-files/save", h.ParseSQL)
 		g.POST("/sql-files/import-server", h.ImportServerSQL)
 		g.POST("/sql-files/:id/skip", h.SkipSQLFile)
+		g.POST("/sql-files/:id/fail", h.MarkSQLFileFailed)
 		g.DELETE("/sql-files/:id", h.DeleteSQLFile)
 		g.POST("/sql-statements/:id/skip", h.SkipSQLStatement)
+		g.POST("/sql-statements/:id/fail", h.MarkSQLStatementFailed)
+		g.POST("/sql-statements/:id/execute", h.ExecuteFailedSQLStatement)
 		g.PUT("/sql-statements/:id/content", h.EditReleaseSQLStatement)
 	}
 }
@@ -109,7 +123,7 @@ func (h *PostgreSQLHandler) respondSQLViewDependencyTask(c *gin.Context, task *m
 		response.Fail(c, 14018, err.Error())
 		return
 	}
-	response.OK(c, gin.H{"task": task, "items": items, "changes": changes, "steps": steps})
+	response.OK(c, gin.H{"task": task, "items": items, "changes": changes, "steps": steps, "alterBatchCount": len(service.BuildSQLViewDependencyStepExecutionPlan(*task, items).AlterSteps)})
 }
 
 func (h *PostgreSQLHandler) GetSQLViewDependencyTask(c *gin.Context) {
@@ -160,7 +174,7 @@ func (h *PostgreSQLHandler) ExecuteSQLViewDependencyTask(c *gin.Context) {
 		response.Fail(c, 14000, "无效的 ID 参数")
 		return
 	}
-	task, items, err := h.svc.ExecuteSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
+	task, items, err := h.svc.StartSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
 	if err != nil {
 		response.Fail(c, 14018, err.Error())
 		return
@@ -376,7 +390,7 @@ func (h *PostgreSQLHandler) listSQLFilesByGroup(c *gin.Context, group string) {
 	if pageSize > 100 {
 		pageSize = 100
 	}
-	files, total, err := h.svc.ListSQLFilesByStatus(page, pageSize, group, service.SQLFileFilter{Version: c.Query("version"), SchemaName: c.Query("schemaName"), FileName: c.Query("fileName")})
+	files, total, err := h.svc.ListSQLFilesByStatus(page, pageSize, group, service.SQLFileFilter{Version: c.Query("version"), SchemaName: c.Query("schemaName"), FileName: c.Query("fileName"), Status: c.Query("status")})
 	if err != nil {
 		response.Fail(c, 14004, err.Error())
 		return
@@ -489,6 +503,42 @@ func (h *PostgreSQLHandler) SkipSQLStatement(c *gin.Context) {
 	response.OK(c, stmt)
 }
 
+func (h *PostgreSQLHandler) MarkSQLStatementFailed(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	stmt, err := h.svc.MarkSQLStatementFailed(uint(id), middleware.GetCurrentUsername(c))
+	if err != nil {
+		response.Fail(c, 14006, err.Error())
+		return
+	}
+	response.OK(c, stmt)
+}
+
+func (h *PostgreSQLHandler) ExecuteFailedSQLStatement(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		response.Fail(c, 14000, "无效的 ID 参数")
+		return
+	}
+	var req struct {
+		Options service.SQLExecuteOptions         `json:"options"`
+		Account *service.SQLRetryExecutionAccount `json:"account"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		response.Fail(c, 14003, "参数错误")
+		return
+	}
+	file, statements, err := h.svc.StartReleaseSQLStatementExecutionWithAccount(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options, req.Account)
+	if err != nil {
+		response.Fail(c, 14003, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"file": file, "statements": statements})
+}
+
 func (h *PostgreSQLHandler) ExecuteSelectedSQLFiles(c *gin.Context) {
 	var req struct {
 		FileIDs []uint                    `json:"fileIds" binding:"required"`
@@ -504,4 +554,14 @@ func (h *PostgreSQLHandler) ExecuteSelectedSQLFiles(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"batch": batch, "files": files})
+}
+
+// Account names and password sources only; credentials never leave the server.
+func (h *PostgreSQLHandler) ListSQLRetryAccounts(c *gin.Context) {
+	accounts, err := h.svc.ListSQLRetryAccounts()
+	if err != nil {
+		response.Fail(c, 14003, err.Error())
+		return
+	}
+	response.OK(c, accounts)
 }

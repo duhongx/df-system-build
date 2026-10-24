@@ -1261,7 +1261,7 @@ func cancelDownloadJob(jobID, message string) {
 func listArtifactSourceBatches(batchRoot string) ([]artifactSourceBatch, error) {
 	var batches []artifactSourceBatch
 
-	for _, source := range []string{"upload", "artifact"} {
+	for _, source := range []string{"upload", "download", "artifact"} {
 		sourceRoot := filepath.Join(batchRoot, source)
 		items, err := scanSourceBatchRoot(sourceRoot, source)
 		if err != nil {
@@ -1287,6 +1287,7 @@ func scanSourceBatchRoot(sourceRoot, sourceType string) ([]artifactSourceBatch, 
 
 	label := map[string]string{
 		"upload":   "本地上传",
+		"download": "服务器下载",
 		"artifact": "制品库选择",
 	}[sourceType]
 	if label == "" {

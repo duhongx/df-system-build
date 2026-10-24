@@ -110,7 +110,7 @@ func TestReleaseSQLStatementEditGuards(t *testing.T) {
 		t.Fatal("ignored another uncertain statement")
 	}
 	repository.DB.Model(&rows[1]).Update("execute_status", "PENDING")
-	for _, text := range []string{"", "SELECT 'unterminated", "SELECT 3; SELECT 4;", "BEGIN;", "COMMIT;", "SELECT 3 -- swallow next delimiter"} {
+	for _, text := range []string{"", "SELECT 'unterminated", "BEGIN;", "COMMIT;", "SELECT 3 -- swallow next delimiter"} {
 		bad := req
 		bad.Content = text
 		if _, _, err := s.EditReleaseSQLStatement(rows[0].ID, bad, "op"); err == nil {

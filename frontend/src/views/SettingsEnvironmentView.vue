@@ -12,6 +12,7 @@ const k8sInputMode = ref<'path' | 'content'>('path')
 const k8sNamespaces = ref<string[]>([])
 const k8sLoadingNs = ref(false)
 const k8sReadingConfig = ref(false)
+const registryCAReading = ref(false)
 const settingsStore = useSettingsStore()
 const pgAccounts = ref<PostgreSQLBusinessAccount[]>([])
 const pgDiscovering = ref(false)
@@ -33,6 +34,8 @@ const form = ref<Record<string, string>>({
   docker_registry_url: '',
   docker_registry_user: '',
   docker_registry_password: '',
+  docker_registry_ca_cert: '',
+  docker_registry_ca_cert_path: '',
   docker_registry_repo: '',
   k8s_kubeconfig_path: '',
   k8s_kubeconfig_content: '',
@@ -194,8 +197,14 @@ async function loadSettings() {
     if (form.value.k8s_kubeconfig_content) {
       k8sInputMode.value = 'content'
     }
-    const overrides = await listPostgreSQLPasswordOverrides()
-    pgAccounts.value = overrides.map(row => ({ username: row.username, hasOverride: true, discovered: false }))
+    // This list is only needed by the optional per-account password dialog.
+    // Do not keep the entire environment page under its initial loading mask
+    // while this secondary request is pending or failing.
+    void listPostgreSQLPasswordOverrides()
+      .then(overrides => {
+        pgAccounts.value = overrides.map(row => ({ username: row.username, hasOverride: true, discovered: false }))
+      })
+      .catch(() => { /* The request interceptor displays the error. */ })
   } catch (e: any) {
     ElMessage.error('加载设置失败: ' + (e.message || '未知错误'))
   } finally {
@@ -227,6 +236,8 @@ function connectionConfig(type: string): Record<string, string> {
         docker_registry_url: form.value.docker_registry_url,
         docker_registry_user: form.value.docker_registry_user,
         docker_registry_password: form.value.docker_registry_password,
+        docker_registry_ca_cert: form.value.docker_registry_ca_cert,
+        docker_registry_ca_cert_path: form.value.docker_registry_ca_cert_path,
         docker_registry_repo: form.value.docker_registry_repo,
       }
       break
@@ -326,6 +337,28 @@ async function handleReadKubeconfig() {
   }
 }
 
+async function handleReadRegistryCACertificate() {
+  const path = form.value.docker_registry_ca_cert_path.trim()
+  if (!path) {
+    ElMessage.warning('请输入平台服务器上的 CA 证书路径')
+    return
+  }
+  registryCAReading.value = true
+  try {
+    const res: any = await request.post('/settings/read-registry-ca', { path })
+    if (res?.content) {
+      form.value.docker_registry_ca_cert = res.content
+      ElMessage.success('CA 证书读取成功')
+    } else {
+      ElMessage.warning('文件中没有 CA 证书')
+    }
+  } catch {
+    // The request interceptor displays the specific error.
+  } finally {
+    registryCAReading.value = false
+  }
+}
+
 async function handleLoadNamespaces() {
   k8sLoadingNs.value = true
   try {
@@ -378,7 +411,7 @@ onMounted(() => {
       </template>
       <el-form label-width="128px">
         <el-form-item label="仓库地址">
-          <el-input v-model="form.docker_registry_url" placeholder="如 192.168.199.102:8888" />
+          <el-input v-model="form.docker_registry_url" placeholder="host[:port] 或 https://registry.example.com" />
         </el-form-item>
         <el-form-item label="仓库名称">
           <el-input v-model="form.docker_registry_repo" placeholder="cloudhis" />
@@ -389,6 +422,23 @@ onMounted(() => {
         <el-form-item label="密码">
           <el-input v-model="form.docker_registry_password" type="password" show-password placeholder="仓库密码" />
         </el-form-item>
+        <el-form-item label="服务器证书路径">
+          <div class="field-actions">
+            <el-input v-model="form.docker_registry_ca_cert_path" placeholder="如 /etc/ssl/certs/registry-ca.crt" />
+            <el-button :loading="registryCAReading" @click="handleReadRegistryCACertificate">读取</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="自定义 CA 证书">
+          <el-input
+            v-model="form.docker_registry_ca_cert"
+            type="textarea"
+            :rows="5"
+            placeholder="可粘贴 PEM 格式的 CA 证书，或填写上方服务器路径后点击读取；系统已信任的证书无需填写"
+          />
+        </el-form-item>
+        <div class="form-hint registry-cert-hint">
+          用于后端连接测试和镜像标签查询。Docker 守护进程及 K8s 节点也需要信任私有 CA，才能构建、推送和拉取镜像。
+        </div>
       </el-form>
     </el-card>
 
@@ -571,7 +621,7 @@ onMounted(() => {
 
     </div>
 
-    <el-dialog v-model="pgPasswordDialog" title="业务用户密码配置" width="1000px" style="max-width: calc(100vw - 48px);" :close-on-click-modal="!pgAccountBusy" :close-on-press-escape="!pgAccountBusy" :show-close="!pgAccountBusy" @closed="closePostgreSQLPasswords">
+    <el-dialog v-model="pgPasswordDialog" title="业务用户密码配置" width="1000px" style="max-width: calc(100vw - 48px);" append-to-body :close-on-click-modal="!pgAccountBusy" :close-on-press-escape="!pgAccountBusy" :show-close="!pgAccountBusy" @closed="closePostgreSQLPasswords">
       <div class="section-header" style="margin-bottom: 14px;">
 
         <el-button size="small" :loading="pgDiscovering" :disabled="!!pgAccountBusy" @click="loadPostgreSQLAccounts">刷新账号</el-button>
@@ -607,7 +657,7 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="pgTestDialog" title="PostgreSQL 连接测试结果" width="900px" style="max-width: calc(100vw - 48px);">
+    <el-dialog v-model="pgTestDialog" title="PostgreSQL 连接测试结果" width="900px" style="max-width: calc(100vw - 48px);" append-to-body>
       <template v-if="pgTestReport">
         <el-alert :title="pgTestReport.message" :type="pgTestReport.success && pgTestReport.accounts.length ? 'success' : 'warning'" :closable="false" />
         <el-table :data="pgTestReport.results" size="small" max-height="420" style="margin-top: 14px;">

@@ -1,7 +1,0 @@
-[
-  {
-    "package": "./internal/pipeline/stages",
-    "exit_code": 0,
-    "log": "/opt/df-build-server/pilot-tests/frontend-code-recheck-20261015/tests-0.log"
-  }
-]

@@ -291,10 +291,9 @@ async function handleSaveProfile() {
         <el-sub-menu index="artifact-center">
           <template #title>
             <el-icon><Box /></el-icon>
-            <span>制品管理</span>
+            <span>更新管理</span>
           </template>
-          <el-menu-item index="/artifacts/versions">更新版本</el-menu-item>
-          <el-menu-item index="/artifacts/latest">制品库</el-menu-item>
+          <el-menu-item index="/artifacts/versions">更新记录</el-menu-item>
         </el-sub-menu>
 
         <el-sub-menu index="postgresql-center">
@@ -431,7 +430,8 @@ async function handleSaveProfile() {
 
       <!-- Content -->
       <main class="main-content" :class="{ 'main-content--fill': route.meta.fillViewport }">
-        <router-view :key="route.fullPath" />
+        <!-- taskId changes persist the current view task without remounting its active action. -->
+        <router-view :key="route.name === 'PostgreSQLViewDependencyChange' ? route.path : route.fullPath" />
       </main>
     </div>
 

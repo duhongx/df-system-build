@@ -108,32 +108,6 @@ export interface DashboardStats {
 export const getDashboardStats = () => request.get<any, DashboardStats>('/dashboard/stats')
 export const getRecentBuilds = () => request.get<any, Pipeline[]>('/dashboard/recent-builds')
 
-// ---------- Artifact ----------
-export interface Artifact {
-  id: number
-  pipelineId: number
-  pipelineNo: string
-  appName: string
-  artifactName: string
-  gitBranch: string
-  gitCommitHash?: string
-  uploadPath: string
-  uploadTargets: string
-  sourceType?: string
-  sourcePath?: string
-  storagePath?: string
-  sha256?: string
-  batchId?: string
-  isLatest?: boolean
-  fileSizeBytes?: number
-  durationSeconds: number
-  createdAt: string
-}
-
-export function listArtifacts(params?: { page?: number; pageSize?: number; search?: string; onlyLatest?: boolean }) {
-  return request.get<any, PageResult<Artifact>>('/artifacts', { params })
-}
-
 // ---------- Remote Tools ----------
 export function remoteSyncUrl() {
   return '/api/remote/sync'

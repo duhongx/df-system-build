@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { listApps, createApp as apiCreateApp, updateApp, deleteApp, type Application } from '../api/application'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { useSettingsStore } from '../stores/settings'
@@ -15,6 +15,8 @@ const editingApp = ref<Application | null>(null)
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+let loadSequence = 0
 
 const form = ref({
   appName: '',
@@ -65,22 +67,29 @@ onMounted(async () => {
   await Promise.all([loadApps(), settingsStore.fetchSettings()])
 })
 
+onUnmounted(() => {
+  if (searchTimer) clearTimeout(searchTimer)
+})
+
 async function loadApps() {
+  const sequence = ++loadSequence
   loading.value = true
   try {
     const result = await listApps({
       page: page.value,
       pageSize: pageSize.value,
-      search: searchText.value || undefined,
+      search: searchText.value.trim() || undefined,
       appType: filterType.value || undefined,
     })
+    if (sequence !== loadSequence) return
     apps.value = result.list || []
     total.value = result.total || 0
   } catch (e) {
+    if (sequence !== loadSequence) return
     apps.value = []
     total.value = 0
   } finally {
-    loading.value = false
+    if (sequence === loadSequence) loading.value = false
   }
 }
 
@@ -235,8 +244,15 @@ async function handleSave() {
 }
 
 function handleSearch() {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = undefined
   page.value = 1
   loadApps()
+}
+
+function scheduleSearch() {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(handleSearch, 300)
 }
 
 function handlePageChange(newPage: number) {
@@ -261,6 +277,7 @@ function handleSizeChange(newSize: number) {
           :placeholder="settingsStore.showTaskList ? '搜索应用名称 / 仓库地址' : '搜索应用名称'"
           clearable
           style="width: 280px;"
+          @input="scheduleSearch"
           @keyup.enter="handleSearch"
           @clear="handleSearch"
         >
@@ -281,19 +298,19 @@ function handleSizeChange(newSize: number) {
     <!-- Table -->
     <div class="table-wrapper">
       <el-table height="100%" :data="apps" v-loading="loading" stripe size="default">
-        <el-table-column prop="appName" label="应用名称" width="200">
+        <el-table-column prop="appName" label="应用名称" min-width="300">
           <template #default="{ row }">
             <span class="link-text" @click="handleEdit(row)">{{ row.appName }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="项目类型" width="80" align="center">
+        <el-table-column label="项目类型" min-width="120" align="center">
           <template #default="{ row }">
             <el-tag :type="appTypeTagType(row.appType)" size="small" effect="plain">
               {{ appTypeLabel(row.appType) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="应用角色" width="120" align="center">
+        <el-table-column label="应用角色" min-width="180" align="center">
           <template #default="{ row }">
             <el-tag v-if="vueRoleLabel(row)" :type="vueRoleTagType(row)" size="small">
               {{ vueRoleLabel(row) }}
@@ -302,7 +319,7 @@ function handleSizeChange(newSize: number) {
           </template>
         </el-table-column>
         <el-table-column v-if="settingsStore.showTaskList" prop="gitRepo" label="Git 仓库地址" min-width="400" show-overflow-tooltip />
-        <el-table-column label="操作" width="140" fixed="right" align="center">
+        <el-table-column label="操作" min-width="180" align="center">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="handleEdit(row)">编辑</el-button>
             <el-button type="danger" link size="small" @click="handleDelete(row)">删除</el-button>

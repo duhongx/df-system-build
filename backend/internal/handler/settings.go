@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"df-build-server/internal/docker"
 	"df-build-server/internal/k8s"
 	"df-build-server/internal/middleware"
+	"df-build-server/internal/registryutil"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/service"
 	"df-build-server/pkg/response"
@@ -39,6 +41,7 @@ func (h *SettingsHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.PUT("", h.Update)
 		g.POST("/test-registry", h.TestRegistry)
 		g.POST("/test-connection", h.TestConnection)
+		g.POST("/read-registry-ca", h.ReadRegistryCACertificate)
 		g.GET("/k8s-namespaces", h.GetK8sNamespaces)
 		g.POST("/k8s-namespaces", h.GetK8sNamespacesWithConfig)
 		g.GET("/read-kubeconfig", h.ReadKubeconfig)
@@ -92,38 +95,14 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 
 // TestRegistry tests Docker registry connectivity and credentials
 func (h *SettingsHandler) TestRegistry(c *gin.Context) {
-	registryURL, _ := h.repo.GetByKey("docker_registry_url")
-	registryUser, _ := h.repo.GetByKey("docker_registry_user")
-	registryPass, _ := h.repo.GetByKey("docker_registry_password")
-
-	if registryURL == "" {
-		response.Fail(c, 10903, "镜像仓库地址未配置")
+	config := map[string]string{}
+	for _, key := range []string{"docker_registry_url", "docker_registry_user", "docker_registry_password", "docker_registry_ca_cert"} {
+		config[key], _ = h.repo.GetByKey(key)
+	}
+	if success, message := h.testRegistry(c.Request.Context(), config); !success {
+		response.Fail(c, 10903, message)
 		return
 	}
-
-	// Test 1: Check if registry is reachable (HTTP v2 API)
-	checkURL := fmt.Sprintf("http://%s/v2/", registryURL)
-	httpClient := &http.Client{Timeout: 5 * time.Second}
-	resp, err := httpClient.Get(checkURL)
-	if err != nil {
-		response.Fail(c, 10903, fmt.Sprintf("仓库地址不可访问: %v", err))
-		return
-	}
-	resp.Body.Close()
-
-	// Test 2: If credentials provided, try docker login via SDK
-	if registryUser != "" && registryPass != "" {
-		dockerCli, err := docker.NewClient(c.Request.Context(), "")
-		if err != nil {
-			response.Fail(c, 10903, fmt.Sprintf("Docker 不可用: %v", err))
-			return
-		}
-		if err := dockerCli.Login(c.Request.Context(), registryURL, registryUser, registryPass); err != nil {
-			response.Fail(c, 10903, fmt.Sprintf("凭据验证失败: %v", err))
-			return
-		}
-	}
-
 	response.OKWithMessage(c, "连接测试成功", nil)
 }
 
@@ -179,6 +158,23 @@ func (h *SettingsHandler) ReadKubeconfig(c *gin.Context) {
 	})
 }
 
+// ReadRegistryCACertificate reads a PEM CA bundle from the backend server.
+func (h *SettingsHandler) ReadRegistryCACertificate(c *gin.Context) {
+	var req struct {
+		Path string `json:"path" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 10906, "请填写服务器证书绝对路径")
+		return
+	}
+	content, err := registryutil.ReadCAPEM(req.Path)
+	if err != nil {
+		response.Fail(c, 10906, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"content": string(content)})
+}
+
 // TestConnection tests connectivity for various services
 func (h *SettingsHandler) TestConnection(c *gin.Context) {
 	var req struct {
@@ -195,7 +191,7 @@ func (h *SettingsHandler) TestConnection(c *gin.Context) {
 
 	switch req.Type {
 	case "registry":
-		success, message = h.testRegistry(req.Config)
+		success, message = h.testRegistry(c.Request.Context(), req.Config)
 	case "k8s":
 		success, message = h.testK8s(req.Config)
 	case "nacos":
@@ -242,21 +238,16 @@ func (h *SettingsHandler) testPackageDownload(config map[string]string) (bool, s
 	return true, "软件包下载服务器连接成功"
 }
 
-func (h *SettingsHandler) testRegistry(config map[string]string) (bool, string) {
-	registryURL := config["docker_registry_url"]
-	if registryURL == "" {
-		return false, "镜像仓库地址未填写"
+func (h *SettingsHandler) testRegistry(ctx context.Context, config map[string]string) (bool, string) {
+	host, baseURL, err := registryutil.Endpoint(config["docker_registry_url"])
+	if err != nil {
+		return false, err.Error()
 	}
-
-	// Strip http:// or https:// prefix if present
-	registryURL = strings.TrimPrefix(registryURL, "http://")
-	registryURL = strings.TrimPrefix(registryURL, "https://")
-	registryURL = strings.TrimRight(registryURL, "/")
-
-	checkURL := fmt.Sprintf("http://%s/v2/", registryURL)
-	httpClient := &http.Client{Timeout: 5 * time.Second}
-
-	req, _ := http.NewRequest("GET", checkURL, nil)
+	httpClient, err := registryutil.HTTPClient(config["docker_registry_ca_cert"], 5*time.Second)
+	if err != nil {
+		return false, err.Error()
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v2/", nil)
 	user := config["docker_registry_user"]
 	pass := config["docker_registry_password"]
 	if user != "" && pass != "" {
@@ -271,12 +262,10 @@ func (h *SettingsHandler) testRegistry(config map[string]string) (bool, string) 
 
 	switch resp.StatusCode {
 	case 200:
-		return true, "连接成功，认证通过"
 	case 401:
-		if user != "" {
-			return false, "认证失败：用户名或密码错误"
+		if user == "" || pass == "" {
+			return false, "仓库需要认证：请填写用户名和密码"
 		}
-		return false, "需要认证：请填写用户名和密码"
 	case 404:
 		return false, "该地址不是有效的 Docker Registry（/v2/ 路径不存在）"
 	case 403:
@@ -286,6 +275,18 @@ func (h *SettingsHandler) testRegistry(config map[string]string) (bool, string) 
 	default:
 		return false, fmt.Sprintf("意外的状态码 %d，请检查仓库地址", resp.StatusCode)
 	}
+
+	if user != "" && pass != "" {
+		dockerCli, err := docker.NewClient(ctx, "")
+		if err != nil {
+			return false, fmt.Sprintf("Docker 不可用: %v", err)
+		}
+		defer dockerCli.Close()
+		if err := dockerCli.Login(ctx, host, user, pass); err != nil {
+			return false, fmt.Sprintf("凭据验证失败: %v", err)
+		}
+	}
+	return true, "连接成功，认证通过"
 }
 
 func (h *SettingsHandler) testK8s(config map[string]string) (bool, string) {

@@ -4,12 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
+
+func isReleaseSQLAccountSetting(content string) bool {
+	node := releaseSQLNode(content)
+	if node == nil || node.GetVariableSetStmt() == nil {
+		return false
+	}
+	name := node.GetVariableSetStmt().Name
+	return strings.EqualFold(name, "role") || strings.EqualFold(name, "session_authorization")
+}
 
 func isReleaseSQLSessionSetting(content string) bool {
 	tree, err := pg_query.Parse(content)

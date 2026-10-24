@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -45,10 +44,20 @@ func RollbackDeployBatch(ctx context.Context, deployBatchNo string, rollbacker D
 	failures := make([]string, 0)
 	for _, group := range groups {
 		now := time.Now()
+		resolved := true
+		for _, record := range group.records {
+			if record.RollbackStatus != "success" && record.RollbackStatus != "skipped" {
+				resolved = false
+				break
+			}
+		}
+		if resolved {
+			continue
+		}
 		// Preparation never submitted an image; there is nothing to undo.
 		unsubmitted := group.image == ""
 		for _, record := range group.records {
-			if record.DeployStatus != "skipped" && record.DeployStatus != "pending" {
+			if record.DeployStatus != "skipped" && record.DeployStatus != "pending" && record.DeployStatus != "waiting" && record.DeployStatus != "not_started" {
 				unsubmitted = false
 			}
 		}
@@ -83,7 +92,7 @@ func RollbackDeployBatch(ctx context.Context, deployBatchNo string, rollbacker D
 		targetCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		var rollbackErr error
 		if guarded, ok := rollbacker.(guardedDeploymentRollbacker); ok {
-			rollbackErr = guarded.RollbackDeploymentIfCurrent(targetCtx, group.namespace, group.deploymentName, group.records[0].AfterImage, group.records[0].PipelineID, compatibleRollbackImage(group))
+			rollbackErr = guarded.RollbackDeploymentIfCurrent(targetCtx, group.namespace, group.deploymentName, group.records[0].AfterImage, group.records[0].PipelineID, group.image)
 		} else {
 			rollbackErr = rollbacker.RollbackDeployment(targetCtx, group.namespace, group.deploymentName, group.image)
 		}
@@ -104,8 +113,8 @@ func RollbackDeployBatch(ctx context.Context, deployBatchNo string, rollbacker D
 				"rolled_back_at":  &now,
 			}
 			version, warning := readOptionalVersion(ctx, reader, record)
-			if record.AppType == "vue" && compatibleRollbackImage(group) == group.image {
-				warning = mergeRecordError(warning, "恢复历史原镜像；该版本可能不包含已打开新页面所需资源，请核对旧客户端兼容性")
+			if record.AppType == "vue" {
+				warning = mergeRecordError(warning, "已恢复该 Deployment 更新前记录的镜像；请核对浏览器缓存中的前端资源兼容性")
 			}
 			updates["restored_business_version_json"] = version
 			updates["version_warning"] = mergeRecordError(record.VersionWarning, warning)
@@ -202,6 +211,9 @@ func validateRollbackSequence(group rollbackRecordGroup) error {
 		if record.AfterImage != expected {
 			return fmt.Errorf("同一目标的发布记录不一致，拒绝回滚")
 		}
+		if record.BeforeImage != group.image {
+			return fmt.Errorf("同一目标的更新前镜像记录不一致，拒绝回滚")
+		}
 	}
 	var count int64
 	if err := repository.DB.Model(&model.ArtifactDeployRecord{}).Where("namespace = ? AND deployment_name = ? AND id > ? AND (deploy_status IN ? OR status IN ?)", group.namespace, group.deploymentName, maxID, []string{"deploying", "success", "failed"}, []string{"deployed", "rolling_back", "rolled_back"}).Count(&count).Error; err != nil {
@@ -211,19 +223,4 @@ func validateRollbackSequence(group rollbackRecordGroup) error {
 		return fmt.Errorf("该目标已有后续发布，拒绝回滚历史批次；请创建基于最新基线的定向回退")
 	}
 	return nil
-}
-
-func compatibleRollbackImage(group rollbackRecordGroup) string {
-	var pipeline model.Pipeline
-	if group.records[0].PipelineID == 0 || repository.DB.First(&pipeline, group.records[0].PipelineID).Error != nil {
-		return group.image
-	}
-	var b struct {
-		PreparationImage string `json:"preparationImage"`
-		AssetsVerified   bool   `json:"assetsVerified"`
-	}
-	if json.Unmarshal([]byte(pipeline.FrontendBaselineJSON), &b) == nil && b.AssetsVerified && b.PreparationImage != "" {
-		return b.PreparationImage
-	}
-	return group.image
 }

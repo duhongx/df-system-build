@@ -63,7 +63,7 @@ async function initTerminal() {
   const { FitAddon } = await import('xterm-addon-fit')
 
   term = new Terminal({
-    cursorBlink: true,
+    cursorBlink: false,
     fontSize: 14,
     fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
     theme: {

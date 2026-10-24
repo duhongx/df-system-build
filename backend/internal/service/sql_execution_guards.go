@@ -3,11 +3,9 @@ package service
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"fmt"
 	"strings"
 
 	"df-build-server/internal/model"
-	pg_query "github.com/pganalyze/pg_query_go/v6"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -34,22 +32,6 @@ func lockSQLFile(tx *gorm.DB, id uint) (*model.SQLChangeFile, error) {
 }
 
 func validateReleaseSQLTransactions(statements []model.SQLChangeStatement) error {
-	for _, stmt := range statements {
-		parsed, err := pg_query.Parse(stmt.SQLContent)
-		// Keep ordinary syntax errors on the database execution path. The parser
-		// is used here to distinguish top-level transaction control from bodies.
-		if err != nil {
-			continue
-		}
-		for _, raw := range parsed.Stmts {
-			variable := raw.Stmt.GetVariableSetStmt()
-			if raw.Stmt.GetTransactionStmt() != nil || (variable != nil && variable.Name == "TRANSACTION") {
-				return fmt.Errorf("第 %d 行包含事务控制语句；普通 SQL 文件逐句提交，请移除 BEGIN/COMMIT/ROLLBACK/SAVEPOINT 等事务控制语句", stmt.LineNumber)
-			}
-			if variable != nil && (variable.IsLocal || variable.Kind == pg_query.VariableSetKind_VAR_SET_CURRENT) {
-				return fmt.Errorf("第 %d 行包含不能安全恢复的 SET LOCAL/FROM CURRENT，请改为明确的会话 SET 配置", stmt.LineNumber)
-			}
-		}
-	}
-	return nil
+	_, err := releaseSQLTransactionGroups(statements)
+	return err
 }

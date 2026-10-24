@@ -14,6 +14,7 @@ import (
 	"df-build-server/internal/frontend"
 	"df-build-server/internal/k8s"
 	"df-build-server/internal/pipeline/types"
+	"df-build-server/internal/registryutil"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/service"
 	"df-build-server/pkg/logger"
@@ -33,6 +34,11 @@ func (s *BuildImageStage) Run(ctx context.Context, pCtx *types.PipelineContext) 
 		errMsg := err.Error()
 		pCtx.OnLog(pCtx.PipelineID, 0, errMsg, "stderr")
 		return &types.StageResult{ExitCode: 1, Error: errMsg}, err
+	}
+	registryURL, _, err = registryutil.Endpoint(registryURL)
+	if err != nil {
+		pCtx.OnLog(pCtx.PipelineID, 0, err.Error(), "stderr")
+		return &types.StageResult{ExitCode: 1, Error: err.Error()}, err
 	}
 
 	// Determine build strategy based on app type and vue role
