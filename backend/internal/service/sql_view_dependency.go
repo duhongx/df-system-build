@@ -230,9 +230,16 @@ func BuildSQLViewDependencyTransactionalSteps(task model.SQLViewDependencyTask, 
 }
 
 type SQLViewDependencyStepExecutionPlan struct {
-	DropSteps    []string
-	AlterSteps   []string
-	RestoreSteps []string
+	DropSteps     []string
+	AlterSteps    []string
+	RestoreSteps  []string
+	RestoreGroups []SQLViewDependencyRestoreGroup
+}
+
+// SQLViewDependencyRestoreGroup 是单个依赖视图的恢复步骤，恢复时对象仍存在则整组跳过
+type SQLViewDependencyRestoreGroup struct {
+	QualifiedName string
+	Steps         []string
 }
 
 func (p SQLViewDependencyStepExecutionPlan) AllSteps() []string {
@@ -249,7 +256,10 @@ func BuildSQLViewDependencyStepExecutionPlan(task model.SQLViewDependencyTask, i
 		appendSQLStep(&plan.DropSteps, item.DropSQL)
 	}
 	appendSQLStep(&plan.AlterSteps, task.AlterSQL)
-	appendSQLViewDependencyRestoreSteps(&plan.RestoreSteps, items)
+	plan.RestoreGroups = buildSQLViewDependencyRestoreGroups(items)
+	for _, group := range plan.RestoreGroups {
+		plan.RestoreSteps = append(plan.RestoreSteps, group.Steps...)
+	}
 	return plan
 }
 
@@ -279,17 +289,28 @@ func buildSQLViewDependencyTransactionPrefix(task model.SQLViewDependencyTask) [
 }
 
 func appendSQLViewDependencyRestoreSteps(steps *[]string, items []model.SQLViewDependencyItem) {
-	for _, item := range orderedViewDependencyRestoreItems(items) {
-		appendSQLStep(steps, item.CreateSQL)
-		appendSQLStep(steps, item.RestoreRefreshSQL)
-		appendSQLStep(steps, item.RestoreRulesSQL)
-		appendSQLStep(steps, item.RestoreTriggersSQL)
-		appendSQLStep(steps, item.RestoreOwnerSQL)
-		appendSQLStep(steps, item.RestoreGrantsSQL)
-		appendSQLStep(steps, item.RestoreCommentsSQL)
-		appendSQLStep(steps, item.RestoreIndexesSQL)
-		appendSQLStep(steps, item.VerifySQL)
+	for _, group := range buildSQLViewDependencyRestoreGroups(items) {
+		*steps = append(*steps, group.Steps...)
 	}
+}
+
+func buildSQLViewDependencyRestoreGroups(items []model.SQLViewDependencyItem) []SQLViewDependencyRestoreGroup {
+	ordered := orderedViewDependencyRestoreItems(items)
+	groups := make([]SQLViewDependencyRestoreGroup, 0, len(ordered))
+	for _, item := range ordered {
+		group := SQLViewDependencyRestoreGroup{QualifiedName: quoteQualifiedName(item.ObjectSchema, item.ObjectName)}
+		appendSQLStep(&group.Steps, item.CreateSQL)
+		appendSQLStep(&group.Steps, item.RestoreRefreshSQL)
+		appendSQLStep(&group.Steps, item.RestoreRulesSQL)
+		appendSQLStep(&group.Steps, item.RestoreTriggersSQL)
+		appendSQLStep(&group.Steps, item.RestoreOwnerSQL)
+		appendSQLStep(&group.Steps, item.RestoreGrantsSQL)
+		appendSQLStep(&group.Steps, item.RestoreCommentsSQL)
+		appendSQLStep(&group.Steps, item.RestoreIndexesSQL)
+		appendSQLStep(&group.Steps, item.VerifySQL)
+		groups = append(groups, group)
+	}
+	return groups
 }
 
 func orderedViewDependencyDropItems(items []model.SQLViewDependencyItem) []model.SQLViewDependencyItem {
@@ -354,7 +375,15 @@ func (e SQLViewDependencyStepExecutionError) Unwrap() error {
 func runSQLViewDependencyStepExecution(executor sqlViewDependencyExecutor, plan SQLViewDependencyStepExecutionPlan) error {
 	for _, step := range plan.DropSteps {
 		if err := executor.Exec(step); err != nil {
-			return SQLViewDependencyStepExecutionError{Stage: "删除依赖视图", Err: err}
+			// 已提交的 DROP 不会随失败回滚，必须恢复已删除的视图
+			restoreErr := runSQLViewDependencySteps(executor, plan.RestoreSteps)
+			return SQLViewDependencyStepExecutionError{
+				Stage:            "删除依赖视图",
+				Err:              err,
+				RestoreAttempted: true,
+				RestoreSucceeded: restoreErr == nil,
+				RestoreErr:       restoreErr,
+			}
 		}
 	}
 	for _, step := range plan.AlterSteps {
