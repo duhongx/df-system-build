@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
@@ -55,6 +56,12 @@ func (h *PostgreSQLHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.DELETE("/sql-files/:id", h.DeleteSQLFile)
 		g.POST("/sql-statements/:id/skip", h.SkipSQLStatement)
 	}
+}
+
+// sqlExecutionContext 让 SQL 执行与浏览器连接解耦：前端请求超时、刷新页面或代理断开时，
+// 不能把正在目标库上执行的 SQL / 视图恢复中途取消。主动取消走 cancel 接口。
+func sqlExecutionContext(c *gin.Context) context.Context {
+	return context.WithoutCancel(c.Request.Context())
 }
 
 func (h *PostgreSQLHandler) Instance(c *gin.Context) {
@@ -167,7 +174,7 @@ func (h *PostgreSQLHandler) ExecuteSQLViewDependencyTask(c *gin.Context) {
 		response.Fail(c, 14000, "无效的 ID 参数")
 		return
 	}
-	task, items, err := h.svc.ExecuteSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
+	task, items, err := h.svc.ExecuteSQLViewDependencyTask(sqlExecutionContext(c), uint(id), middleware.GetCurrentUsername(c))
 	if err != nil {
 		response.Fail(c, 14018, err.Error())
 		return
@@ -181,7 +188,7 @@ func (h *PostgreSQLHandler) RestoreSQLViewDependencyTask(c *gin.Context) {
 		response.Fail(c, 14000, "无效的 ID 参数")
 		return
 	}
-	task, items, err := h.svc.RestoreSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
+	task, items, err := h.svc.RestoreSQLViewDependencyTask(sqlExecutionContext(c), uint(id), middleware.GetCurrentUsername(c))
 	if err != nil {
 		response.Fail(c, 14018, err.Error())
 		return
@@ -245,7 +252,7 @@ func (h *PostgreSQLHandler) ExecuteSQLFile(c *gin.Context) {
 		Options service.SQLExecuteOptions `json:"options"`
 	}
 	_ = c.ShouldBindJSON(&req)
-	file, statements, err := h.svc.ExecuteSQLFileWithOptions(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
+	file, statements, err := h.svc.ExecuteSQLFileWithOptions(sqlExecutionContext(c), uint(id), middleware.GetCurrentUsername(c), req.Options)
 	if err != nil {
 		response.Fail(c, 14003, err.Error())
 		return
@@ -291,7 +298,7 @@ func (h *PostgreSQLHandler) ExecuteSQLBatch(c *gin.Context) {
 		Options service.SQLExecuteOptions `json:"options"`
 	}
 	_ = c.ShouldBindJSON(&req)
-	batch, files, err := h.svc.ExecuteSQLBatch(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c), req.Options)
+	batch, files, err := h.svc.ExecuteSQLBatch(sqlExecutionContext(c), uint(id), middleware.GetCurrentUsername(c), req.Options)
 	if err != nil {
 		response.Fail(c, 14014, err.Error())
 		return
@@ -319,7 +326,7 @@ func (h *PostgreSQLHandler) ExecuteSQLContent(c *gin.Context) {
 		response.Fail(c, 14007, "参数错误")
 		return
 	}
-	file, statements, err := h.svc.ExecuteSQLContent(c.Request.Context(), req, middleware.GetCurrentUsername(c))
+	file, statements, err := h.svc.ExecuteSQLContent(sqlExecutionContext(c), req, middleware.GetCurrentUsername(c))
 	if err != nil {
 		response.Fail(c, 14007, err.Error())
 		return

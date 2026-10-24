@@ -455,6 +455,9 @@ func (s *PostgreSQLService) AnalyzeSQLViewDependencyTask(ctx context.Context, id
 	if err := repository.DB.Where("is_deleted = ?", false).First(&task, id).Error; err != nil {
 		return nil, nil, err
 	}
+	if isSQLViewDependencyTaskRunning(task.Status) {
+		return nil, nil, fmt.Errorf("任务正在执行中，请等待执行结束后再分析")
+	}
 	if _, err := validateViewDependencyAlterSQL(SQLViewDependencyTaskRequest{
 		SchemaName: task.SchemaName,
 		TableName:  task.TableName,
@@ -523,6 +526,9 @@ func (s *PostgreSQLService) PrecheckSQLViewDependencyTask(ctx context.Context, i
 	if err != nil {
 		return nil, nil, err
 	}
+	if isSQLViewDependencyTaskRunning(task.Status) {
+		return nil, nil, fmt.Errorf("任务正在执行中，请等待执行结束后再预检")
+	}
 	if len(items) == 0 {
 		return nil, nil, fmt.Errorf("请先分析依赖并生成备份计划")
 	}
@@ -565,7 +571,12 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 	}
 	db, err := s.getDB()
 	if err != nil {
-		return nil, nil, err
+		// 尚未对目标库做任何操作，回到预检前状态，避免任务卡在 EXECUTING
+		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", "连接目标库失败: "+err.Error(), username)
+		if saveErr != nil {
+			return nil, nil, saveErr
+		}
+		return updated, items, err
 	}
 	if err := s.validateCurrentViewDependencyBackup(ctx, db, *task, items); err != nil {
 		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", err.Error(), username)
@@ -581,7 +592,7 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 	if executionMode == SQLViewDependencyExecutionModeTransaction {
 		err = s.runSQLViewDependencyStepsOnDB(ctx, db, task.ID, BuildSQLViewDependencyTransactionalSteps(*task, items))
 	} else {
-		err = s.runSQLViewDependencyStepExecutionOnDB(ctx, db, task.ID, BuildSQLViewDependencyStepExecutionPlan(*task, items))
+		err = s.runSQLViewDependencyStepExecutionOnDB(ctx, db, *task, BuildSQLViewDependencyStepExecutionPlan(*task, items))
 	}
 	if err != nil {
 		status := "FAILED"
@@ -590,10 +601,10 @@ func (s *PostgreSQLService) ExecuteSQLViewDependencyTask(ctx context.Context, id
 		if errors.As(err, &stepErr) {
 			if stepErr.RestoreAttempted && stepErr.RestoreSucceeded {
 				status = "RESTORED"
-				msg = "字段变更失败，已按备份恢复视图: " + stepErr.Err.Error()
+				msg = stepErr.Stage + "失败，已按备份恢复视图: " + stepErr.Err.Error()
 			} else if stepErr.RestoreAttempted && !stepErr.RestoreSucceeded {
 				status = "RESTORE_FAILED"
-				msg = "字段变更失败，且自动恢复视图失败，请导出恢复 SQL 人工处理: " + err.Error()
+				msg = stepErr.Stage + "失败，且自动恢复视图失败，请导出恢复 SQL 人工处理: " + err.Error()
 			}
 		} else if executionMode == SQLViewDependencyExecutionModeTransaction {
 			msg = "事务执行失败，事务已回滚；如仍存在缺失视图，请使用恢复 SQL: " + err.Error()
@@ -626,9 +637,29 @@ func (s *PostgreSQLService) RestoreSQLViewDependencyTask(ctx context.Context, id
 	}
 	db, err := s.getDB()
 	if err != nil {
-		return nil, nil, err
+		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "RESTORE_FAILED", "连接目标库失败，请稍后重试恢复: "+err.Error(), username)
+		if saveErr != nil {
+			return nil, nil, saveErr
+		}
+		return updated, items, err
 	}
-	steps := BuildSQLViewDependencyRestoreTransactionalSteps(*task, items)
+	// 只恢复当前缺失的视图，已存在的对象跳过，保证部分恢复后可以再次点击恢复
+	missing, err := filterMissingViewDependencyItems(ctx, db, items)
+	if err != nil {
+		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "RESTORE_FAILED", "检查视图是否存在失败: "+err.Error(), username)
+		if saveErr != nil {
+			return nil, nil, saveErr
+		}
+		return updated, items, err
+	}
+	if len(missing) == 0 {
+		updated, err := markSQLViewDependencyTaskStatus(task.ID, "RESTORED", "依赖视图均已存在，无需恢复", username)
+		if err != nil {
+			return nil, nil, err
+		}
+		return updated, items, nil
+	}
+	steps := BuildSQLViewDependencyRestoreTransactionalSteps(*task, missing)
 	err = s.runSQLViewDependencyStepsOnDB(ctx, db, task.ID, steps)
 	if err != nil {
 		msg := "恢复视图失败，请导出恢复 SQL 人工处理: " + err.Error()
@@ -638,11 +669,35 @@ func (s *PostgreSQLService) RestoreSQLViewDependencyTask(ctx context.Context, id
 		}
 		return updated, items, err
 	}
-	updated, err := markSQLViewDependencyTaskStatus(task.ID, "RESTORED", fmt.Sprintf("已恢复视图 %d 个", len(items)), username)
+	updated, err := markSQLViewDependencyTaskStatus(task.ID, "RESTORED", fmt.Sprintf("已恢复视图 %d 个，跳过已存在视图 %d 个", len(missing), len(items)-len(missing)), username)
 	if err != nil {
 		return nil, nil, err
 	}
 	return updated, items, nil
+}
+
+type sqlQueryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func viewDependencyObjectExists(ctx context.Context, q sqlQueryRower, qualifiedName string) (bool, error) {
+	var exists bool
+	err := q.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, qualifiedName).Scan(&exists)
+	return exists, err
+}
+
+func filterMissingViewDependencyItems(ctx context.Context, db *sql.DB, items []model.SQLViewDependencyItem) ([]model.SQLViewDependencyItem, error) {
+	missing := make([]model.SQLViewDependencyItem, 0, len(items))
+	for _, item := range items {
+		exists, err := viewDependencyObjectExists(ctx, db, quoteQualifiedName(item.ObjectSchema, item.ObjectName))
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			missing = append(missing, item)
+		}
+	}
+	return missing, nil
 }
 
 type sqlConnViewDependencyExecutor struct {
@@ -694,9 +749,9 @@ func (s *PostgreSQLService) runSQLViewDependencyStepsOnDB(ctx context.Context, d
 	return nil
 }
 
-func (s *PostgreSQLService) runSQLViewDependencyStepExecutionOnDB(ctx context.Context, db *sql.DB, taskID uint, plan SQLViewDependencyStepExecutionPlan) error {
+func (s *PostgreSQLService) runSQLViewDependencyStepExecutionOnDB(ctx context.Context, db *sql.DB, task model.SQLViewDependencyTask, plan SQLViewDependencyStepExecutionPlan) error {
 	allSteps := plan.AllSteps()
-	stepModels, err := replaceSQLViewDependencySteps(taskID, allSteps)
+	stepModels, err := replaceSQLViewDependencySteps(task.ID, allSteps)
 	if err != nil {
 		return err
 	}
@@ -705,9 +760,26 @@ func (s *PostgreSQLService) runSQLViewDependencyStepExecutionOnDB(ctx context.Co
 		return err
 	}
 	defer conn.Close()
-	executor := sqlConnViewDependencyExecutor{ctx: ctx, conn: conn}
+
+	// 分步模式不在事务内，SET LOCAL 无效，需要设置会话级超时；连接会归还连接池，结束时复位
+	lockTimeout, statementTimeout := sqlViewDependencyTimeouts(task)
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET lock_timeout = '%s'", escapeSQLString(lockTimeout))); err != nil {
+		return fmt.Errorf("设置 lock_timeout 失败: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET statement_timeout = '%s'", escapeSQLString(statementTimeout))); err != nil {
+		_, _ = conn.ExecContext(context.Background(), "RESET lock_timeout")
+		return fmt.Errorf("设置 statement_timeout 失败: %w", err)
+	}
+	defer func() {
+		resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(resetCtx, "RESET lock_timeout")
+		_, _ = conn.ExecContext(resetCtx, "RESET statement_timeout")
+	}()
+
 	stepIndex := 0
-	runGroup := func(stage string, steps []string) error {
+	runSteps := func(execCtx context.Context, execConn *sql.Conn, stage string, steps []string) error {
+		executor := sqlConnViewDependencyExecutor{ctx: execCtx, conn: execConn}
 		for _, step := range steps {
 			if stepIndex < len(stepModels) {
 				_ = markSQLViewDependencyStepRunning(stepModels[stepIndex].ID)
@@ -726,21 +798,65 @@ func (s *PostgreSQLService) runSQLViewDependencyStepExecutionOnDB(ctx context.Co
 		}
 		return nil
 	}
-	if err := runGroup("删除依赖视图", plan.DropSteps); err != nil {
-		return err
-	}
-	if err := runGroup("字段变更", plan.AlterSteps); err != nil {
-		restoreErr := runGroup("恢复依赖视图", plan.RestoreSteps)
-		var stepErr SQLViewDependencyStepExecutionError
-		if errors.As(err, &stepErr) {
-			stepErr.RestoreAttempted = true
-			stepErr.RestoreSucceeded = restoreErr == nil
-			stepErr.RestoreErr = restoreErr
-			return stepErr
+	restoreStart := len(plan.DropSteps) + len(plan.AlterSteps)
+	runRestore := func() error {
+		// 恢复与调用方的取消解耦：即使执行被取消或超时，也必须尽力把已删除的视图建回来。
+		// 执行阶段被取消时驱动会关闭原连接，因此恢复使用新的连接。
+		restoreCtx := context.WithoutCancel(ctx)
+		restoreConn, err := db.Conn(restoreCtx)
+		if err != nil {
+			return SQLViewDependencyStepExecutionError{Stage: "恢复依赖视图", Err: err}
 		}
-		return err
+		defer restoreConn.Close()
+		// 恢复阶段不使用 lock_timeout，避免因短暂锁等待导致视图无法恢复
+		if _, err := restoreConn.ExecContext(restoreCtx, fmt.Sprintf("SET statement_timeout = '%s'", escapeSQLString(statementTimeout))); err != nil {
+			return SQLViewDependencyStepExecutionError{Stage: "恢复依赖视图", Err: err}
+		}
+		defer func() {
+			resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = restoreConn.ExecContext(resetCtx, "RESET statement_timeout")
+		}()
+		stepIndex = restoreStart
+		for _, group := range plan.RestoreGroups {
+			exists, err := viewDependencyObjectExists(restoreCtx, restoreConn, group.QualifiedName)
+			if err != nil {
+				return SQLViewDependencyStepExecutionError{Stage: "恢复依赖视图", Err: err}
+			}
+			if exists {
+				for range group.Steps {
+					if stepIndex < len(stepModels) {
+						_ = markSQLViewDependencyStepFinished(stepModels[stepIndex].ID, "SKIPPED", "视图未被删除，无需恢复")
+					}
+					stepIndex++
+				}
+				continue
+			}
+			if err := runSteps(restoreCtx, restoreConn, "恢复依赖视图", group.Steps); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	if err := runGroup("恢复依赖视图", plan.RestoreSteps); err != nil {
+	withRestore := func(err error) error {
+		var stepErr SQLViewDependencyStepExecutionError
+		if !errors.As(err, &stepErr) {
+			return err
+		}
+		restoreErr := runRestore()
+		stepErr.RestoreAttempted = true
+		stepErr.RestoreSucceeded = restoreErr == nil
+		stepErr.RestoreErr = restoreErr
+		return stepErr
+	}
+	if err := runSteps(ctx, conn, "删除依赖视图", plan.DropSteps); err != nil {
+		// 前面的 DROP 已逐条提交，必须恢复已删除的视图
+		return withRestore(err)
+	}
+	if err := runSteps(ctx, conn, "字段变更", plan.AlterSteps); err != nil {
+		return withRestore(err)
+	}
+	if err := runRestore(); err != nil {
 		var stepErr SQLViewDependencyStepExecutionError
 		if errors.As(err, &stepErr) {
 			stepErr.RestoreAttempted = true
@@ -751,6 +867,18 @@ func (s *PostgreSQLService) runSQLViewDependencyStepExecutionOnDB(ctx context.Co
 		return err
 	}
 	return nil
+}
+
+func sqlViewDependencyTimeouts(task model.SQLViewDependencyTask) (string, string) {
+	lockTimeout := strings.TrimSpace(task.LockTimeout)
+	if lockTimeout == "" {
+		lockTimeout = "3s"
+	}
+	statementTimeout := strings.TrimSpace(task.StatementTimeout)
+	if statementTimeout == "" {
+		statementTimeout = "10min"
+	}
+	return lockTimeout, statementTimeout
 }
 
 func (s *PostgreSQLService) validateCurrentViewDependencyBackup(ctx context.Context, db *sql.DB, task model.SQLViewDependencyTask, items []model.SQLViewDependencyItem) error {
@@ -771,7 +899,7 @@ func (s *PostgreSQLService) markSQLViewDependencyTaskRunning(id uint, status, me
 		if err := tx.Where("task_id = ?", id).Order("drop_order ASC, id ASC").Find(&items).Error; err != nil {
 			return err
 		}
-		if task.Status == "EXECUTING" || task.Status == "RESTORING" {
+		if isSQLViewDependencyTaskRunning(task.Status) {
 			return fmt.Errorf("任务正在执行中，请勿重复提交")
 		}
 		if validate != nil {
@@ -788,6 +916,10 @@ func (s *PostgreSQLService) markSQLViewDependencyTaskRunning(id uint, status, me
 		return nil, nil, err
 	}
 	return &task, items, nil
+}
+
+func isSQLViewDependencyTaskRunning(status string) bool {
+	return status == "EXECUTING" || status == "RESTORING"
 }
 
 func replaceSQLViewDependencySteps(taskID uint, steps []string) ([]model.SQLViewDependencyStep, error) {
@@ -1028,13 +1160,31 @@ ORDER BY max(t.depth) DESC, t.object_schema, t.object_name`, schemaName, tableNa
 	return snapshots, nil
 }
 
+// loadViewGrantSQL 从 pg_class.relacl / pg_attribute.attacl 读取完整授权。
+// information_schema.role_table_grants 只返回与当前连接角色相关的授权，会漏掉其他角色的权限。
 func loadViewGrantSQL(ctx context.Context, db *sql.DB, schemaName, viewName string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
-SELECT privilege_type, grantee, is_grantable
-FROM information_schema.role_table_grants
-WHERE table_schema = $1
-  AND table_name = $2
-ORDER BY grantee, privilege_type`, schemaName, viewName)
+SELECT acl.privilege_type,
+       CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS grantee,
+       acl.is_grantable,
+       '' AS column_name
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+CROSS JOIN LATERAL aclexplode(c.relacl) acl
+WHERE n.nspname = $1
+  AND c.relname = $2
+UNION ALL
+SELECT acl.privilege_type,
+       CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END AS grantee,
+       acl.is_grantable,
+       a.attname::text AS column_name
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL
+CROSS JOIN LATERAL aclexplode(a.attacl) acl
+WHERE n.nspname = $1
+  AND c.relname = $2
+ORDER BY 2, 4, 1`, schemaName, viewName)
 	if err != nil {
 		return nil, err
 	}
@@ -1042,12 +1192,17 @@ ORDER BY grantee, privilege_type`, schemaName, viewName)
 	qualifiedName := quoteQualifiedName(schemaName, viewName)
 	var grants []string
 	for rows.Next() {
-		var privilege, grantee, grantable string
-		if err := rows.Scan(&privilege, &grantee, &grantable); err != nil {
+		var privilege, grantee, columnName string
+		var grantable bool
+		if err := rows.Scan(&privilege, &grantee, &grantable, &columnName); err != nil {
 			return nil, err
 		}
-		sqlText := fmt.Sprintf("GRANT %s ON %s TO %s", strings.ToUpper(privilege), qualifiedName, quoteRoleIdent(grantee))
-		if strings.EqualFold(grantable, "YES") {
+		privilegeSQL := strings.ToUpper(privilege)
+		if columnName != "" {
+			privilegeSQL += " (" + quoteIdent(columnName) + ")"
+		}
+		sqlText := fmt.Sprintf("GRANT %s ON %s TO %s", privilegeSQL, qualifiedName, quoteRoleIdent(grantee))
+		if grantable {
 			sqlText += " WITH GRANT OPTION"
 		}
 		grants = append(grants, sqlText+";")
@@ -1264,27 +1419,7 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 
 	items := make([]model.SQLChangeStatement, 0, len(statements))
 	for _, sqlText := range statements {
-		analysis := AnalyzeSQLRisk(sqlText)
-		var viewDeps []ViewDependency
-		if analysis.SQLType == "ALTER_COLUMN_TYPE" {
-			analysis = s.enrichColumnTypeRiskWithMetadata(schemaName, sqlText, analysis)
-			if deps, err := s.findViewDependenciesWithDefinitions(context.Background(), schemaName, sqlText); err == nil && len(deps) > 0 {
-				viewDeps = deps
-				analysis = applyColumnTypeViewDependencyWarning(analysis, deps)
-			}
-		}
-		if analysis.SQLType == "DROP_TABLE" || analysis.SQLType == "TRUNCATE" {
-			analysis = s.enrichDestructiveTableRiskWithMetadata(schemaName, sqlText, analysis)
-		}
-		if isDMLRiskWithAffectedRows(analysis.SQLType) {
-			analysis = s.enrichDMLRiskWithExplainEstimate(sqlText, analysis)
-		}
-		if isLargeTableSensitiveSQLType(analysis.SQLType) {
-			analysis = s.enrichLargeTableSensitiveRiskWithMetadata(schemaName, sqlText, analysis)
-		}
-		if analysis.SQLType == "CREATE_VIEW" {
-			analysis = s.enrichReplaceViewRiskWithMetadata(schemaName, sqlText, analysis)
-		}
+		analysis, viewDeps := s.analyzeSQLRiskWithMetadata(schemaName, sqlText)
 		strategy := DetermineExecutionStrategy(analysis)
 		item := model.SQLChangeStatement{
 			FileID:              file.ID,
@@ -1309,6 +1444,32 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 		items = append(items, item)
 	}
 	return file, items, nil
+}
+
+// analyzeSQLRiskWithMetadata 在静态分析基础上结合目标库元数据（表大小、EXPLAIN、视图依赖等）评估风险
+func (s *PostgreSQLService) analyzeSQLRiskWithMetadata(schemaName, sqlText string) (RiskAnalysis, []ViewDependency) {
+	analysis := AnalyzeSQLRisk(sqlText)
+	var viewDeps []ViewDependency
+	if analysis.SQLType == "ALTER_COLUMN_TYPE" {
+		analysis = s.enrichColumnTypeRiskWithMetadata(schemaName, sqlText, analysis)
+		if deps, err := s.findViewDependenciesWithDefinitions(context.Background(), schemaName, sqlText); err == nil && len(deps) > 0 {
+			viewDeps = deps
+			analysis = applyColumnTypeViewDependencyWarning(analysis, deps)
+		}
+	}
+	if analysis.SQLType == "DROP_TABLE" || analysis.SQLType == "TRUNCATE" {
+		analysis = s.enrichDestructiveTableRiskWithMetadata(schemaName, sqlText, analysis)
+	}
+	if isDMLRiskWithAffectedRows(analysis.SQLType) {
+		analysis = s.enrichDMLRiskWithExplainEstimate(sqlText, analysis)
+	}
+	if isLargeTableSensitiveSQLType(analysis.SQLType) {
+		analysis = s.enrichLargeTableSensitiveRiskWithMetadata(schemaName, sqlText, analysis)
+	}
+	if analysis.SQLType == "CREATE_VIEW" {
+		analysis = s.enrichReplaceViewRiskWithMetadata(schemaName, sqlText, analysis)
+	}
+	return analysis, viewDeps
 }
 
 func (s *PostgreSQLService) ParseSQLBatch(req ParseSQLBatchRequest) (*model.SQLChangeBatch, []model.SQLChangeFile, error) {
@@ -1385,8 +1546,8 @@ func (s *PostgreSQLService) enrichColumnTypeRiskWithMetadata(defaultSchema, sqlT
 }
 
 func (s *PostgreSQLService) enrichDestructiveTableRiskWithMetadata(defaultSchema, sqlText string, analysis RiskAnalysis) RiskAnalysis {
-	ref := parseDestructiveTableRef(sqlText, defaultSchema)
-	if ref.schema == "" || ref.table == "" {
+	refs, cascade := parseDestructiveTableRefs(sqlText, defaultSchema)
+	if len(refs) == 0 {
 		return analysis
 	}
 	db, err := s.getDB()
@@ -1396,11 +1557,19 @@ func (s *PostgreSQLService) enrichDestructiveTableRiskWithMetadata(defaultSchema
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	stats, err := NewSQLMetadataInspector(db).GetTableStats(ctx, ref.schema, ref.table)
-	if err != nil {
-		return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
+	inspector := NewSQLMetadataInspector(db)
+	var result RiskAnalysis
+	for i, ref := range refs {
+		stats, err := inspector.GetTableStats(ctx, ref.schema, ref.table)
+		if err != nil {
+			return appendRiskReason(analysis, "未能读取表大小信息，按默认风险处理")
+		}
+		risk := classifyDestructiveTableOperation(analysis.SQLType, stats)
+		if i == 0 || riskRank(risk.RiskLevel) > riskRank(result.RiskLevel) {
+			result = risk
+		}
 	}
-	return classifyDestructiveTableOperation(analysis.SQLType, stats)
+	return applyCascadeRisk(result, cascade)
 }
 
 func (s *PostgreSQLService) enrichLargeTableSensitiveRiskWithMetadata(defaultSchema, sqlText string, analysis RiskAnalysis) RiskAnalysis {
@@ -1604,21 +1773,49 @@ type tableRef struct {
 	table  string
 }
 
-func parseDestructiveTableRef(sqlText, defaultSchema string) tableRef {
-	name := destructiveTableNameWithSchema(sqlText)
-	if name == "" {
-		return tableRef{}
+// parseDestructiveTableRefs 返回 DROP TABLE / TRUNCATE 的全部目标表，以及是否带 CASCADE
+func parseDestructiveTableRefs(sqlText, defaultSchema string) ([]tableRef, bool) {
+	tree, err := pg_query.Parse(sqlText)
+	if err != nil || tree == nil || len(tree.GetStmts()) != 1 {
+		return nil, false
 	}
-	parts := strings.Split(name, ".")
-	schema := strings.TrimSpace(defaultSchema)
-	table := strings.Trim(parts[len(parts)-1], `"`)
-	if len(parts) > 1 {
-		schema = strings.Trim(parts[len(parts)-2], `"`)
+	defaultSchema = strings.TrimSpace(defaultSchema)
+	if defaultSchema == "" {
+		defaultSchema = "public"
 	}
-	if schema == "" {
-		schema = "public"
+	node := tree.GetStmts()[0].GetStmt()
+	var refs []tableRef
+	switch {
+	case node.GetDropStmt() != nil && node.GetDropStmt().GetRemoveType() == pg_query.ObjectType_OBJECT_TABLE:
+		stmt := node.GetDropStmt()
+		for _, obj := range stmt.GetObjects() {
+			parts := stringListFromNode(obj)
+			if len(parts) == 0 {
+				continue
+			}
+			ref := tableRef{schema: defaultSchema, table: parts[len(parts)-1]}
+			if len(parts) > 1 {
+				ref.schema = parts[len(parts)-2]
+			}
+			refs = append(refs, ref)
+		}
+		return refs, stmt.GetBehavior() == pg_query.DropBehavior_DROP_CASCADE
+	case node.GetTruncateStmt() != nil:
+		stmt := node.GetTruncateStmt()
+		for _, relNode := range stmt.GetRelations() {
+			rel := relNode.GetRangeVar()
+			if rel == nil {
+				continue
+			}
+			ref := tableRef{schema: defaultSchema, table: rel.GetRelname()}
+			if strings.TrimSpace(rel.GetSchemaname()) != "" {
+				ref.schema = rel.GetSchemaname()
+			}
+			refs = append(refs, ref)
+		}
+		return refs, stmt.GetBehavior() == pg_query.DropBehavior_DROP_CASCADE
 	}
-	return tableRef{schema: schema, table: table}
+	return nil, false
 }
 
 func parseCreateOrReplaceViewRef(sqlText, defaultSchema string) tableRef {
@@ -1724,29 +1921,6 @@ func parseCreateOrReplaceViewRefFromAST(sqlText, defaultSchema string) tableRef 
 		schema = "public"
 	}
 	return tableRef{schema: schema, table: view.GetRelname()}
-}
-
-func destructiveTableNameWithSchema(sqlText string) string {
-	normalized := normalizeSQL(sqlText)
-	upper := strings.ToUpper(normalized)
-	rest := ""
-	switch {
-	case strings.HasPrefix(upper, "DROP TABLE IF EXISTS "):
-		rest = strings.TrimSpace(normalized[len("DROP TABLE IF EXISTS "):])
-	case strings.HasPrefix(upper, "DROP TABLE "):
-		rest = strings.TrimSpace(normalized[len("DROP TABLE "):])
-	case strings.HasPrefix(upper, "TRUNCATE TABLE ONLY "):
-		rest = strings.TrimSpace(normalized[len("TRUNCATE TABLE ONLY "):])
-	case strings.HasPrefix(upper, "TRUNCATE TABLE "):
-		rest = strings.TrimSpace(normalized[len("TRUNCATE TABLE "):])
-	case strings.HasPrefix(upper, "TRUNCATE ONLY "):
-		rest = strings.TrimSpace(normalized[len("TRUNCATE ONLY "):])
-	case strings.HasPrefix(upper, "TRUNCATE "):
-		rest = strings.TrimSpace(normalized[len("TRUNCATE "):])
-	default:
-		return ""
-	}
-	return firstSQLName(rest)
 }
 
 func parseAlterColumnTypeRef(sqlText, defaultSchema string) alterColumnRef {
@@ -1858,7 +2032,11 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 	if err := repository.DB.Where("file_id = ?", fileID).Order("line_number ASC, id ASC").Find(&statements).Error; err != nil {
 		return nil, nil, err
 	}
-	if refreshStatementsStaticRiskBeforeExecution(statements) {
+	fullAnalyze := func(sqlText string) RiskAnalysis {
+		analysis, _ := s.analyzeSQLRiskWithMetadata(file.SchemaName, sqlText)
+		return analysis
+	}
+	if refreshStatementsRiskBeforeExecution(statements, fullAnalyze) {
 		for i := range statements {
 			if err := repository.DB.Save(&statements[i]).Error; err != nil {
 				return nil, nil, err
@@ -1917,11 +2095,12 @@ func (s *PostgreSQLService) ExecuteSQLFileWithOptions(ctx context.Context, fileI
 			continue
 		}
 		if shouldBlockStatementWithWhitelist(*stmt, options, forceWhitelist) {
+			// 阻断语句会中止整个文件：后续语句往往依赖前序语句的执行结果，不能跳过阻断语句继续执行
 			stmt.ExecuteStatus = "NOT_EXECUTABLE"
 			stmt.ExecuteMessage = stmt.RiskReason
 			blockedCount++
 			repository.DB.Save(stmt)
-			continue
+			break
 		}
 
 		execCtx, cancel := context.WithTimeout(executionCtx, statementTimeout(stmt.SQLType)+10*time.Second)
@@ -2052,23 +2231,40 @@ func shouldBlockStatementWithWhitelist(stmt model.SQLChangeStatement, options SQ
 }
 
 func refreshStatementsStaticRiskBeforeExecution(statements []model.SQLChangeStatement) bool {
+	return refreshStatementsRiskBeforeExecution(statements, AnalyzeSQLRisk)
+}
+
+// refreshStatementsRiskBeforeExecution 用最新规则复核已解析语句的风险。
+// 静态分析结果更高时，再用 fullAnalyze（可结合元数据）确认，避免把解析阶段基于元数据得出的结论
+// （例如小表 DROP TABLE 从 BLOCKED 降为 WARN）在执行前又改回 BLOCKED。
+func refreshStatementsRiskBeforeExecution(statements []model.SQLChangeStatement, fullAnalyze func(string) RiskAnalysis) bool {
 	changed := false
 	for i := range statements {
 		stmt := &statements[i]
 		if stmt.ExecuteStatus == "SUCCESS" || stmt.ExecuteStatus == "SKIPPED" {
 			continue
 		}
+		hasStoredRisk := stmt.SQLType != "" && stmt.RiskReason != ""
 		analysis := AnalyzeSQLRisk(stmt.SQLContent)
 		if riskRank(analysis.RiskLevel) < riskRank(stmt.RiskLevel) {
 			continue
 		}
-		if riskRank(analysis.RiskLevel) == riskRank(stmt.RiskLevel) && stmt.SQLType != "" && stmt.RiskReason != "" {
+		if riskRank(analysis.RiskLevel) == riskRank(stmt.RiskLevel) && hasStoredRisk {
 			continue
+		}
+		if fullAnalyze != nil && riskRank(analysis.RiskLevel) > riskRank(stmt.RiskLevel) {
+			analysis = fullAnalyze(stmt.SQLContent)
+			if hasStoredRisk && analysis.SQLType == stmt.SQLType && riskRank(analysis.RiskLevel) <= riskRank(stmt.RiskLevel) {
+				continue
+			}
 		}
 		strategy := DetermineExecutionStrategy(analysis)
 		stmt.SQLType = analysis.SQLType
 		stmt.RiskLevel = analysis.RiskLevel
 		stmt.RiskReason = analysis.RiskReason
+		if analysis.EstimatedRows > 0 {
+			stmt.EstimatedRows = analysis.EstimatedRows
+		}
 		stmt.ExecutionStrategy = strategy.Name
 		stmt.CanRunInTransaction = strategy.CanRunInTransaction
 		if analysis.RiskLevel == "BLOCKED" {

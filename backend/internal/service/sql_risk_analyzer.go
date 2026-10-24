@@ -111,7 +111,8 @@ func AnalyzeSQLRisk(sqlText string) RiskAnalysis {
 	case reDropTable.MatchString(upper):
 		return enrichStaticRisk(sqlText, RiskAnalysis{SQLType: "DROP_TABLE", RiskLevel: "WARN", RiskReason: "DROP TABLE 会删除表结构和数据，请确认对象范围"})
 	default:
-		return RiskAnalysis{SQLType: firstKeyword(upper), RiskLevel: "LOW"}
+		// 未识别的语句类型默认需要人工确认，避免新语法或少见语句被当作低风险直接执行
+		return RiskAnalysis{SQLType: firstKeyword(upper), RiskLevel: "WARN", RiskReason: "未识别的语句类型，风险分析无法覆盖，请人工确认"}
 	}
 }
 
@@ -123,13 +124,8 @@ func enrichStaticRisk(sqlText string, risk RiskAnalysis) RiskAnalysis {
 		return classifyStaticAddColumn(sqlText, risk)
 	case "ADD_CHECK":
 		return classifyStaticAddCheck(sqlText, risk)
-	case "DROP_TABLE", "TRUNCATE":
-		tableName := extractDestructiveTableName(sqlText)
-		if tableName == "" {
-			return risk
-		}
-		return classifyDestructiveTableOperation(risk.SQLType, TableStats{TableName: tableName})
 	default:
+		// DROP TABLE / TRUNCATE 已在 AST 分析中按全部目标表和 CASCADE 分类，这里不再按首个表名覆盖
 		return risk
 	}
 }
@@ -530,54 +526,6 @@ func isTemporaryOrBackupTableName(name string) bool {
 		strings.HasSuffix(name, "_bak")
 }
 
-func extractDestructiveTableName(sqlText string) string {
-	normalized := normalizeSQL(sqlText)
-	upper := strings.ToUpper(normalized)
-	rest := ""
-	switch {
-	case strings.HasPrefix(upper, "DROP TABLE IF EXISTS "):
-		rest = strings.TrimSpace(normalized[len("DROP TABLE IF EXISTS "):])
-	case strings.HasPrefix(upper, "DROP TABLE "):
-		rest = strings.TrimSpace(normalized[len("DROP TABLE "):])
-	case strings.HasPrefix(upper, "TRUNCATE TABLE ONLY "):
-		rest = strings.TrimSpace(normalized[len("TRUNCATE TABLE ONLY "):])
-	case strings.HasPrefix(upper, "TRUNCATE TABLE "):
-		rest = strings.TrimSpace(normalized[len("TRUNCATE TABLE "):])
-	case strings.HasPrefix(upper, "TRUNCATE ONLY "):
-		rest = strings.TrimSpace(normalized[len("TRUNCATE ONLY "):])
-	case strings.HasPrefix(upper, "TRUNCATE "):
-		rest = strings.TrimSpace(normalized[len("TRUNCATE "):])
-	default:
-		return ""
-	}
-	name := firstSQLName(rest)
-	name = strings.TrimSuffix(name, ",")
-	parts := strings.Split(name, ".")
-	return strings.Trim(parts[len(parts)-1], `"`)
-}
-
-func firstSQLName(input string) string {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return ""
-	}
-	var b strings.Builder
-	inDouble := false
-	for i := 0; i < len(input); i++ {
-		ch := input[i]
-		if ch == '"' {
-			inDouble = !inDouble
-			b.WriteByte(ch)
-			continue
-		}
-		if !inDouble && (ch == ' ' || ch == ',') {
-			break
-		}
-		b.WriteByte(ch)
-	}
-	return strings.TrimSpace(b.String())
-}
-
 func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 	if tree == nil || len(tree.GetStmts()) == 0 {
 		return RiskAnalysis{SQLType: "UNKNOWN", RiskLevel: "LOW"}, true
@@ -589,20 +537,27 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 	if node == nil {
 		return RiskAnalysis{SQLType: "UNKNOWN", RiskLevel: "LOW"}, true
 	}
+	risk, ok := analyzeStmtNode(node)
+	if !ok {
+		return risk, false
+	}
+	return applyWritableCTERisk(node, risk), true
+}
 
+func analyzeStmtNode(node *pg_query.Node) (RiskAnalysis, bool) {
 	switch {
 	case node.GetInsertStmt() != nil:
 		return RiskAnalysis{SQLType: "INSERT", RiskLevel: "LOW"}, true
 	case node.GetUpdateStmt() != nil:
-		if node.GetUpdateStmt().GetWhereClause() == nil {
-			return RiskAnalysis{SQLType: "UPDATE_WITHOUT_WHERE", RiskLevel: "BLOCKED", RiskReason: "UPDATE 缺少 WHERE 条件，禁止直接执行"}, true
-		}
-		return RiskAnalysis{SQLType: "UPDATE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}, true
+		return analyzeUpdateWhere(node.GetUpdateStmt().GetWhereClause()), true
 	case node.GetDeleteStmt() != nil:
-		if node.GetDeleteStmt().GetWhereClause() == nil {
-			return RiskAnalysis{SQLType: "DELETE_WITHOUT_WHERE", RiskLevel: "BLOCKED", RiskReason: "DELETE 缺少 WHERE 条件，禁止直接执行"}, true
-		}
-		return RiskAnalysis{SQLType: "DELETE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}, true
+		return analyzeDeleteWhere(node.GetDeleteStmt().GetWhereClause()), true
+	case node.GetMergeStmt() != nil:
+		return RiskAnalysis{SQLType: "MERGE", RiskLevel: "WARN", RiskReason: "MERGE 可能批量插入、更新或删除数据，请确认匹配条件和影响范围"}, true
+	case node.GetSelectStmt() != nil:
+		return RiskAnalysis{SQLType: "SELECT", RiskLevel: "LOW"}, true
+	case node.GetExplainStmt() != nil:
+		return analyzeExplainStmt(node.GetExplainStmt())
 	case node.GetCreateStmt() != nil:
 		return RiskAnalysis{SQLType: "CREATE_TABLE", RiskLevel: "LOW"}, true
 	case node.GetCreateTableAsStmt() != nil:
@@ -619,10 +574,43 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 		return RiskAnalysis{SQLType: "ALTER_SYSTEM", RiskLevel: "BLOCKED", RiskReason: "禁止修改数据库系统级参数"}, true
 	case node.GetDropOwnedStmt() != nil:
 		return RiskAnalysis{SQLType: "DROP_OWNED", RiskLevel: "BLOCKED", RiskReason: "禁止执行 DROP OWNED"}, true
+	case node.GetReassignOwnedStmt() != nil:
+		return RiskAnalysis{SQLType: "REASSIGN_OWNED", RiskLevel: "BLOCKED", RiskReason: "禁止执行 REASSIGN OWNED"}, true
+	case node.GetCreateRoleStmt() != nil, node.GetAlterRoleStmt() != nil, node.GetAlterRoleSetStmt() != nil, node.GetDropRoleStmt() != nil:
+		return RiskAnalysis{SQLType: "ROLE_MANAGEMENT", RiskLevel: "BLOCKED", RiskReason: "禁止通过普通入口创建、修改或删除数据库角色"}, true
+	case node.GetGrantStmt() != nil, node.GetGrantRoleStmt() != nil, node.GetAlterDefaultPrivilegesStmt() != nil:
+		return RiskAnalysis{SQLType: "GRANT", RiskLevel: "WARN", RiskReason: "授权或回收权限会影响数据访问控制，请确认授权对象和范围"}, true
+	case node.GetAlterDatabaseStmt() != nil, node.GetAlterDatabaseSetStmt() != nil, node.GetAlterDatabaseRefreshCollStmt() != nil:
+		return RiskAnalysis{SQLType: "ALTER_DATABASE", RiskLevel: "WARN", RiskReason: "修改数据库级配置会影响所有连接，请确认影响范围"}, true
+	case node.GetDoStmt() != nil:
+		return RiskAnalysis{SQLType: "DO_BLOCK", RiskLevel: "WARN", RiskReason: "DO 匿名代码块可执行任意动态 SQL，风险分析无法覆盖块内语句，请人工确认"}, true
+	case node.GetCallStmt() != nil:
+		return RiskAnalysis{SQLType: "CALL", RiskLevel: "WARN", RiskReason: "CALL 存储过程会执行过程内逻辑，风险分析无法覆盖，请人工确认"}, true
+	case node.GetTransactionStmt() != nil:
+		return RiskAnalysis{SQLType: "TRANSACTION_CONTROL", RiskLevel: "WARN", RiskReason: "平台按条执行 SQL，BEGIN/COMMIT 等事务控制语句不保证在同一连接生效，失败时已标记成功的语句可能被回滚"}, true
+	case node.GetVariableSetStmt() != nil:
+		return RiskAnalysis{SQLType: "SET", RiskLevel: "WARN", RiskReason: "SET 只影响当前会话，平台按条执行时不保证对后续语句生效"}, true
+	case node.GetLockStmt() != nil:
+		return RiskAnalysis{SQLType: "LOCK_TABLE", RiskLevel: "WARN", RiskReason: "显式锁表可能阻塞业务读写，请确认锁模式和执行窗口"}, true
+	case node.GetClusterStmt() != nil:
+		return RiskAnalysis{SQLType: "CLUSTER", RiskLevel: "WARN", RiskReason: "CLUSTER 会重写表并持有排他锁，请确认执行窗口"}, true
+	case node.GetCommentStmt() != nil:
+		return RiskAnalysis{SQLType: "COMMENT", RiskLevel: "LOW"}, true
+	case node.GetCreateSeqStmt() != nil:
+		return RiskAnalysis{SQLType: "CREATE_SEQUENCE", RiskLevel: "LOW"}, true
+	case node.GetAlterSeqStmt() != nil:
+		return RiskAnalysis{SQLType: "ALTER_SEQUENCE", RiskLevel: "LOW"}, true
+	case node.GetCreateSchemaStmt() != nil:
+		return RiskAnalysis{SQLType: "CREATE_SCHEMA", RiskLevel: "LOW"}, true
+	case node.GetCreateEnumStmt() != nil, node.GetAlterEnumStmt() != nil, node.GetCompositeTypeStmt() != nil, node.GetCreateDomainStmt() != nil:
+		return RiskAnalysis{SQLType: "CREATE_TYPE", RiskLevel: "LOW"}, true
 	case node.GetCopyStmt() != nil:
 		copyStmt := node.GetCopyStmt()
 		if copyStmt.GetIsProgram() {
 			return RiskAnalysis{SQLType: "COPY_PROGRAM", RiskLevel: "BLOCKED", RiskReason: "禁止执行 COPY PROGRAM"}, true
+		}
+		if strings.TrimSpace(copyStmt.GetFilename()) != "" {
+			return RiskAnalysis{SQLType: "COPY_FILE", RiskLevel: "BLOCKED", RiskReason: "禁止通过普通入口读写数据库服务器本地文件"}, true
 		}
 		return RiskAnalysis{SQLType: "COPY", RiskLevel: "WARN", RiskReason: "COPY 可能批量导入或导出数据，请确认文件和数据范围"}, true
 	case node.GetDropStmt() != nil:
@@ -653,6 +641,138 @@ func analyzeSQLRiskFromAST(tree *pg_query.ParseResult) (RiskAnalysis, bool) {
 	default:
 		return RiskAnalysis{}, false
 	}
+}
+
+func analyzeUpdateWhere(where *pg_query.Node) RiskAnalysis {
+	if where == nil {
+		return RiskAnalysis{SQLType: "UPDATE_WITHOUT_WHERE", RiskLevel: "BLOCKED", RiskReason: "UPDATE 缺少 WHERE 条件，禁止直接执行"}
+	}
+	if !protoMessageContainsColumnRef(where.ProtoReflect()) {
+		return RiskAnalysis{SQLType: "UPDATE_TRIVIAL_WHERE", RiskLevel: "BLOCKED", RiskReason: "UPDATE 条件无有效过滤条件（未引用任何字段），禁止直接执行"}
+	}
+	return RiskAnalysis{SQLType: "UPDATE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}
+}
+
+func analyzeDeleteWhere(where *pg_query.Node) RiskAnalysis {
+	if where == nil {
+		return RiskAnalysis{SQLType: "DELETE_WITHOUT_WHERE", RiskLevel: "BLOCKED", RiskReason: "DELETE 缺少 WHERE 条件，禁止直接执行"}
+	}
+	if !protoMessageContainsColumnRef(where.ProtoReflect()) {
+		return RiskAnalysis{SQLType: "DELETE_TRIVIAL_WHERE", RiskLevel: "BLOCKED", RiskReason: "DELETE 条件无有效过滤条件（未引用任何字段），禁止直接执行"}
+	}
+	return RiskAnalysis{SQLType: "DELETE", RiskLevel: "LOW", RiskReason: "建议关注影响行数"}
+}
+
+func analyzeExplainStmt(stmt *pg_query.ExplainStmt) (RiskAnalysis, bool) {
+	analyze := false
+	for _, optionNode := range stmt.GetOptions() {
+		def := optionNode.GetDefElem()
+		if def == nil || !strings.EqualFold(def.GetDefname(), "analyze") {
+			continue
+		}
+		analyze = true
+		if arg := def.GetArg(); arg != nil {
+			if b := arg.GetBoolean(); b != nil && !b.GetBoolval() {
+				analyze = false
+			}
+			if str := arg.GetString_(); str != nil && (strings.EqualFold(str.GetSval(), "false") || strings.EqualFold(str.GetSval(), "off")) {
+				analyze = false
+			}
+		}
+	}
+	if !analyze || stmt.GetQuery() == nil {
+		return RiskAnalysis{SQLType: "EXPLAIN", RiskLevel: "LOW"}, true
+	}
+	// EXPLAIN ANALYZE 会真实执行内部语句，按内部语句评估风险
+	risk, ok := analyzeStmtNode(stmt.GetQuery())
+	if !ok {
+		return RiskAnalysis{SQLType: "EXPLAIN_ANALYZE", RiskLevel: "WARN", RiskReason: "EXPLAIN ANALYZE 会真实执行语句，请人工确认"}, true
+	}
+	return applyWritableCTERisk(stmt.GetQuery(), risk), true
+}
+
+// applyWritableCTERisk 检查 WITH 子句中的 DELETE/UPDATE/MERGE，避免通过可写 CTE 绕过 WHERE 检查
+func applyWritableCTERisk(node *pg_query.Node, risk RiskAnalysis) RiskAnalysis {
+	for _, cteQuery := range collectCTEQueries(node.ProtoReflect(), nil) {
+		var cteRisk RiskAnalysis
+		switch {
+		case cteQuery.GetDeleteStmt() != nil:
+			cteRisk = analyzeDeleteWhere(cteQuery.GetDeleteStmt().GetWhereClause())
+		case cteQuery.GetUpdateStmt() != nil:
+			cteRisk = analyzeUpdateWhere(cteQuery.GetUpdateStmt().GetWhereClause())
+		case cteQuery.GetMergeStmt() != nil:
+			cteRisk = RiskAnalysis{SQLType: "MERGE", RiskLevel: "WARN", RiskReason: "MERGE 可能批量插入、更新或删除数据，请确认匹配条件和影响范围"}
+		case cteQuery.GetInsertStmt() != nil:
+			cteRisk = RiskAnalysis{SQLType: "INSERT", RiskLevel: "LOW"}
+		default:
+			continue
+		}
+		if cteRisk.RiskLevel != "BLOCKED" {
+			cteRisk = RiskAnalysis{SQLType: "WRITABLE_CTE", RiskLevel: "WARN", RiskReason: appendRiskText("WITH 子句中包含数据修改语句，请确认影响范围", cteRisk.RiskReason)}
+		}
+		if riskRank(cteRisk.RiskLevel) > riskRank(risk.RiskLevel) {
+			risk = cteRisk
+		}
+	}
+	return risk
+}
+
+func collectCTEQueries(message protoreflect.Message, queries []*pg_query.Node) []*pg_query.Node {
+	if !message.IsValid() {
+		return queries
+	}
+	if cte, ok := message.Interface().(*pg_query.CommonTableExpr); ok && cte.GetCtequery() != nil {
+		queries = append(queries, cte.GetCtequery())
+	}
+	fields := message.Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
+			continue
+		}
+		value := message.Get(field)
+		if field.IsList() {
+			list := value.List()
+			for j := 0; j < list.Len(); j++ {
+				queries = collectCTEQueries(list.Get(j).Message(), queries)
+			}
+			continue
+		}
+		if value.Message().IsValid() {
+			queries = collectCTEQueries(value.Message(), queries)
+		}
+	}
+	return queries
+}
+
+func protoMessageContainsColumnRef(message protoreflect.Message) bool {
+	if !message.IsValid() {
+		return false
+	}
+	if _, ok := message.Interface().(*pg_query.ColumnRef); ok {
+		return true
+	}
+	fields := message.Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
+			continue
+		}
+		value := message.Get(field)
+		if field.IsList() {
+			list := value.List()
+			for j := 0; j < list.Len(); j++ {
+				if protoMessageContainsColumnRef(list.Get(j).Message()) {
+					return true
+				}
+			}
+			continue
+		}
+		if value.Message().IsValid() && protoMessageContainsColumnRef(value.Message()) {
+			return true
+		}
+	}
+	return false
 }
 
 func missingExplicitSchemaReason(tree *pg_query.ParseResult) (string, bool) {
@@ -863,7 +983,7 @@ func analyzeDropStmt(stmt *pg_query.DropStmt) RiskAnalysis {
 	case pg_query.ObjectType_OBJECT_SCHEMA:
 		return RiskAnalysis{SQLType: "DROP_SCHEMA", RiskLevel: "BLOCKED", RiskReason: "禁止通过普通入口删除 schema"}
 	case pg_query.ObjectType_OBJECT_TABLE:
-		return classifyDestructiveTableOperation("DROP_TABLE", TableStats{TableName: firstDropObjectName(stmt)})
+		return applyCascadeRisk(classifyDestructiveTables("DROP_TABLE", dropObjectNames(stmt)), stmt.GetBehavior() == pg_query.DropBehavior_DROP_CASCADE)
 	case pg_query.ObjectType_OBJECT_INDEX:
 		if stmt.GetConcurrent() {
 			return RiskAnalysis{SQLType: "DROP_INDEX_CONCURRENTLY", RiskLevel: "WARN", RiskReason: "并发删除索引耗时可能较长"}
@@ -876,22 +996,46 @@ func analyzeDropStmt(stmt *pg_query.DropStmt) RiskAnalysis {
 	case pg_query.ObjectType_OBJECT_TRIGGER:
 		return RiskAnalysis{SQLType: "DROP_TRIGGER", RiskLevel: "WARN", RiskReason: "删除触发器会改变表写入行为，请确认业务影响"}
 	default:
-		return RiskAnalysis{SQLType: "DROP", RiskLevel: "WARN", RiskReason: "DROP 会删除数据库对象，请确认对象范围"}
+		return applyCascadeRisk(RiskAnalysis{SQLType: "DROP", RiskLevel: "WARN", RiskReason: "DROP 会删除数据库对象，请确认对象范围"}, stmt.GetBehavior() == pg_query.DropBehavior_DROP_CASCADE)
 	}
 }
 
 func analyzeTruncateStmt(stmt *pg_query.TruncateStmt) RiskAnalysis {
+	names := make([]string, 0, len(stmt.GetRelations()))
 	for _, relNode := range stmt.GetRelations() {
-		rel := relNode.GetRangeVar()
-		if rel == nil {
-			continue
-		}
-		risk := classifyDestructiveTableOperation("TRUNCATE", TableStats{TableName: rel.GetRelname()})
-		if risk.RiskLevel != "LOW" {
-			return risk
+		if rel := relNode.GetRangeVar(); rel != nil {
+			names = append(names, rel.GetRelname())
 		}
 	}
-	return RiskAnalysis{SQLType: "TRUNCATE", RiskLevel: "LOW", RiskReason: "临时/备份表命名规则命中"}
+	return applyCascadeRisk(classifyDestructiveTables("TRUNCATE", names), stmt.GetBehavior() == pg_query.DropBehavior_DROP_CASCADE)
+}
+
+// classifyDestructiveTables 按全部目标表分类，取最高风险，避免只看第一个表名被临时表命名绕过
+func classifyDestructiveTables(sqlType string, names []string) RiskAnalysis {
+	var result RiskAnalysis
+	found := false
+	for _, name := range names {
+		risk := classifyDestructiveTableOperation(sqlType, TableStats{TableName: name})
+		if !found || riskRank(risk.RiskLevel) > riskRank(result.RiskLevel) {
+			result = risk
+			found = true
+		}
+	}
+	if !found {
+		return classifyDestructiveTableOperation(sqlType, TableStats{})
+	}
+	return result
+}
+
+func applyCascadeRisk(risk RiskAnalysis, cascade bool) RiskAnalysis {
+	if !cascade {
+		return risk
+	}
+	if riskRank(risk.RiskLevel) < riskRank("WARN") {
+		risk.RiskLevel = "WARN"
+	}
+	risk.RiskReason = appendRiskText(risk.RiskReason, "CASCADE 会级联删除或清空依赖对象，请确认影响范围")
+	return risk
 }
 
 func analyzeIndexStmt(stmt *pg_query.IndexStmt) RiskAnalysis {
@@ -931,14 +1075,15 @@ func indexHasExpression(stmt *pg_query.IndexStmt) bool {
 	return false
 }
 
-func firstDropObjectName(stmt *pg_query.DropStmt) string {
+func dropObjectNames(stmt *pg_query.DropStmt) []string {
+	names := make([]string, 0, len(stmt.GetObjects()))
 	for _, obj := range stmt.GetObjects() {
 		parts := stringListFromNode(obj)
 		if len(parts) > 0 {
-			return parts[len(parts)-1]
+			names = append(names, parts[len(parts)-1])
 		}
 	}
-	return ""
+	return names
 }
 
 func analyzeAlterTableStmt(stmt *pg_query.AlterTableStmt) RiskAnalysis {

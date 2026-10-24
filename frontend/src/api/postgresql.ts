@@ -175,6 +175,12 @@ export interface SQLViewDependencyTaskRequest {
   statementTimeout?: string
 }
 
+// SQL 执行可能持续数十分钟（语句超时最长 30 分钟），不能使用全局 30s 超时；
+// 后端执行已与请求连接解耦，前端超时只影响结果展示。0 表示不超时。
+const SQL_EXECUTION_TIMEOUT = 0
+// 解析阶段会访问目标库元数据和 EXPLAIN，文件较大时需要更长时间
+const SQL_PARSE_TIMEOUT = 10 * 60 * 1000
+
 export const getPostgreSQLInstance = () =>
   request.get<any, PostgreSQLInstanceInfo>('/postgresql/instance')
 
@@ -200,31 +206,31 @@ export const precheckSQLViewDependencyTask = (id: number) =>
   request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/precheck`)
 
 export const executeSQLViewDependencyTask = (id: number) =>
-  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/execute`)
+  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/execute`, undefined, { timeout: SQL_EXECUTION_TIMEOUT })
 
 export const restoreSQLViewDependencyTask = (id: number) =>
-  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/restore`)
+  request.post<any, { task: SQLViewDependencyTask; items: SQLViewDependencyItem[] }>(`/postgresql/view-dependency-tasks/${id}/restore`, undefined, { timeout: SQL_EXECUTION_TIMEOUT })
 
 export const parseSQLFile = (data: ParseSQLRequest) =>
-  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/parse', data)
+  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/parse', data, { timeout: SQL_PARSE_TIMEOUT })
 
 export const executeSQLFile = (id: number) =>
-  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/execute`)
+  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/execute`, undefined, { timeout: SQL_EXECUTION_TIMEOUT })
 
 export const executeSQLFileWithOptions = (id: number, options: SQLExecuteOptions) =>
-  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/execute`, { options })
+  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>(`/postgresql/sql-files/${id}/execute`, { options }, { timeout: SQL_EXECUTION_TIMEOUT })
 
 export const executeSQLContent = (data: ParseSQLRequest & { options: SQLExecuteOptions }) =>
-  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/execute-content', data)
+  request.post<any, { file: SQLChangeFile; statements: SQLChangeStatement[] }>('/postgresql/sql-files/execute-content', data, { timeout: SQL_EXECUTION_TIMEOUT })
 
 export const cancelSQLFile = (id: number) =>
   request.post<any, SQLChangeFile>(`/postgresql/sql-files/${id}/cancel`)
 
 export const parseSQLBatch = (data: { batchName?: string; overwrite?: boolean; files: ParseSQLBatchFile[] }) =>
-  request.post<any, { batch: SQLChangeBatch; files: SQLChangeFile[] }>('/postgresql/sql-batches/parse', data)
+  request.post<any, { batch: SQLChangeBatch; files: SQLChangeFile[] }>('/postgresql/sql-batches/parse', data, { timeout: SQL_PARSE_TIMEOUT })
 
 export const executeSQLBatch = (id: number, options: SQLExecuteOptions) =>
-  request.post<any, { batch: SQLChangeBatch; files: SQLChangeFile[] }>(`/postgresql/sql-batches/${id}/execute`, { options })
+  request.post<any, { batch: SQLChangeBatch; files: SQLChangeFile[] }>(`/postgresql/sql-batches/${id}/execute`, { options }, { timeout: SQL_EXECUTION_TIMEOUT })
 
 export const cancelSQLBatch = (id: number) =>
   request.post<any, SQLChangeBatch>(`/postgresql/sql-batches/${id}/cancel`)
@@ -257,7 +263,7 @@ export const deleteSQLFile = (id: number) =>
   request.delete<any, { deleted: boolean }>(`/postgresql/sql-files/${id}`)
 
 export const importServerSQL = (filePath: string, overwrite = true) =>
-  request.post<any, { count: number }>('/postgresql/sql-files/import-server', { filePath, overwrite })
+  request.post<any, { count: number }>('/postgresql/sql-files/import-server', { filePath, overwrite }, { timeout: SQL_PARSE_TIMEOUT })
 
 export const exportNotExecutableSQLUrl = (id: number) =>
   `/api/postgresql/sql-files/${id}/not-executable.sql`
