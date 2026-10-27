@@ -27,6 +27,7 @@ func AutoMigrate() error {
 		&model.ConfigItem{},
 		&model.Server{},
 		&model.ServerLog{},
+		&model.HostMonitorConfig{}, &model.HostMetricSample{}, &model.OperationsDatabase{}, &model.DatabaseLogCursor{}, &model.DatabaseLogEvent{}, &model.InspectionPlan{}, &model.InspectionRun{}, &model.InspectionTargetRun{},
 		&model.NotificationMsg{},
 		&model.ArtifactVersion{},
 		&model.ArtifactUpdateClaim{},

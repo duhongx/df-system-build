@@ -173,7 +173,7 @@ func (h *ServerMgmtHandler) Update(c *gin.Context) {
 func (h *ServerMgmtHandler) Delete(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err := h.repo.Delete(uint(id)); err != nil {
-		response.Fail(c, 12005, "删除失败")
+		response.Fail(c, 12005, "删除失败: "+err.Error())
 		return
 	}
 	response.OKWithMessage(c, "删除成功", nil)

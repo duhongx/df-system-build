@@ -2,6 +2,7 @@ package repository
 
 import (
 	"df-build-server/internal/model"
+	"fmt"
 
 	"gorm.io/gorm"
 )
@@ -39,6 +40,19 @@ func (r *ServerMgmtRepo) Update(server *model.Server) error {
 }
 
 func (r *ServerMgmtRepo) Delete(id uint) error {
+	var linked int64
+	if err := r.db.Model(&model.OperationsDatabase{}).Where("server_id=?", id).Count(&linked).Error; err != nil {
+		return err
+	}
+	if linked > 0 {
+		return fmt.Errorf("主机仍关联数据库诊断连接，请先解除关联")
+	}
+	if err := r.db.Model(&model.InspectionTargetRun{}).Joins("JOIN inspection_runs ON inspection_runs.id=inspection_target_runs.run_id").Where("inspection_target_runs.server_id=? AND inspection_runs.status IN ?", id, []string{"QUEUED", "RUNNING"}).Count(&linked).Error; err != nil {
+		return err
+	}
+	if linked > 0 {
+		return fmt.Errorf("主机仍有进行中的巡检，请等待结束")
+	}
 	return r.db.Delete(&model.Server{}, id).Error
 }
 

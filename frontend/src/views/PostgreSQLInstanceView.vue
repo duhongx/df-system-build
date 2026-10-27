@@ -28,6 +28,7 @@ onMounted(loadInstance)
       </div>
       <div class="title-actions">
         <el-button size="small" @click="loadInstance">刷新</el-button>
+        <el-button size="small" type="primary" @click="router.push('/postgresql/diagnostics')">锁与慢 SQL 诊断</el-button>
         <el-button size="small" type="primary" @click="router.push('/settings/environment')">系统设置</el-button>
       </div>
     </div>

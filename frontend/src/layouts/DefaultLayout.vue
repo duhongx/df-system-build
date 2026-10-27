@@ -15,7 +15,7 @@ const route = useRoute()
 const router = useRouter()
 const isCollapsed = ref(window.innerWidth < 1200)
 const pageSection = computed(() => {
-  if (/^\/(servers|kubernetes)/.test(route.path)) return '运维管理'
+  if (/^\/(servers|kubernetes|inspections)/.test(route.path)) return '运维管理'
   if (route.path.startsWith('/postgresql')) return '数据库管理'
   if (route.path.startsWith('/settings')) return '平台配置'
   if (route.path.startsWith('/deployment')) return '基础设施'
@@ -262,6 +262,7 @@ async function handleSaveProfile() {
           <template #title>服务器管理</template>
         </el-menu-item>
 
+        <el-menu-item index="/inspections"><el-icon><Document /></el-icon><template #title>巡检中心</template></el-menu-item>
         <el-sub-menu index="k8s-center">
           <template #title>
             <el-icon><Cloudy /></el-icon>
@@ -301,6 +302,7 @@ async function handleSaveProfile() {
             <el-icon><Coin /></el-icon>
             <span>PostgreSQL 管理</span>
           </template>
+          <el-menu-item index="/postgresql/diagnostics">锁与慢 SQL 诊断</el-menu-item>
           <el-menu-item index="/postgresql/instances">实例管理</el-menu-item>
           <el-menu-item index="/postgresql/sql-execution">SQL 执行</el-menu-item>
           <el-menu-item index="/postgresql/view-dependency-change">视图依赖变更</el-menu-item>

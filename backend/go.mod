@@ -12,9 +12,11 @@ require (
 	github.com/jackc/pgx/v5 v5.6.0
 	github.com/pganalyze/pg_query_go/v6 v6.2.2
 	github.com/pkg/sftp v1.13.7
+	github.com/signintech/gopdf v0.38.3
 	github.com/spf13/viper v1.21.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.51.0
+	golang.org/x/image v0.24.0
 	golang.org/x/net v0.53.0
 	golang.org/x/sys v0.44.0
 	google.golang.org/protobuf v1.36.11
@@ -102,6 +104,7 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/runc v1.2.3 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
+	github.com/phpdave11/gofpdi v1.0.14-0.20211212211723-1f10f9844311 // indirect
 	github.com/pjbgf/sha1cd v0.3.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect

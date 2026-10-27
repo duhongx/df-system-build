@@ -105,6 +105,10 @@ func main() {
 	// Initialize scheduler
 	scheduler.Init()
 	scheduler.StartCronJobs()
+	opsContext, stopOperations := context.WithCancel(context.Background())
+	defer stopOperations()
+	operations := service.NewOperationsService(repository.DB, cfg.Workspace.BaseDir)
+	operations.Start(opsContext)
 
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -157,6 +161,7 @@ func main() {
 		RunsDir:     cfg.Workspace.BaseDir + "/deployment-runs",
 	})).RegisterRoutes(api)
 	handler.NewPostgreSQLHandler().RegisterRoutes(api)
+	handler.NewOperationsHandler(operations).RegisterRoutes(api)
 
 	// SPA static file serving (embedded frontend)
 	web.RegisterSPA(r)
@@ -179,6 +184,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	stopOperations()
 	logger.Log.Info("Shutting down server...")
 
 	// Graceful shutdown with 30 second timeout

@@ -1,256 +1,40 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getManagedServer, getServerMetrics, type ManagedServer } from '../api/server-mgmt'
-
-const route = useRoute()
-const router = useRouter()
-const serverId = Number(route.params.id)
-const server = ref<ManagedServer | null>(null)
-const metrics = ref<any>(null)
-const loading = ref(true)
-const error = ref('')
-let timer: any = null
-
-onMounted(async () => {
-  try {
-    server.value = await getManagedServer(serverId)
-  } catch (e) { /* handled */ }
-  await fetchMetrics()
-  // Auto refresh every 10 seconds
-  timer = setInterval(fetchMetrics, 10000)
-})
-
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
-})
-
-async function fetchMetrics() {
-  try {
-    metrics.value = await getServerMetrics(serverId)
-    error.value = ''
-  } catch (e: any) {
-    error.value = e?.message || '获取监控数据失败'
-  } finally {
-    loading.value = false
-  }
-}
-
-function formatBytes(bytes: number) {
-  if (!bytes) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  let val = bytes
-  while (val >= 1024 && i < units.length - 1) { val /= 1024; i++ }
-  return `${val.toFixed(1)} ${units[i]}`
-}
-
-function formatUptime(seconds: number) {
-  if (!seconds) return '-'
-  const days = Math.floor(seconds / 86400)
-  const hours = Math.floor((seconds % 86400) / 3600)
-  const mins = Math.floor((seconds % 3600) / 60)
-  if (days > 0) return `${days}天 ${hours}小时`
-  if (hours > 0) return `${hours}小时 ${mins}分钟`
-  return `${mins}分钟`
-}
-
-function cpuColor(pct: number) {
-  if (pct > 80) return '#f56c6c'
-  if (pct > 50) return '#e6a23c'
-  return '#67c23a'
-}
-
-function memColor(pct: number) {
-  if (pct > 85) return '#f56c6c'
-  if (pct > 60) return '#e6a23c'
-  return '#409eff'
-}
-
-function handleBack() {
-  router.push('/servers')
-}
+import { ElMessage } from 'element-plus'
+import { getManagedServer, type ManagedServer } from '../api/server-mgmt'
+import { collectHostMetric, configureHostMonitor, getHostHistory, getHostMonitor, type HostMetric, type HostMonitor } from '../api/operations'
+import MetricChart from '../components/MetricChart.vue'
+const route=useRoute(),router=useRouter(),id=Number(route.params.id)
+const server=ref<ManagedServer>(),monitor=ref<HostMonitor>(),samples=ref<HostMetric[]>([]),hours=ref(1),interval=ref(60),step=ref(60),loading=ref(false),pending=ref(false),error=ref(''),paused=ref(false)
+const selectedNet=ref(''),selectedDisk=ref('');let timer:ReturnType<typeof setInterval>|undefined;let disposed=false
+const metric=computed(()=>monitor.value?.metrics)
+const times=computed(()=>samples.value.map(m=>m.collectedAt))
+const gap=computed(()=>Math.max(interval.value*3,step.value*2))
+const stale=computed(()=>metric.value&&Date.now()-new Date(metric.value.collectedAt).getTime()>Math.max(180,interval.value*3)*1000)
+const series=(name:string,color:string,read:(m:HostMetric)=>number|null)=>({name,color,values:samples.value.map(read)})
+const cpu=computed(()=>[series('CPU','#3979cc',m=>m.cpuUsagePercent),series('I/O 等待','#cf9537',m=>m.cpuWaitPercent)])
+const memory=computed(()=>[series('内存使用率','#7666c6',m=>m.memUsagePercent)])
+const load=computed(()=>[series('1 分钟','#3979cc',m=>m.load1),series('5 分钟','#3b9d83',m=>m.load5),series('15 分钟','#cf9537',m=>m.load15)])
+const network=computed(()=>[series('入站','#3b9d83',m=>{const n=m.networks?.find(n=>n.name===selectedNet.value);return n?n.receivePerSecond/1048576:null}),series('出站','#3979cc',m=>{const n=m.networks?.find(n=>n.name===selectedNet.value);return n?n.transmitPerSecond/1048576:null})])
+const io=computed(()=>[series('读取','#3b9d83',m=>{const d=m.diskIO?.find(d=>d.device===selectedDisk.value);return d?d.readPerSecond/1048576:null}),series('写入','#3979cc',m=>{const d=m.diskIO?.find(d=>d.device===selectedDisk.value);return d?d.writePerSecond/1048576:null})])
+const iops=computed(()=>[series('读 IOPS','#3b9d83',m=>m.diskIO?.find(d=>d.device===selectedDisk.value)?.readIOPS??null),series('写 IOPS','#3979cc',m=>m.diskIO?.find(d=>d.device===selectedDisk.value)?.writeIOPS??null)])
+const bytes=(n:number|undefined)=>n==null?'-':n>=1073741824?(n/1073741824).toFixed(2)+' GiB':n>=1048576?(n/1048576).toFixed(1)+' MiB':(n/1024).toFixed(1)+' KiB'
+const time=(s:string|null|undefined)=>s?new Date(s).toLocaleString('zh-CN',{hour12:false}):'-'
+async function refresh(){if(loading.value)return;loading.value=true;try{const [m,h]=await Promise.all([getHostMonitor(id),getHostHistory(id,hours.value)]);if(disposed)return;monitor.value=m;interval.value=m.config.intervalSeconds;samples.value=h.samples;step.value=h.stepSeconds;pending.value=m.collecting;error.value='';if(!selectedNet.value)selectedNet.value=m.metrics?.networks[0]?.name||'';if(!selectedDisk.value)selectedDisk.value=m.metrics?.diskIO[0]?.device||''}catch(e:any){error.value=e.message||'读取监控失败'}finally{loading.value=false}}
+async function collect(){try{await collectHostMetric(id);pending.value=true;await refresh()}catch(e:any){ElMessage.error(e.message)}}
+async function save(enabled:boolean){await configureHostMonitor(id,enabled,interval.value);ElMessage.success(enabled?'已启用后台连续采集':'已关闭后台连续采集');await refresh();if(enabled)await collect()}
+onMounted(async()=>{server.value=await getManagedServer(id);await refresh();timer=setInterval(()=>{if(!paused.value||pending.value)refresh()},3000)})
+onUnmounted(()=>{disposed=true;if(timer)clearInterval(timer)})
 </script>
-
-<template>
-  <div class="monitor-page">
-    <div class="monitor-header">
-      <div class="header-left">
-        <el-button size="small" @click="handleBack"><el-icon><ArrowLeft /></el-icon>返回</el-button>
-        <span class="server-info" v-if="server">
-          {{ server.host }} ({{ server.remark || server.host }})
-          <el-tag :type="error ? 'danger' : metrics ? 'success' : 'info'" size="small" style="margin-left: 8px;">{{ error ? '监控不可用' : metrics ? '监控中' : '正在连接' }}</el-tag>
-        </span>
-      </div>
-      <div class="header-right">
-        <span style="font-size: 12px; color: #909399;">每 10 秒自动刷新</span>
-        <el-button size="small" @click="fetchMetrics" :loading="loading">刷新</el-button>
-      </div>
-    </div>
-
-    <div v-if="error" class="error-card">
-      <el-alert :title="error" type="error" show-icon :closable="false" />
-    </div>
-
-    <template v-if="metrics">
-      <!-- Overview Cards -->
-      <div class="metric-cards">
-        <div class="metric-card">
-          <div class="card-title">CPU 使用率</div>
-          <div class="card-value">
-            <el-progress type="dashboard" :percentage="metrics.cpuUsagePercent" :color="cpuColor(metrics.cpuUsagePercent)" :width="100" />
-          </div>
-          <div class="card-extra">{{ metrics.cpuCores }} 核</div>
-        </div>
-
-        <div class="metric-card">
-          <div class="card-title">内存使用率</div>
-          <div class="card-value">
-            <el-progress type="dashboard" :percentage="metrics.memUsagePercent" :color="memColor(metrics.memUsagePercent)" :width="100" />
-          </div>
-          <div class="card-extra">{{ formatBytes(metrics.memUsedBytes) }} / {{ formatBytes(metrics.memTotalBytes) }}</div>
-        </div>
-
-        <div class="metric-card">
-          <div class="card-title">系统负载</div>
-          <div class="card-value load-values">
-            <div><span class="load-label">1m</span><span class="load-num">{{ metrics.load1 }}</span></div>
-            <div><span class="load-label">5m</span><span class="load-num">{{ metrics.load5 }}</span></div>
-            <div><span class="load-label">15m</span><span class="load-num">{{ metrics.load15 }}</span></div>
-          </div>
-          <div class="card-extra">核心数: {{ metrics.cpuCores }}</div>
-        </div>
-
-        <div class="metric-card">
-          <div class="card-title">运行时间</div>
-          <div class="card-value uptime-value">{{ formatUptime(metrics.uptimeSeconds) }}</div>
-          <div class="card-extra">启动于 {{ metrics.bootTime }}</div>
-        </div>
-      </div>
-
-      <!-- Disk Usage -->
-      <div class="section-card">
-        <h4 class="section-title">磁盘使用</h4>
-        <el-table :data="metrics.disks" stripe size="small" border>
-          <el-table-column prop="mountpoint" label="挂载点" min-width="150" />
-          <el-table-column prop="device" label="设备" width="150" />
-          <el-table-column label="总容量" width="100">
-            <template #default="{ row }">{{ formatBytes(row.totalBytes) }}</template>
-          </el-table-column>
-          <el-table-column label="已使用" width="100">
-            <template #default="{ row }">{{ formatBytes(row.usedBytes) }}</template>
-          </el-table-column>
-          <el-table-column label="可用" width="100">
-            <template #default="{ row }">{{ formatBytes(row.availBytes) }}</template>
-          </el-table-column>
-          <el-table-column label="使用率" width="180">
-            <template #default="{ row }">
-              <el-progress :percentage="row.usagePercent" :color="row.usagePercent > 85 ? '#f56c6c' : row.usagePercent > 70 ? '#e6a23c' : '#409eff'" :stroke-width="14" :text-inside="true" />
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
-
-      <!-- Network -->
-      <div class="section-card">
-        <h4 class="section-title">网络接口</h4>
-        <el-table :data="metrics.networks" stripe size="small" border>
-          <el-table-column prop="interface" label="接口" width="120" />
-          <el-table-column label="接收总量">
-            <template #default="{ row }">{{ formatBytes(row.receiveBytes) }}</template>
-          </el-table-column>
-          <el-table-column label="发送总量">
-            <template #default="{ row }">{{ formatBytes(row.transmitBytes) }}</template>
-          </el-table-column>
-        </el-table>
-      </div>
-    </template>
-  </div>
-</template>
-
-<style scoped>
-.monitor-page { display: flex; flex-direction: column; gap: 16px; }
-.monitor-header {
-  display: flex; align-items: center; justify-content: space-between;
-  background: #fff; padding: 12px 16px; border-radius: 6px; border: 1px solid #ebeef5;
-}
-.header-left { display: flex; align-items: center; gap: 12px; }
-.header-right { display: flex; align-items: center; gap: 12px; }
-.server-info { font-size: 14px; font-weight: 500; color: #303133; }
-.error-card { margin: 0; }
-
-.metric-cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-}
-
-.metric-card {
-  background: #fff;
-  border-radius: 8px;
-  border: 1px solid #ebeef5;
-  padding: 20px;
-  text-align: center;
-}
-
-.card-title {
-  font-size: 13px;
-  color: #909399;
-  margin-bottom: 12px;
-}
-
-.card-value {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 100px;
-}
-
-.card-extra {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 8px;
-}
-
-.load-values {
-  display: flex;
-  gap: 20px;
-  flex-direction: row;
-}
-
-.load-label {
-  font-size: 11px;
-  color: #909399;
-  display: block;
-}
-
-.load-num {
-  font-size: 22px;
-  font-weight: 600;
-  color: #303133;
-}
-
-.uptime-value {
-  font-size: 22px;
-  font-weight: 600;
-  color: #303133;
-  min-height: 100px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.section-card {
-  background: #fff;
-  border-radius: 8px;
-  border: 1px solid #ebeef5;
-  padding: 16px;
-}
-
-.section-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: #303133;
-  margin: 0 0 12px 0;
-}
-</style>
+<template><div class="host-monitor"><div class="heading"><div><el-button text @click="router.push('/servers')">← 主机管理</el-button><h3>{{server?.remark||server?.host||'主机监控'}} <small>{{server?.host}}</small></h3></div><div class="actions"><el-select v-model="hours" style="width:130px" @change="refresh"><el-option label="最近 1 小时" :value="1"/><el-option label="最近 6 小时" :value="6"/><el-option label="最近 24 小时" :value="24"/><el-option label="最近 7 天" :value="168"/><el-option label="最近 30 天" :value="720"/></el-select><el-button @click="paused=!paused">{{paused?'恢复刷新':'暂停刷新'}}</el-button><el-button :loading="pending" @click="collect">立即采集</el-button><el-button type="primary" @click="router.push({path:'/inspections',query:{host:id}})">发起巡检</el-button></div></div>
+<el-alert v-if="error||monitor?.config.lastError" type="error" :title="error||monitor?.config.lastError" :closable="false" show-icon/>
+<div class="collection"><div><el-tag :type="monitor?.config.enabled?'success':'info'">{{monitor?.config.enabled?'后台连续采集':'单次采样'}}</el-tag><span>最近样本：{{time(metric?.collectedAt)}}</span><el-tag v-if="stale" type="warning">样本已过期</el-tag><span v-if="pending">正在连接并采集，页面可稍后查看</span></div><div><span>采集间隔</span><el-select v-model="interval" style="width:100px" @change="save(!!monitor?.config.enabled)"><el-option :value="30" label="30 秒"/><el-option :value="60" label="60 秒"/><el-option :value="300" label="5 分钟"/></el-select><el-switch :model-value="!!monitor?.config.enabled" @change="(v: string | number | boolean)=>save(!!v)"/></div></div>
+<template v-if="metric"><div class="cards"><div><span>CPU 使用率</span><strong>{{metric.cpuUsagePercent.toFixed(1)}}<small>%</small></strong><p>{{metric.cpuCores}} 核 · I/O 等待 {{metric.cpuWaitPercent.toFixed(1)}}%</p></div><div><span>内存使用率</span><strong>{{metric.memUsagePercent.toFixed(1)}}<small>%</small></strong><p>可用 {{bytes(metric.memAvailableBytes)}} / {{bytes(metric.memTotalBytes)}}</p></div><div><span>系统负载</span><strong>{{metric.load1.toFixed(2)}}</strong><p>5 分钟 {{metric.load5.toFixed(2)}} · 15 分钟 {{metric.load15.toFixed(2)}}</p></div><div><span>Swap 使用</span><strong>{{bytes(metric.swapUsedBytes)}}</strong><p>总量 {{bytes(metric.swapTotalBytes)}}</p></div></div>
+<div class="charts"><MetricChart title="CPU" :times="times" :series="cpu" unit="%" :max="100" :gap-seconds="gap"/><MetricChart title="内存" :times="times" :series="memory" unit="%" :max="100" :gap-seconds="gap"/><MetricChart title="系统负载" :times="times" :series="load" :gap-seconds="gap"/><div class="chart-wrap"><el-select v-model="selectedNet" size="small"><el-option v-for="n in metric.networks" :key="n.name" :value="n.name" :label="n.name"/></el-select><MetricChart title="网络速率" :times="times" :series="network" unit="MiB/s" :gap-seconds="gap"/></div><div class="chart-wrap"><el-select v-model="selectedDisk" size="small"><el-option v-for="d in metric.diskIO" :key="d.device" :value="d.device" :label="d.device"/></el-select><MetricChart title="磁盘读写吞吐" :times="times" :series="io" unit="MiB/s" :gap-seconds="gap"/></div><MetricChart :title="`磁盘 IOPS · ${selectedDisk}`" :times="times" :series="iops" unit="次/s" :gap-seconds="gap"/></div>
+<div class="data-card"><h4>磁盘容量与 inode</h4><el-table :data="metric.disks" size="small"><el-table-column prop="mountpoint" label="挂载点"/><el-table-column prop="device" label="设备"/><el-table-column label="总容量"><template #default="{row}">{{bytes(row.totalBytes)}}</template></el-table-column><el-table-column label="可用"><template #default="{row}">{{bytes(row.availableBytes)}}</template></el-table-column><el-table-column label="使用率" min-width="180"><template #default="{row}"><el-progress :percentage="Math.round(row.usedPercent)" :status="row.usedPercent>=90?'exception':undefined"/></template></el-table-column><el-table-column label="inode 使用"><template #default="{row}">{{row.inodes?row.inodeUsedPercent.toFixed(1)+'%':'未采集'}}</template></el-table-column></el-table></div>
+<div class="data-card"><h4>磁盘与网络详情</h4><el-table :data="metric.diskIO" size="small"><el-table-column prop="device" label="磁盘设备"/><el-table-column label="I/O 利用率"><template #default="{row}">{{row.utilization.toFixed(1)}}%</template></el-table-column><el-table-column label="平均 I/O 时延"><template #default="{row}">{{row.awaitMs.toFixed(2)}} ms</template></el-table-column></el-table><el-table :data="metric.networks" size="small"><el-table-column prop="name" label="网卡"/><el-table-column label="累计入站"><template #default="{row}">{{bytes(row.receiveBytes)}}</template></el-table-column><el-table-column label="累计出站"><template #default="{row}">{{bytes(row.transmitBytes)}}</template></el-table-column><el-table-column prop="errors" label="累计错误"/><el-table-column prop="drops" label="累计丢包"/></el-table></div>
+<el-alert v-for="w in metric.warnings" :key="w" :title="w" type="warning" :closable="false"/>
+<p class="note">{{metric.os}} · {{metric.kernel}} · 运行 {{(metric.uptimeSeconds/86400).toFixed(1)}} 天。速率来自约 1 秒采样；历史图表展示每 {{step}} 秒桶的最后样本，数据保留 30 天，缺失区间留空。</p></template>
+<el-empty v-else description="尚无采样，请点击立即采集或启用后台连续采集"/></div></template>
+<style scoped>.host-monitor{display:flex;flex-direction:column;gap:16px;padding-bottom:20px}.heading,.actions,.collection,.collection>div{display:flex;align-items:center;gap:12px}.heading,.collection{justify-content:space-between}.heading h3{margin:5px 0}.heading small{font-weight:400;color:#7b8b9d;font-size:13px}.collection{padding:12px 16px;background:#fff;border:1px solid #e2e8f0;border-radius:7px;font-size:12px;color:#65758b}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}.cards>div,.data-card{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:18px}.cards span{color:#6e7e93;font-size:12px}.cards strong{display:block;font-size:28px;color:#243e60;margin-top:12px}.cards strong small{font-size:15px;margin-left:4px}.cards p{font-size:11px;color:#7b8b9d;margin:10px 0 0}.charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.chart-wrap{position:relative;min-width:0}.chart-wrap>.el-select{position:absolute;width:110px;right:20px;top:42px;z-index:1}.data-card h4{margin:0 0 12px;font-size:13px}.note{font-size:12px;color:#7b8b9d;line-height:1.8}@media(max-width:1050px){.heading{align-items:flex-start;flex-direction:column}.cards{grid-template-columns:repeat(2,1fr)}.collection{flex-wrap:wrap}.charts{grid-template-columns:1fr}}</style>

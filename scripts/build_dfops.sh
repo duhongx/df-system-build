@@ -34,6 +34,15 @@ shutil.copytree(stage / 'frontend', stage / 'backend/internal/web/dist')
 PY
 
 cd "$stage/backend"
+# Remote inspection executors need no Go/Python/database client on target hosts.
+for runner_arch in amd64 arm64; do
+  CGO_ENABLED=0 GOOS=linux GOARCH="$runner_arch" go build -trimpath -ldflags='-s -w' -o "$stage/runner-$runner_arch" ./cmd/inspection-runner
+  python3 - "$stage/runner-$runner_arch" "internal/opsremote/runners/linux-$runner_arch.gz" <<'PYRUNNER'
+from pathlib import Path
+import gzip, sys
+Path(sys.argv[2]).write_bytes(gzip.compress(Path(sys.argv[1]).read_bytes(), mtime=0))
+PYRUNNER
+done
 # Check the frontend actually embedded by Go, including the route referenced
 # by index.html, before producing a customer binary.
 go test ./internal/web -run 'TestEmbeddedSQLExecutionActions|TestEmbeddedResumableArtifactUpload|TestEmbeddedOperationalFixes|TestSPACacheAndMissingAssets' -count=1
