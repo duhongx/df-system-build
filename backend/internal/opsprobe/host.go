@@ -217,7 +217,7 @@ func CollectHost(ctx context.Context) (*HostMetrics, error) {
 		if ops > 0 {
 			await = (delta(a.readMs, b.readMs) + delta(a.writeMs, b.writeMs)) / ops
 		}
-		m.DiskIO = append(m.DiskIO, DiskIO{name, delta(a.readSectors, b.readSectors) * 512 / seconds, delta(a.writeSectors, b.writeSectors) * 512 / seconds, delta(a.reads, b.reads) / seconds, delta(a.writes, b.writes) / seconds, min(100, delta(a.busyMs, b.busyMs)/(seconds*10)), await})
+		m.DiskIO = append(m.DiskIO, DiskIO{Device: name, ReadPerSecond: delta(a.readSectors, b.readSectors) * 512 / seconds, WritePerSecond: delta(a.writeSectors, b.writeSectors) * 512 / seconds, ReadIOPS: delta(a.reads, b.reads) / seconds, WriteIOPS: delta(a.writes, b.writes) / seconds, Utilization: min(100, delta(a.busyMs, b.busyMs)/(seconds*10)), AwaitMs: await})
 	}
 	sort.Slice(m.DiskIO, func(i, j int) bool { return m.DiskIO[i].Device < m.DiskIO[j].Device })
 	mounts, e := proc("self/mounts")

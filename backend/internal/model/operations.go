@@ -5,6 +5,7 @@ import "time"
 // Monitoring and inspection have independent lifecycles from release SQL.
 type HostMonitorConfig struct {
 	ServerID        uint       `gorm:"primaryKey" json:"serverId"`
+	MetricsURL      string     `gorm:"type:text" json:"metricsURL"`
 	Enabled         bool       `json:"enabled"`
 	IntervalSeconds int        `gorm:"default:60" json:"intervalSeconds"`
 	SSHFingerprint  string     `gorm:"size:128" json:"sshFingerprint"`

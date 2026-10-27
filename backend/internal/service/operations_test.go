@@ -10,10 +10,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -472,4 +475,42 @@ func TestOperationsMissingLockLoggingIsUnknown(t *testing.T) {
 		}
 	}
 	t.Fatal("missing lock log capability check")
+}
+
+func TestOperationsHostCollectionUsesHTTPWithoutSSH(t *testing.T) {
+	db := operationsTestDB(t)
+	var n atomic.Int64
+	exporter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := n.Add(1)
+		fmt.Fprintf(w, "node_memory_MemTotal_bytes 1000\nnode_memory_MemAvailable_bytes 600\nnode_cpu_seconds_total{cpu=\"0\",mode=\"idle\"} %d\nnode_cpu_seconds_total{cpu=\"0\",mode=\"user\"} %d\n", 100+50*v, 20+10*v)
+	}))
+	defer exporter.Close()
+	// Unreachable SSH and an unusable credential must not affect HTTP monitoring.
+	server := model.Server{Host: "192.0.2.254", Port: 1, Username: "no-ssh", AuthType: "invalid", CredentialEncrypted: "unusable"}
+	if err := db.Create(&server).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := NewOperationsService(db, t.TempDir())
+	if _, e := svc.ConfigureMonitor(server.ID, false, 60, exporter.URL+"/metrics"); e != nil {
+		t.Fatal(e)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if e := svc.CollectHostAsync(ctx, server.ID); e != nil {
+		t.Fatal(e)
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for svc.HostCollecting(server.ID) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	cfg, m, e := svc.HostMonitor(server.ID)
+	if e != nil || m == nil || m.Source != "node_exporter" || cfg.LastError != "" || n.Load() != 2 {
+		t.Fatalf("HTTP collection used SSH or failed: config=%+v metric=%+v err=%v scrapes=%d", cfg, m, e, n.Load())
+	}
+	if cfg.SSHFingerprint != "" {
+		t.Fatal("monitoring unexpectedly established SSH trust")
+	}
+	if _, e := svc.ConfigureMonitor(server.ID, false, 60, "file:///etc/passwd"); e == nil {
+		t.Fatal("non HTTP source accepted")
+	}
 }

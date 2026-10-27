@@ -279,14 +279,19 @@ func (h *OperationsHandler) HostMonitor(c *gin.Context) {
 }
 func (h *OperationsHandler) SaveMonitor(c *gin.Context) {
 	var req struct {
-		Enabled         bool `json:"enabled"`
-		IntervalSeconds int  `json:"intervalSeconds"`
+		Enabled         bool    `json:"enabled"`
+		IntervalSeconds int     `json:"intervalSeconds"`
+		MetricsURL      *string `json:"metricsURL"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		opsFail(c, err)
 		return
 	}
-	cfg, err := h.svc.ConfigureMonitor(opsID(c), req.Enabled, req.IntervalSeconds)
+	var addresses []string
+	if req.MetricsURL != nil {
+		addresses = append(addresses, *req.MetricsURL)
+	}
+	cfg, err := h.svc.ConfigureMonitor(opsID(c), req.Enabled, req.IntervalSeconds, addresses...)
 	if err != nil {
 		opsFail(c, err)
 		return

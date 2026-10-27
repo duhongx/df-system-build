@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"df-build-server/internal/model"
+	"df-build-server/internal/nodeexporter"
 	"df-build-server/internal/opsprobe"
-	"df-build-server/internal/opsremote"
 	"gorm.io/gorm/clause"
 )
 
@@ -35,7 +38,7 @@ func (s *OperationsService) HostMonitor(id uint) (model.HostMonitorConfig, *opsp
 	}
 	return cfg, metrics, nil
 }
-func (s *OperationsService) ConfigureMonitor(id uint, enabled bool, interval int) (model.HostMonitorConfig, error) {
+func (s *OperationsService) ConfigureMonitor(id uint, enabled bool, interval int, metricsURL ...string) (model.HostMonitorConfig, error) {
 	if interval < 30 || interval > 3600 {
 		return model.HostMonitorConfig{}, fmt.Errorf("采集间隔应为 30～3600 秒")
 	}
@@ -44,7 +47,17 @@ func (s *OperationsService) ConfigureMonitor(id uint, enabled bool, interval int
 		return cfg, err
 	}
 	cfg.Enabled, cfg.IntervalSeconds = enabled, interval
-	return cfg, s.db.Model(&cfg).Updates(map[string]any{"enabled": enabled, "interval_seconds": interval}).Error
+	if len(metricsURL) > 0 {
+		raw := strings.TrimSpace(metricsURL[0])
+		if raw != "" {
+			u, e := url.Parse(raw)
+			if e != nil || u.Hostname() == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Fragment != "" {
+				return cfg, fmt.Errorf("指标地址必须是 HTTP(S) URL，不允许内嵌账号密码")
+			}
+		}
+		cfg.MetricsURL = raw
+	}
+	return cfg, s.db.Model(&cfg).Updates(map[string]any{"enabled": enabled, "interval_seconds": interval, "metrics_url": cfg.MetricsURL}).Error
 }
 func (s *OperationsService) CollectHostAsync(ctx context.Context, id uint) error {
 	s.mu.Lock()
@@ -72,23 +85,21 @@ func (s *OperationsService) CollectHostAsync(ctx context.Context, id uint) error
 		if err := s.db.Model(&cfg).Updates(map[string]any{"last_attempt_at": now, "last_error": ""}).Error; err != nil {
 			return
 		}
-		conn, err := s.connect(qctx, id)
+		var server model.Server
+		err := s.db.First(&server, id).Error
 		if err == nil {
-			defer conn.Close()
-			var exe string
-			exe, _, err = conn.EnsureRunner(qctx)
-			if err == nil {
-				var data []byte
-				data, err = conn.Run(qctx, opsremote.Quote(exe)+" --mode sample", 2<<20)
+			if err = s.db.First(&cfg, id).Error; err == nil {
+				endpoint := cfg.MetricsURL
+				if endpoint == "" {
+					endpoint = "http://" + net.JoinHostPort(server.Host, "9100") + "/metrics"
+				}
+				var metrics *opsprobe.HostMetrics
+				metrics, err = nodeexporter.Collect(qctx, endpoint)
 				if err == nil {
-					var metrics opsprobe.HostMetrics
-					err = json.Unmarshal(data, &metrics)
+					var data []byte
+					data, err = json.Marshal(metrics)
 					if err == nil {
-						if metrics.CPUCores < 1 || metrics.MemTotalBytes == 0 {
-							err = fmt.Errorf("采集结果缺少 CPU 或内存信息")
-						} else {
-							err = s.db.Create(&model.HostMetricSample{ServerID: id, CollectedAt: time.Now(), MetricsJSON: string(data)}).Error
-						}
+						err = s.db.Create(&model.HostMetricSample{ServerID: id, CollectedAt: time.Now(), MetricsJSON: string(data)}).Error
 					}
 				}
 			}

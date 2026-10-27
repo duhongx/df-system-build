@@ -11,6 +11,8 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.6.0
 	github.com/pganalyze/pg_query_go/v6 v6.2.2
+	github.com/prometheus/common v0.66.1
+	github.com/prometheus/client_model v0.6.2
 	github.com/pkg/sftp v1.13.7
 	github.com/signintech/gopdf v0.38.3
 	github.com/spf13/viper v1.21.0
@@ -124,6 +126,7 @@ require (
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
+	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/arch v0.23.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
