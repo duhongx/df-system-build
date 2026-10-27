@@ -422,9 +422,15 @@ func (s *OperationsService) appendLogInspectionChecks(id uint, result *opsprobe.
 	if time.Since(*row.LastLogSyncAt) > 2*time.Minute {
 		result.Checks = append(result.Checks, opsprobe.Check{Code: "log_freshness", Name: "日志采集时效", Status: "UNKNOWN", Error: "最近日志同步已超过 2 分钟，以下统计仅代表已入库样本"})
 	}
+	var capability map[string]string
+	_ = json.Unmarshal([]byte(row.LogCapability), &capability)
+	sourceMatches := capability["source_identity"] == fmt.Sprintf("%s:%d/%s@%d", row.Host, row.Port, row.Database, row.ServerID) && capability["resolved_directory"] == row.LogDirectory
 	for _, kind := range []string{"slow_sql", "deadlock", "lock_wait"} {
 		var count int64
-		s.db.Model(&model.DatabaseLogEvent{}).Where("database_id=? AND type=? AND event_time>=?", id, kind, time.Now().Add(-24*time.Hour)).Count(&count)
+		if err := s.db.Model(&model.DatabaseLogEvent{}).Where("database_id=? AND type=? AND event_time>=?", id, kind, time.Now().Add(-24*time.Hour)).Count(&count).Error; err != nil {
+			result.Checks = append(result.Checks, opsprobe.Check{Code: "log:" + kind, Name: "历史日志统计", Status: "UNKNOWN", Error: err.Error()})
+			continue
+		}
 		status := "NORMAL"
 		if count > 0 {
 			status = "WARNING"
@@ -432,7 +438,11 @@ func (s *OperationsService) appendLogInspectionChecks(id uint, result *opsprobe.
 		if kind == "deadlock" && count > 0 {
 			status = "CRITICAL"
 		}
-		result.Checks = append(result.Checks, opsprobe.Check{Code: "log:" + kind, Name: map[string]string{"slow_sql": "近 24 小时已采集慢 SQL 日志", "deadlock": "近 24 小时已采集死锁日志", "lock_wait": "近 24 小时已采集锁等待日志"}[kind], Status: status, Value: fmt.Sprintf("%d 条", count), Evidence: fmt.Sprintf("日志源 %s；最近同步 %s；仅统计已采集记录，包含不同协议阶段", row.LogDirectory, row.LastLogSyncAt.Format(time.RFC3339))})
+		message := ""
+		if kind == "lock_wait" && (!sourceMatches || capability["log_lock_waits"] != "on") {
+			status, message = "UNKNOWN", "最近配置检测未确认 log_lock_waits=on，无法据此判断历史上是否发生过锁等待；请结合当前锁快照核实"
+		}
+		result.Checks = append(result.Checks, opsprobe.Check{Code: "log:" + kind, Name: map[string]string{"slow_sql": "近 24 小时已采集慢 SQL 日志", "deadlock": "近 24 小时已采集死锁日志", "lock_wait": "近 24 小时已采集锁等待日志"}[kind], Status: status, Value: fmt.Sprintf("%d 条", count), Evidence: fmt.Sprintf("日志源 %s；最近同步 %s；仅统计已采集记录，包含不同协议阶段", row.LogDirectory, row.LastLogSyncAt.Format(time.RFC3339)), Error: message})
 	}
 }
 func NextInspectionTime(now time.Time, daily, zone string) (time.Time, error) {

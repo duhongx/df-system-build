@@ -121,7 +121,9 @@ func (s *OperationsService) HostHistory(ctx context.Context, id uint, hours int)
 	step := max(30, (hours*3600+599)/600)
 	step = ((step + 29) / 30) * 30
 	var samples []model.HostMetricSample
-	err := s.db.WithContext(ctx).Raw(`SELECT * FROM (SELECT DISTINCT ON (floor(extract(epoch FROM collected_at)/?)) * FROM host_metric_samples WHERE server_id=? AND collected_at>=? ORDER BY floor(extract(epoch FROM collected_at)/?),collected_at DESC,id DESC) s ORDER BY collected_at ASC`, step, id, time.Now().Add(-time.Duration(hours)*time.Hour), step).Scan(&samples).Error
+	// Compute the bucket once: PostgreSQL treats separate bind parameters as
+	// different expressions even when they hold the same interval value.
+	err := s.db.WithContext(ctx).Raw(`SELECT * FROM (SELECT DISTINCT ON (bucket) id,server_id,collected_at,metrics_json FROM (SELECT *,floor(extract(epoch FROM collected_at)/?) AS bucket FROM host_metric_samples WHERE server_id=? AND collected_at>=?) raw ORDER BY bucket,collected_at DESC,id DESC) s ORDER BY collected_at ASC`, step, id, time.Now().Add(-time.Duration(hours)*time.Hour)).Scan(&samples).Error
 	if err != nil {
 		return nil, step, err
 	}

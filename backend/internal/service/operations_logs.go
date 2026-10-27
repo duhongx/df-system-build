@@ -177,7 +177,7 @@ func (s *OperationsService) syncDatabaseLogs(ctx context.Context, row model.Oper
 		if parseErr != nil {
 			cursor.LastError = parseErr.Error()
 		}
-		err = s.db.Transaction(func(tx *gorm.DB) error {
+		err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			var current model.OperationsDatabase
 			if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, row.ID).Error; e != nil {
 				return e
@@ -256,6 +256,6 @@ func (s *OperationsService) ListEvents(ctx context.Context, id uint, page, size 
 		return nil, 0, err
 	}
 	var rows []model.DatabaseLogEvent
-	err := q.Select("id,database_id,type,event_time,duration_ms,phase,db_name,username,pid,client,application,sql_state,left(sql,4000) AS sql,left(message,2000) AS message,source_path,source_offset,fingerprint,created_at").Order("event_time DESC,id DESC").Offset((page - 1) * size).Limit(size).Find(&rows).Error
+	err := q.Select("id,database_id,type,event_time,duration_ms,phase,db_name,username,p_id,client,application,sql_state,left(sql,4000) AS sql,left(message,2000) AS message,source_path,source_offset,fingerprint,created_at").Order("event_time DESC,id DESC").Offset((page - 1) * size).Limit(size).Find(&rows).Error
 	return rows, total, err
 }

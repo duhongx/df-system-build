@@ -180,6 +180,13 @@ func TestOperationsLogIngestionResumesRotatesAndDeduplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(1)
+	events, total, err := svc.ListEvents(ctx, row.ID, 1, 30, OperationsEventFilter{Type: "slow_sql", Keyword: "第一条", MinDuration: 5000})
+	if err != nil || total != 1 || len(events) != 1 {
+		t.Fatalf("event listing failed: total=%d rows=%d err=%v", total, len(events), err)
+	}
+	if events[0].PID != 4321 || events[0].SQL != "SELECT '第一条,包含\n换行'" || events[0].Raw != "" {
+		t.Fatalf("event projection lost fields or exposed raw data: %+v", events[0])
+	}
 	if err := svc.syncDatabaseLogs(ctx, row); err != nil {
 		t.Fatal(err)
 	}
@@ -421,4 +428,48 @@ func TestOperationsScheduleFailureIsolationAndIdempotency(t *testing.T) {
 	if count != 1 || bad.LastError == "" || good.LastError != "" || !bad.NextRunAt.After(time.Now()) {
 		t.Fatalf("schedule: count=%d bad=%+v good=%+v", count, bad, good)
 	}
+}
+
+func TestOperationsHostHistoryUsesLastPointPerBucket(t *testing.T) {
+	db := operationsTestDB(t)
+	svc := NewOperationsService(db, t.TempDir())
+	server := model.Server{Host: "192.0.2.9", Port: 22, Username: "fixture", AuthType: "password"}
+	if err := db.Create(&server).Error; err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Truncate(30 * time.Second).Add(-5 * time.Minute)
+	for i, offset := range []time.Duration{time.Second, 10 * time.Second, 60 * time.Second} {
+		sample := model.HostMetricSample{ServerID: server.ID, CollectedAt: base.Add(offset), MetricsJSON: mustJSON(opsprobe.HostMetrics{CPUUsagePercent: float64(i + 1)})}
+		if err := db.Create(&sample).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	points, step, err := svc.HostHistory(context.Background(), server.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if step != 30 || len(points) != 2 || points[0].CPUUsagePercent != 2 || points[1].CPUUsagePercent != 3 || !points[0].CollectedAt.Before(points[1].CollectedAt) {
+		t.Fatalf("wrong buckets step=%d points=%+v", step, points)
+	}
+}
+
+func TestOperationsMissingLockLoggingIsUnknown(t *testing.T) {
+	db := operationsTestDB(t)
+	svc := NewOperationsService(db, t.TempDir())
+	now := time.Now()
+	row := model.OperationsDatabase{Name: "coverage", Host: "192.0.2.8", Port: 5432, Database: "fixture", Username: "fixture", LogEnabled: true, LogDirectory: "/var/log/postgresql", LastLogSyncAt: &now, LogCapability: mustJSON(map[string]string{"source_identity": "192.0.2.8:5432/fixture@0", "resolved_directory": "/var/log/postgresql", "log_lock_waits": "off"})}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	result := opsprobe.JobResult{}
+	svc.appendLogInspectionChecks(row.ID, &result)
+	for _, c := range result.Checks {
+		if c.Code == "log:lock_wait" {
+			if c.Status != "UNKNOWN" || c.Error == "" {
+				t.Fatalf("missing lock logging represented as healthy: %+v", c)
+			}
+			return
+		}
+	}
+	t.Fatal("missing lock log capability check")
 }

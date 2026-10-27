@@ -188,6 +188,11 @@ func (s *OperationsService) DetectLogs(ctx context.Context, id uint) (map[string
 	if strings.Contains(settings["log_destination"], "csvlog") {
 		settings["format"] = "csv"
 	}
+	settings["source_identity"] = fmt.Sprintf("%s:%d/%s@%d", row.Host, row.Port, row.Database, row.ServerID)
+	settings["detected_at"] = time.Now().Format(time.RFC3339)
+	if err := s.db.Model(&model.OperationsDatabase{}).Where("id=? AND revision=?", id, row.Revision).Update("log_capability", mustJSON(settings)).Error; err != nil {
+		return settings, err
+	}
 	return settings, nil
 }
 func serverEndpoint(server model.Server) string {
