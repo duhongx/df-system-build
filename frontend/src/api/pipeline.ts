@@ -80,7 +80,7 @@ export function getStageLogs(pipelineId: number, stageId: number) {
 }
 
 export function getBuildQueue() {
-  return request.get<any, { running: Pipeline[]; pending: Pipeline[] }>('/build-queue')
+  return request.get<any, { running: Pipeline[]; pending: Pipeline[] }>('/build-queue', { silentError: true })
 }
 
 export function cancelQueued(id: number) {

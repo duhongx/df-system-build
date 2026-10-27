@@ -216,24 +216,10 @@ func validateSQLViewTaskSource(tx *gorm.DB, task model.SQLViewDependencyTask, ph
 	if task.SourceFileID == 0 {
 		return nil
 	}
-	// Reuse the platform transaction's connection; do not request a second
-	// connection while holding file/task locks (a pool may have size one).
-	var settings []model.Settings
-	if err := tx.Where("key IN ?", []string{"postgresql_host", "postgresql_port", "postgresql_database"}).Find(&settings).Error; err != nil {
+	target, err := readReleaseSQLTarget(tx)
+	if err != nil {
 		return err
 	}
-	cfg := PostgreSQLConfig{}
-	for _, setting := range settings {
-		switch setting.Key {
-		case "postgresql_host":
-			cfg.Host = setting.Value
-		case "postgresql_port":
-			cfg.Port = setting.Value
-		case "postgresql_database":
-			cfg.Database = setting.Value
-		}
-	}
-	target := releaseSQLTarget(cfg)
 	if target == "" || target != task.DatabaseTarget {
 		return fmt.Errorf("关联任务属于其他数据库，不能在当前连接执行或回写")
 	}

@@ -1,7 +1,10 @@
 package repository
 
 import (
+	"df-build-server/internal/model"
 	"df-build-server/pkg/logger"
+
+	"gorm.io/gorm"
 )
 
 // Migration represents a versioned database migration
@@ -9,6 +12,7 @@ type Migration struct {
 	Version     int
 	Description string
 	SQL         string
+	Apply       func(*gorm.DB) error
 }
 
 // migrations is the ordered list of all schema migrations
@@ -80,6 +84,25 @@ WHERE app_name = 'web-main';
 `,
 	},
 	{Version: 6, Description: "Adopt existing frontend application directories", SQL: `UPDATE applications SET adopt_existing_directory = true WHERE app_type = 'vue' AND vue_role = 'sub';`},
+	{Version: 7, Description: "Repair legacy frontend registrations seeded after migration 6", Apply: repairSeededFrontendAdoption},
+	{Version: 8, Description: "Archive retired container build configurations", Apply: archiveLegacyDockerBuildConfigs},
+}
+
+func repairSeededFrontendAdoption(tx *gorm.DB) error {
+	for _, app := range seededApplications() {
+		if app.VueRole != "sub" {
+			continue
+		}
+		// v6 runs before SeedCoreData. Repair only untouched default imports;
+		// edited registrations, new custom apps and explicit opt-outs are retained.
+		if err := tx.Model(&model.Application{}).
+			Where("app_name = ? AND app_type = ? AND vue_role = ? AND app_code = ? AND artifact_name = ? AND git_repo = ?", app.AppName, app.AppType, app.VueRole, app.AppCode, app.ArtifactName, app.GitRepo).
+			Where("enabled = ? AND adopt_existing_directory = ? AND created_at = updated_at", true, false).
+			UpdateColumn("adopt_existing_directory", true).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RunMigrations executes pending migrations based on the current schema version
@@ -94,6 +117,22 @@ func RunMigrations() {
 	// Run pending migrations
 	for _, m := range migrations {
 		if m.Version <= currentVersion {
+			continue
+		}
+		if m.Apply != nil {
+			// The repair and its marker commit together. A failed repair must be
+			// retried on the next startup, not recorded as already completed.
+			err := DB.Transaction(func(tx *gorm.DB) error {
+				if err := m.Apply(tx); err != nil {
+					return err
+				}
+				return tx.Exec("INSERT INTO schema_migrations (version, description) VALUES (?, ?)", m.Version, m.Description).Error
+			})
+			if err != nil {
+				logger.Log.Errorf("Migration v%d (%s) failed: %v", m.Version, m.Description, err)
+				return
+			}
+			logger.Log.Infof("Migration v%d applied: %s", m.Version, m.Description)
 			continue
 		}
 		if m.SQL != "" {

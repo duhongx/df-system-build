@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"df-build-server/internal/frontend"
@@ -144,7 +145,13 @@ func validateFrontendRegistrations(pCtx *types.PipelineContext, artifacts []mode
 			return fmt.Errorf("整包公共资源必须绑定 web-cdn")
 		}
 	}
+	codes := make([]string, 0, len(plan.children))
 	for code := range plan.children {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	var unconfirmed []string
+	for _, code := range codes {
 		app := byCode[code]
 		if app.ID == 0 || !app.Enabled {
 			return fmt.Errorf("整包子应用 %s 未登记或已停用", code)
@@ -152,27 +159,35 @@ func validateFrontendRegistrations(pCtx *types.PipelineContext, artifacts []mode
 		if declared, ok := plan.declared[code]; ok && declared.AppName != app.AppName {
 			return fmt.Errorf("整包区域 %s 的应用名称与登记不一致", code)
 		}
-		if !app.AdoptExistingDirectory {
-			if _, err := os.Stat(filepath.Join(baselineDir, "apps", code)); err == nil {
-				var published int64
-				if err := repository.DB.Model(&model.Pipeline{}).Where("application_id = ? AND deployment_progress = ?", app.ID, "completed").Count(&published).Error; err != nil {
-					return err
-				}
-				if published == 0 {
-					if err := repository.DB.Model(&model.ArtifactDeployRecord{}).Where("app_id = ? AND deploy_status = ?", app.ID, "success").Count(&published).Error; err != nil {
-						return err
-					}
-				}
-				if published == 0 {
-					return fmt.Errorf("apps/%s 已存在但不属于本应用的已发布目录；请核对后明确选择接管已有目录", code)
-				}
-			} else if !os.IsNotExist(err) {
-				return err
-			}
+		confirmed, err := confirmFrontendDirectory(pCtx, baselineDir, app)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			unconfirmed = append(unconfirmed, fmt.Sprintf("apps/%s（%s）", code, app.AppName))
 		}
 	}
-	for i := range plan.regions {
-		region := &plan.regions[i]
+	if len(unconfirmed) > 0 {
+		return fmt.Errorf("现有目录尚未确认发布归属: %s；请在应用管理核对对应应用并勾选“接管已核对的线上同编号目录”后重新提交；尚未组装或构建镜像", strings.Join(unconfirmed, "、"))
+	}
+	// Assembly creates the content inventories later. Fix the exact identities
+	// now, then have mergeRegion attach them to those inventories by region path.
+	var regions []frontend.Region
+	if plan.mainRoot != "" {
+		role := "main"
+		if plan.standalone {
+			role = "standalone"
+		}
+		regions = append(regions, frontend.Region{Path: ".", Role: role})
+	}
+	for _, code := range codes {
+		regions = append(regions, frontend.Region{Path: "apps/" + code, Role: "sub", AppCode: code})
+	}
+	if plan.cdnRoot != "" {
+		regions = append(regions, frontend.Region{Path: "apps/cdn", Role: "cdn"})
+	}
+	plan.bindings = make(map[string]frontend.Region, len(regions))
+	for _, region := range regions {
 		name := pCtx.AppName
 		if region.Role == "main" && !plan.standalone {
 			name = "web-main"
@@ -185,11 +200,12 @@ func validateFrontendRegistrations(pCtx *types.PipelineContext, artifacts []mode
 			name = "web-cdn"
 		}
 		app := byName[name]
-		if app.ID == 0 || !app.Enabled {
+		if app.ID == 0 || !app.Enabled || app.VueRole != region.Role {
 			return fmt.Errorf("区域 %s 未登记或已停用", region.Path)
 		}
 		region.AppName = name
 		region.AppID = app.ID
+		plan.bindings[region.Path] = region
 	}
 	data, err := json.Marshal(artifacts)
 	if err != nil {
@@ -197,6 +213,65 @@ func validateFrontendRegistrations(pCtx *types.PipelineContext, artifacts []mode
 	}
 	pCtx.Pipeline.FrontendArtifactsJSON = string(data)
 	return nil
+}
+
+// Missing publication history is not evidence of a different owner. Seeded
+// legacy applications carry an explicit adoption marker; a matching build
+// manifest can also identify a previously published directory. Unknown custom
+// directories still require adoption rather than being claimed by their name.
+func confirmFrontendDirectory(pCtx *types.PipelineContext, baselineDir string, app model.Application) (bool, error) {
+	root := filepath.Join(baselineDir, "apps", app.AppCode)
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("apps/%s 不是普通目录，停止更新", app.AppCode)
+	}
+	if err := frontend.CheckIdentity(root, app.AppCode); err != nil {
+		return false, fmt.Errorf("线上目录 apps/%s 身份校验失败: %w", app.AppCode, err)
+	}
+	identified := false
+	if _, err := os.Lstat(filepath.Join(root, ".df-build.json")); err == nil {
+		if err := frontend.ValidateBuildManifest(root, app.AppName, "sub", app.AppCode); err != nil {
+			return false, fmt.Errorf("线上目录 apps/%s 构建清单校验失败: %w", app.AppCode, err)
+		}
+		identified = true
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	// A legacy build does not contain .df-build.json or a platform publication
+	// record. Its original app name/code/repository binding AND the live package's
+	// explicit xiTongId must agree. A missing xiTongId is not positive evidence.
+	// Do not change the persisted adoption preference when recognizing ownership.
+	if !identified && repository.IsLegacyFrontendRegistration(app) {
+		data, err := os.ReadFile(filepath.Join(root, "config.json"))
+		if err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+		var config struct {
+			AppCode string `json:"xiTongId"`
+		}
+		identified = err == nil && json.Unmarshal(data, &config) == nil && config.AppCode == app.AppCode
+	}
+	if app.AdoptExistingDirectory || identified {
+		webLogger(pCtx).printf("已核对线上子目录 apps/%s；应用=%s；登记接管=%t；目录身份已识别=%t", app.AppCode, app.AppName, app.AdoptExistingDirectory, identified)
+		return true, nil
+	}
+	var published int64
+	if err := repository.DB.Model(&model.Pipeline{}).Where("application_id = ? AND k8s_namespace = ? AND deployment_progress = ?", app.ID, pCtx.K8sNamespace, "completed").Count(&published).Error; err != nil {
+		return false, err
+	}
+	if published == 0 {
+		if err := repository.DB.Model(&model.ArtifactDeployRecord{}).
+			Where("app_id = ? AND namespace = ? AND deployment_name = ? AND app_code = ? AND deploy_status = ?", app.ID, pCtx.K8sNamespace, "web-main", app.AppCode, "success").Count(&published).Error; err != nil {
+			return false, err
+		}
+	}
+	return published > 0, nil
 }
 
 func InspectFrontendArtifact(zip string, app model.Application) ([]frontend.Region, error) {

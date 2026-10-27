@@ -257,6 +257,9 @@ func TestReleaseSQLManualSkipAndRecovery(t *testing.T) {
 
 func TestReleaseSQLServerZipImportIsAtomic(t *testing.T) {
 	s := releaseSQLTestService(t)
+	if err := s.settingsRepo.Set("customer_env", "本地"); err != nil {
+		t.Fatal(err)
+	}
 	dir, err := os.MkdirTemp("/tmp", "sql-import-")
 	if err != nil {
 		t.Fatal(err)

@@ -86,16 +86,16 @@ func TestSQLExecutionAuditFixes(t *testing.T) {
 		return task
 	}
 
-	t.Run("transaction_upload_allowed_execution_rejected", func(t *testing.T) {
+	t.Run("complete_transaction_executes_incomplete_transaction_rejected", func(t *testing.T) {
 		uploaded, _, err := s.ParseSQL(ParseSQLRequest{FileName: "FIX__1__sql_release.sql", Content: "BEGIN; SELECT 1; COMMIT;"})
-		if err != nil || !strings.Contains(uploaded.ImportMessage, "事务") {
+		if err != nil || uploaded.ImportMessage != "" {
 			t.Fatalf("transaction upload blocked: %+v %v", uploaded, err)
 		}
-		if _, _, err := s.ExecuteSQLFile(ctx, uploaded.ID, "test"); err == nil {
-			t.Fatal("transaction executed")
+		if result, _, err := s.ExecuteSQLFile(ctx, uploaded.ID, "test"); err != nil || result.ExecuteStatus != "SUCCESS" {
+			t.Fatalf("complete transaction failed: %+v %v", result, err)
 		}
 
-		f := save(t, "FIX__1__sql_release.sql", "SELECT 1")
+		f := save(t, "FIX__101__sql_release.sql", "SELECT 1")
 		exec(t, "UPDATE sql_change_statements SET sql_content='BEGIN' WHERE file_id="+fmtUint(f.ID))
 		if _, _, err := s.ExecuteSQLFile(ctx, f.ID, "test"); err == nil {
 			t.Fatal("legacy transaction allowed")

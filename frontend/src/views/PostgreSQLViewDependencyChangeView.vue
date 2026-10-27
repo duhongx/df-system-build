@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createViewTaskPoller, viewStageProgress, viewTaskIsBusy } from '../utils/sql-view-progress'
+import { createViewTaskPoller, viewStageProgress, viewTaskIsBusy, viewTaskFailureDetails } from '../utils/sql-view-progress'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   analyzeSQLViewDependencyTask,
   createSQLViewDependencyTask,
   executeSQLViewDependencyTask,
   getSQLViewDependencyTask,
+  listSQLViewDependencyTasks,
   restoreSQLViewDependencyItem,
   restoreSQLViewDependencyTask,
   verifySQLViewDependencyItem,
@@ -25,8 +26,17 @@ const route = useRoute()
 const router = useRouter()
 const pollError = ref('')
 const taskLoading = ref(false)
+const routeTaskError = ref('')
+const historyVisible = ref(false)
+const historyLoading = ref(false)
+const historyError = ref('')
+const historyTasks = ref<SQLViewDependencyTask[]>([])
+const historyPage = ref(1), historySize = ref(20), historyTotal = ref(0)
+const historyLoaded = ref(false)
+const lookupTaskID = ref('')
 let disposed = false
 let routeLoadGeneration = 0
+let historyLoadGeneration = 0
 const analyzing = ref(false)
 const executing = ref(false)
 const restoring = ref(false)
@@ -40,6 +50,35 @@ const dependencyItems = ref<SQLViewDependencyItem[]>([])
 const executionSteps = ref<SQLViewDependencyStep[]>([])
 const lastTaskSQL = ref('')
 const plannedAlterBatches = ref(0)
+const operationError = ref('')
+const failedOperation = ref('')
+const failureDetails = computed(() => viewTaskFailureDetails(currentTask.value, executionSteps.value, dependencyChanges.value, operationError.value, failedOperation.value))
+watch(() => currentTask.value?.id, () => { operationError.value = ''; failedOperation.value = '' })
+
+async function recordOperationFailure(error: unknown, action: string) {
+  const id = currentTask.value?.id
+  operationError.value = error instanceof Error ? error.message : String(error || `${action}失败`)
+  failedOperation.value = action
+  ElMessage.error(`${action}请求异常，完整信息见页面“错误详情”`)
+  if (id) await refreshCurrentTask()
+}
+
+async function copyFailureDetails() {
+  const text = failureDetails.value?.report
+  if (!text) return
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text)
+    else {
+      const input = document.createElement('textarea')
+      input.value = text
+      input.style.position = 'fixed'; input.style.opacity = '0'
+      document.body.appendChild(input)
+      try { input.select(); if (!document.execCommand('copy')) throw new Error('复制失败') }
+      finally { input.remove() }
+    }
+    ElMessage.success('完整错误详情已复制')
+  } catch { ElMessage.warning('无法自动复制，请选中错误详情中的文本复制') }
+}
 
 const form = ref({
   alterSql: '',
@@ -52,7 +91,8 @@ const dependencyCount = computed(() => dependencyItems.value.length)
 const changeCount = computed(() => dependencyChanges.value.length)
 const materializedCount = computed(() => dependencyItems.value.filter(item => item.objectKind === 'm').length)
 const taskBusy = computed(() => analyzing.value || executing.value || restoring.value || backupActionLoading.value || taskLoading.value || viewTaskIsBusy(currentTask.value?.status))
-const sameTaskBlocked = computed(() => currentTask.value?.sourceSyncStatus==='CANCELED'||lastTaskSQL.value === form.value.alterSql.trim() && (taskUncertain.value || currentTask.value?.status === 'SUCCESS' || executionSteps.value.some(s => s.stepName === 'ALTER_TABLE' && ['SUCCESS', 'UNKNOWN', 'RUNNING'].includes(s.status))))
+const routeTaskUnavailable = computed(() => Boolean(route.query.taskId && String(currentTask.value?.id || '') !== String(route.query.taskId)))
+const sameTaskBlocked = computed(() => routeTaskUnavailable.value||currentTask.value?.sourceSyncStatus==='CANCELED'||lastTaskSQL.value === form.value.alterSql.trim() && (taskUncertain.value || currentTask.value?.status === 'SUCCESS' || executionSteps.value.some(s => s.stepName === 'ALTER_TABLE' && ['SUCCESS', 'UNKNOWN', 'RUNNING'].includes(s.status))))
 const taskUncertain = computed(() => currentTask.value?.outcomeUncertain || currentTask.value?.status === 'UNKNOWN')
 const canRestore = computed(() => Boolean(
   currentTask.value?.id &&
@@ -122,7 +162,7 @@ watch([() => currentTask.value?.id, () => taskBusy.value], ([id, busy]) => {
   if (!disposed && id && busy) poller.start(id)
   else poller.stop()
 }, { flush: 'sync' })
-onBeforeUnmount(() => { disposed = true; poller.stop() })
+onBeforeUnmount(() => { disposed = true; historyLoadGeneration++; poller.stop() })
 function notifyTaskResult(data: SQLViewDependencyTaskResult) {
   if (data.task.status === 'SUCCESS') ElMessage.success(data.task.executeMessage || '执行完成')
   else if (data.task.status === 'RESTORED') ElMessage.warning(data.task.executeMessage || '视图已恢复')
@@ -130,7 +170,9 @@ function notifyTaskResult(data: SQLViewDependencyTaskResult) {
 }
 
 const executionStages = computed(() => {
-  const backupStatus: ProcessStageStatus = hasAnalysisResult.value ? 'success' : 'pending'
+  const backupStatus: ProcessStageStatus = currentTask.value?.analyzedAt ? 'success'
+    : currentTask.value?.status === 'ANALYZING' || analyzing.value ? 'running'
+      : currentTask.value?.status === 'FAILED' ? 'failed' : 'pending'
   const noViews = Boolean(currentTask.value?.analyzedAt) && dependencyCount.value === 0
   const drop = stageFromStepNames(['DROP_DEPENDENCY'])
   const alter = stageFromStepNames(['ALTER_TABLE'])
@@ -142,7 +184,7 @@ const executionStages = computed(() => {
       order: 1,
       title: '备份视图',
       status: backupStatus,
-      summary: noViews ? '分析完成，没有依赖视图需要备份' : backupStatus === 'success' ? `已保存 ${dependencyItems.value.length} 个依赖对象定义、权限、注释和索引信息` : '分析后生成依赖对象备份',
+      summary: noViews ? '分析完成，没有依赖视图需要备份' : backupStatus === 'success' ? `已保存 ${dependencyItems.value.length} 个依赖对象定义、权限、注释和索引信息` : backupStatus === 'running' ? '正在分析并保存依赖视图备份' : backupStatus === 'failed' ? currentTask.value?.executeMessage || '分析失败，尚未完成依赖视图备份' : '分析后生成依赖对象备份',
       error: '',
     },
     {
@@ -305,9 +347,8 @@ async function handleRestoreBackupItem(item?: SQLViewDependencyItem) {
     ElMessage.success(result.task.executeMessage || '当前视图恢复完成')
   } catch (err) {
     if (err !== 'cancel') {
-      await refreshCurrentTask()
+      await recordOperationFailure(err, '恢复依赖对象')
       syncSelectedBackupItem()
-      ElMessage.error(err instanceof Error ? err.message : '当前视图恢复失败')
     }
   } finally {
     backupActionLoading.value = false
@@ -327,9 +368,8 @@ async function handleVerifyBackupItem(item?: SQLViewDependencyItem) {
     syncSelectedBackupItem()
     ElMessage.success(result.task.executeMessage || '当前视图校验完成')
   } catch (err) {
-    await refreshCurrentTask()
+    await recordOperationFailure(err, '校验依赖对象')
     syncSelectedBackupItem()
-    ElMessage.error(err instanceof Error ? err.message : '当前视图校验失败')
   } finally {
     backupActionLoading.value = false
   }
@@ -358,6 +398,10 @@ async function loadSQLExecutionSettings() {
 }
 
 async function ensureTaskForCurrentSQL() {
+  if (routeTaskUnavailable.value) {
+    ElMessage.warning('关联任务尚未加载成功，请重试加载或从任务记录打开，避免重复创建')
+    return null
+  }
   if(currentTask.value?.sourceFileId&&form.value.alterSql.trim()!==lastTaskSQL.value){ElMessage.warning('关联源 SQL 不可在此修改，请处理原任务');return null}
   const sql = form.value.alterSql.trim()
   if (!sql) {
@@ -384,6 +428,7 @@ async function ensureTaskForCurrentSQL() {
 }
 
 async function handleAnalyze() {
+  operationError.value = ''; failedOperation.value = ''
   analyzing.value = true
   try {
     const task = await ensureTaskForCurrentSQL()
@@ -392,13 +437,14 @@ async function handleAnalyze() {
     applyTaskResult(data)
     ElMessage.success(`分析完成，字段变更 ${dependencyChanges.value.length} 条，依赖对象 ${dependencyItems.value.length} 个`)
   } catch (err) {
-    ElMessage.error(err instanceof Error ? err.message : '分析失败')
+    await recordOperationFailure(err, '依赖分析')
   } finally {
     analyzing.value = false
   }
 }
 
 async function handleExecute() {
+  operationError.value = ''; failedOperation.value = ''
   executing.value = true
   try {
     let task = await ensureTaskForCurrentSQL()
@@ -421,8 +467,7 @@ async function handleExecute() {
     else notifyTaskResult(result)
   } catch (err) {
     if (err !== 'cancel') {
-      await refreshCurrentTask()
-      ElMessage.error(err instanceof Error ? err.message : '执行失败')
+      await recordOperationFailure(err, '执行变更')
     }
   } finally {
     executing.value = false
@@ -443,8 +488,7 @@ async function handleRestore() {
     ElMessage.success(result.task.executeMessage || '恢复完成')
   } catch (err) {
     if (err !== 'cancel') {
-      await refreshCurrentTask()
-      ElMessage.error(err instanceof Error ? err.message : '恢复失败')
+      await recordOperationFailure(err, '恢复视图')
     }
   } finally {
     restoring.value = false
@@ -456,20 +500,58 @@ async function refreshCurrentTask() {
   await poller.start(currentTask.value.id)
 }
 
+async function loadTaskHistory(autoOpen = false) {
+  const generation = ++historyLoadGeneration
+  historyLoading.value = true
+  historyError.value = ''
+  try {
+    const result = await listSQLViewDependencyTasks(historyPage.value, historySize.value)
+    if (disposed || generation !== historyLoadGeneration) return
+    historyTasks.value = result.list || []
+    historyTotal.value = result.total
+    historyLoaded.value = true
+    if (autoOpen && !route.query.taskId && !currentTask.value && !form.value.alterSql.trim() && result.total > 0) historyVisible.value = true
+  } catch (error) {
+    if (!disposed && generation === historyLoadGeneration) historyError.value = error instanceof Error ? error.message : '任务记录读取失败'
+  } finally {
+    if (generation === historyLoadGeneration) historyLoading.value = false
+  }
+}
+
+async function openTaskHistory() {
+  historyVisible.value = true
+  await loadTaskHistory()
+}
+
+async function openSavedTask(id: number) {
+  if (taskBusy.value || !Number.isSafeInteger(id) || id <= 0) return
+  const sameRoute = String(route.query.taskId) === String(id)
+  await router.push({ name: 'PostgreSQLViewDependencyChange', query: { ...route.query, taskId: String(id) } })
+  historyVisible.value = false
+  if (sameRoute) {
+    currentTask.value = null
+    await loadRouteTask()
+  }
+}
+
 async function loadRouteTask() {
   const id = Number(route.query.taskId)
   if (id === currentTask.value?.id) return
   const generation = ++routeLoadGeneration
+  routeTaskError.value = ''
   currentTask.value = null
+  form.value.alterSql = ''
   dependencyChanges.value = []
   dependencyItems.value = []
   executionSteps.value = []
   plannedAlterBatches.value = 0
   lastTaskSQL.value = ''
   poller.stop()
+  const history = loadTaskHistory(!route.query.taskId)
   if (!Number.isSafeInteger(id) || id <= 0) {
-    form.value.alterSql = ''
+    if (route.query.taskId) routeTaskError.value = '关联任务编号无效，请从任务记录重新打开'
     taskLoading.value = false
+    await history
     return
   }
   taskLoading.value = true
@@ -483,10 +565,11 @@ async function loadRouteTask() {
     lastTaskSQL.value = data.task.alterSql.trim()
     applyTaskResult(data)
   } catch (error) {
-    if (!disposed && generation === routeLoadGeneration) ElMessage.error(error instanceof Error ? error.message : '加载任务失败')
+    if (!disposed && generation === routeLoadGeneration) routeTaskError.value = `关联任务 #${id} 加载失败：${error instanceof Error ? error.message : '请求失败'}。请重试加载或核对任务记录，原 SQL 关联未改变。`
   } finally {
     if (generation === routeLoadGeneration) taskLoading.value = false
   }
+  await history
 }
 watch(() => route.query.taskId, loadRouteTask)
 onMounted(async () => {
@@ -505,6 +588,7 @@ onMounted(async () => {
           <h3>变更 SQL</h3>
         </div>
         <div class="actions">
+          <el-button @click="openTaskHistory">任务记录<template v-if="historyLoaded">（{{historyTotal}}）</template></el-button>
           <el-button :disabled="taskBusy || sameTaskBlocked" :loading="analyzing" @click="handleAnalyze">分析</el-button>
           <el-button type="primary" :disabled="taskBusy || sameTaskBlocked" :loading="executing" @click="handleExecute">执行</el-button>
           <el-button :type="canRestore ? 'warning' : 'info'" :disabled="!canRestore || taskBusy" :loading="restoring" @click="handleRestore">恢复</el-button>
@@ -522,8 +606,17 @@ onMounted(async () => {
     </section>
 
     <div v-if="currentTask?.sourceFileId" class="source-task-note">来源：{{currentTask.sourceFileName}} · 任务 #{{currentTask.id}} · {{currentTask.sourceSyncStatus==='SUCCESS'?'已回写源 SQL 成功状态':currentTask.sourceSyncStatus==='CANCELED'?'已撤回，原 SQL 保留失败':'等待字段变更、视图恢复与校验完成后回写源 SQL'}}<el-button link type="primary" @click="router.push({name:'PostgreSQLSQLExecution',query:{fileId:String(currentTask.sourceFileId)}})">返回原 SQL 文件</el-button><el-button v-if="currentTask.sourceSyncStatus==='WAITING'&&!taskBusy&&!taskUncertain" link type="warning" @click="cancelTransfer">撤回转入</el-button></div>
+    <div v-if="routeTaskError" class="task-load-error"><el-alert :title="routeTaskError" type="error" :closable="false" show-icon /><el-button :loading="taskLoading" @click="loadRouteTask">重试加载</el-button><el-button @click="openTaskHistory">打开任务记录</el-button></div>
+    <el-alert v-if="historyError&&!historyVisible" :title="`任务记录读取失败：${historyError}`" type="warning" :closable="false" />
+    <div v-if="currentTask" class="current-task-note">当前任务 #{{currentTask.id}}<el-tag :type="taskStatusType(currentTask.status)">{{taskStatusText(currentTask.status)}}</el-tag><span v-if="!currentTask.analyzedAt">任务已保存，点击“分析”生成依赖视图备份。</span></div>
+    <p v-if="currentTask?.executeMessage && taskBusy" class="inspection-progress">{{ currentTask.executeMessage }}</p>
     <el-alert v-if="taskUncertain" title="字段变更结果待核实，禁止重放变更。可按备份恢复并校验视图；恢复视图不会确认字段变更结果。" type="warning" :closable="false" />
     <el-alert v-if="pollError" :title="`进度刷新失败：${pollError}，正在重试`" type="warning" :closable="false" />
+    <section v-if="failureDetails" class="failure-card" aria-live="polite">
+      <div class="table-header"><h3>任务 #{{ currentTask?.id || route.query.taskId || '-' }} 错误详情 · {{ failureDetails.phase }}</h3><div><el-button size="small" @click="copyFailureDetails">复制完整错误详情</el-button><el-button size="small" :disabled="!currentTask" @click="refreshCurrentTask">刷新详情</el-button></div></div>
+      <p>{{ failureDetails.outcome }}</p>
+      <pre class="failure-report">{{ failureDetails.report }}</pre>
+    </section>
     <section v-if="hasAnalysisResult" class="process-card">
       <div class="table-header">
         <div>
@@ -642,6 +735,21 @@ onMounted(async () => {
       </el-table>
     </section>
 
+    <el-drawer v-model="historyVisible" title="视图依赖任务记录" size="min(1100px, 96vw)" append-to-body>
+      <div class="task-history-toolbar"><span>打开已有任务可继续分析、执行或查看恢复结果。</span><el-button :loading="historyLoading" @click="loadTaskHistory()">刷新记录</el-button></div>
+      <div class="task-history-toolbar"><el-input v-model="lookupTaskID" placeholder="关联任务编号，例如 8" clearable style="width: 240px" @keyup.enter="openSavedTask(Number(lookupTaskID))"/><el-button :disabled="taskBusy||!Number.isSafeInteger(Number(lookupTaskID))||Number(lookupTaskID)<=0" @click="openSavedTask(Number(lookupTaskID))">按编号打开</el-button></div>
+      <el-alert v-if="historyError" :title="`任务记录读取失败：${historyError}`" type="error" :closable="false" />
+      <div v-loading="historyLoading"><el-table v-if="!historyError||historyTasks.length" :data="historyTasks" row-key="id" stripe max-height="65vh" empty-text="暂无已保存的视图依赖任务">
+        <el-table-column prop="id" label="任务编号" width="100"><template #default="{row}">#{{row.id}}</template></el-table-column>
+        <el-table-column label="状态" width="135"><template #default="{row}"><el-tag :type="taskStatusType(row.status)">{{taskStatusText(row.status)}}</el-tag></template></el-table-column>
+        <el-table-column label="来源文件" min-width="230" show-overflow-tooltip><template #default="{row}">{{row.sourceFileName||'手工创建'}}</template></el-table-column>
+        <el-table-column label="首个目标字段" min-width="230" show-overflow-tooltip><template #default="{row}">{{row.schemaName}}.{{row.tableName}}.{{row.columnName}}</template></el-table-column>
+        <el-table-column prop="executeMessage" label="处理信息" min-width="240" show-overflow-tooltip />
+        <el-table-column label="操作" width="90" fixed="right"><template #default="{row}"><el-button link type="primary" :disabled="taskBusy" @click="openSavedTask(row.id)">打开</el-button></template></el-table-column>
+      </el-table></div>
+      <el-pagination v-model:current-page="historyPage" v-model:page-size="historySize" :page-sizes="[20,50,100]" :total="historyTotal" layout="total,sizes,prev,pager,next" @current-change="loadTaskHistory()" @size-change="historyPage=1;loadTaskHistory()" />
+    </el-drawer>
+
     <el-drawer v-model="backupDrawerVisible" title="视图备份详情" size="58%" append-to-body>
       <div v-if="selectedBackupItem" class="backup-drawer">
         <div class="backup-summary">
@@ -723,6 +831,12 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.failure-card { padding: 16px; border: 1px solid #f3b8b8; border-radius: 8px; background: #fff7f7; }
+.failure-card h3 { margin: 0; color: #b42318; }
+.failure-report { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; font: 13px/1.6 ui-monospace, monospace; color: #8b1c13; user-select: text; }
+.inspection-progress { white-space: pre-wrap; overflow-wrap: anywhere; color: #606266; }
+.current-task-note,.task-history-toolbar,.task-load-error{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;font-size:13px;line-height:1.6}
+.task-history-toolbar{margin-bottom:16px}.task-load-error>.el-alert{flex-basis:100%}
 .source-task-note{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;padding:12px;border:1px solid var(--el-border-color);border-radius:6px;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
 
 .view-dependency-page {

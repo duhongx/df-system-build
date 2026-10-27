@@ -9,6 +9,28 @@ import (
 // Uses per-record check: only inserts if app_name doesn't already exist.
 // Existing records are never overwritten (preserves user modifications).
 func SeedApplications() {
+	inserted := 0
+	definitions := seededApplications()
+	for _, app := range definitions {
+		var existing model.Application
+		if DB.Where("app_name = ?", app.AppName).First(&existing).Error == nil {
+			continue // existing registrations, including an explicit opt-out, stay unchanged
+		}
+		if err := DB.Create(&app).Error; err != nil {
+			logger.Log.Warnf("Seed application %s failed: %v", app.AppName, err)
+			continue
+		}
+		inserted++
+	}
+	if inserted > 0 {
+		logger.Log.Infof("Seeded %d new applications (skipped %d existing)", inserted, len(definitions)-inserted)
+	}
+}
+
+// These registrations import the existing HIS applications, rather than reserve
+// directory names for new applications. Keep their legacy identities in one
+// place so initial seeding and the upgrade repair use exactly the same mapping.
+func seededApplications() []model.Application {
 	// Vue sub-app code mapping
 	zipNameMap := map[string]string{
 		"web-bui":            "00",
@@ -166,14 +188,8 @@ func SeedApplications() {
 		{"web-bui", "ssh://git@192.168.1.206/df-his-frontend/base/df-web-bui.git"},
 	}
 
-	inserted := 0
+	apps := make([]model.Application, 0, len(entries))
 	for _, e := range entries {
-		// Check if already exists
-		var existing model.Application
-		if DB.Where("app_name = ?", e.Name).First(&existing).Error == nil {
-			continue // already exists, skip
-		}
-
 		app := model.Application{
 			AppName: e.Name,
 			GitRepo: e.GitRepo,
@@ -192,6 +208,7 @@ func SeedApplications() {
 			} else if code, ok := zipNameMap[e.Name]; ok {
 				app.VueRole = "sub"
 				app.AppCode = code
+				app.AdoptExistingDirectory = true
 			} else {
 				app.VueRole = "standalone"
 			}
@@ -202,11 +219,20 @@ func SeedApplications() {
 		// Derive artifact name
 		app.ArtifactName = app.DeriveArtifactName()
 
-		DB.Create(&app)
-		inserted++
+		apps = append(apps, app)
 	}
+	return apps
+}
 
-	if inserted > 0 {
-		logger.Log.Infof("Seeded %d new applications (skipped %d existing)", inserted, len(entries)-inserted)
+// IsLegacyFrontendRegistration identifies the imported HIS application by its
+// complete original binding, not merely by an available directory number.
+func IsLegacyFrontendRegistration(app model.Application) bool {
+	for _, legacy := range seededApplications() {
+		if legacy.VueRole == "sub" && app.AppType == legacy.AppType && app.VueRole == legacy.VueRole &&
+			app.AppName == legacy.AppName && app.AppCode == legacy.AppCode &&
+			app.GitRepo == legacy.GitRepo && app.DeriveArtifactName() == legacy.ArtifactName {
+			return true
+		}
 	}
+	return false
 }

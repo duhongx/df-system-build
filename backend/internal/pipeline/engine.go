@@ -195,7 +195,11 @@ func (e *Engine) executeStages(ctx context.Context, p *model.Pipeline, pCtx *typ
 			}
 			pCtx.OnLog(p.ID, 0, fmt.Sprintf("[阶段失败] %s (%s)；耗时=%ds；原因=%s；停止后续步骤", def.Name, def.Code, dur, errMsg), "stderr")
 			if def.Code == "K8S_DEPLOY" {
-				pCtx.OnLog(p.ID, 0, "[线上状态] 部署阶段失败，已提交的 Kubernetes 操作可能仍在执行；本错误不代表线上未改变，请结合提交日志和集群状态确认", "stderr")
+				state := "部署结果尚未确认，请结合提交日志核对 Deployment 的镜像和滚动状态"
+				if result != nil && result.OnlineState != "" {
+					state = result.OnlineState
+				}
+				pCtx.OnLog(p.ID, 0, "[线上状态] "+state, "stderr")
 			}
 			e.markStageStatus(stage, "FAILED", errMsg)
 			e.skipRemaining(stageRecords, i+1)

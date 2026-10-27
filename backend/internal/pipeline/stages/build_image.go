@@ -166,6 +166,11 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 	if err != nil {
 		return fail(err)
 	}
+	// Reject identity/registration conflicts against the untouched live baseline
+	// before copying hundreds of MB into the assembled build directory.
+	if err := validateFrontendRegistrations(pCtx, artifacts, plan, baselineDir); err != nil {
+		return fail(err)
+	}
 	htmlDir := filepath.Join(dockerDir, "html")
 	var required uint64
 	if baseline.Exists {
@@ -199,9 +204,6 @@ func (s *BuildImageStage) buildWebMainImage(ctx context.Context, pCtx *types.Pip
 	}
 	baseline.NewImage, baseline.FinalTag = imageName, imageName
 	baseline.PipelineID = pCtx.PipelineID
-	if err := validateFrontendRegistrations(pCtx, artifacts, plan, baselineDir); err != nil {
-		return fail(err)
-	}
 	// Validate selected entries and every locally referenced script/style against
 	// the assembled site, including explicitly declared shared CDN dependencies.
 	for _, region := range plan.regions {

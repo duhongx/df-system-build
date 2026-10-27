@@ -2,7 +2,19 @@ package model
 
 import "time"
 
+// ReleaseMetadata describes the business release associated with an upload.
+// VersionNo remains the unique upload ID; the same business release can have
+// multiple independent uploads without overwriting their history.
+type ReleaseMetadata struct {
+	AppVersion           string `gorm:"size:128;index" json:"appVersion"`
+	ReleaseTime          string `gorm:"size:128" json:"releaseTime"`
+	ReleaseReadme        string `gorm:"type:text" json:"releaseReadme"`
+	ReleaseManifestJSON  string `gorm:"type:text" json:"releaseManifestJson,omitempty"`
+	ReleaseManifestError string `gorm:"type:text" json:"releaseManifestError,omitempty"`
+}
+
 type ArtifactVersion struct {
+	ReleaseMetadata          `gorm:"embedded"`
 	RemainingDeployableCount int       `gorm:"-" json:"remainingDeployableCount"`
 	ID                       uint      `gorm:"primaryKey" json:"id"`
 	VersionNo                string    `gorm:"uniqueIndex;size:64;not null" json:"versionNo"`

@@ -23,6 +23,7 @@ type webUpdatePlan struct {
 	cdnRoot    string
 	standalone bool
 	regions    []frontend.Region
+	bindings   map[string]frontend.Region // validated identities, fixed before assembly
 	declared   map[string]frontend.Region
 	inputs     []model.FrontendArtifact
 	log        webLog
@@ -419,7 +420,15 @@ func (plan *webUpdatePlan) mergeRegion(source, dest, regionPath, role string, ex
 			}
 		}
 	}
-	plan.regions = append(plan.regions, frontend.Region{Role: role, Path: regionPath, Before: before, Current: current, Retained: retained})
+	region := frontend.Region{Role: role, Path: regionPath, Before: before, Current: current, Retained: retained}
+	if plan.bindings != nil {
+		binding, ok := plan.bindings[regionPath]
+		if !ok || binding.Role != role || binding.AppID == 0 {
+			return fmt.Errorf("区域 %s 缺少已核对的应用登记", regionPath)
+		}
+		region.AppID, region.AppName, region.AppCode = binding.AppID, binding.AppName, binding.AppCode
+	}
+	plan.regions = append(plan.regions, region)
 	return nil
 }
 

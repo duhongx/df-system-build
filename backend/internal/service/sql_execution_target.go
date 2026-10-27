@@ -26,13 +26,25 @@ func releaseSQLTarget(cfg PostgreSQLConfig) string {
 }
 
 func currentReleaseSQLTarget() (string, error) {
+	return readReleaseSQLTarget(repository.DB)
+}
+
+// Read on the caller's transaction connection, including pools of size one.
+func readReleaseSQLTarget(tx *gorm.DB) (string, error) {
+	var settings []model.Settings
+	if err := tx.Where("key IN ?", []string{"postgresql_host", "postgresql_port", "postgresql_database"}).Find(&settings).Error; err != nil {
+		return "", err
+	}
 	cfg := PostgreSQLConfig{}
-	for key, out := range map[string]*string{"postgresql_host": &cfg.Host, "postgresql_port": &cfg.Port, "postgresql_database": &cfg.Database} {
-		value, err := repository.NewSettingsRepo().Read(key, false)
-		if err != nil {
-			return "", err
+	for _, setting := range settings {
+		switch setting.Key {
+		case "postgresql_host":
+			cfg.Host = setting.Value
+		case "postgresql_port":
+			cfg.Port = setting.Value
+		case "postgresql_database":
+			cfg.Database = setting.Value
 		}
-		*out = value
 	}
 	return releaseSQLTarget(cfg), nil
 }

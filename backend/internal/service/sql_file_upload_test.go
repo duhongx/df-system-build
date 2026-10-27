@@ -51,12 +51,12 @@ func TestReleaseSQLUploadAcceptsFilesAndFiltersOnlyAtExecution(t *testing.T) {
 		t.Fatal("filtered file was claimed")
 	}
 	batch, ready, err := s.prepareSQLFileSequence(ids, "op")
-	if err != nil || len(ready) != 1 || len(batch.FilteredFiles) != 6 || ready[0].FileName != input[3].FileName || batch.TotalFiles != 1 {
+	if err != nil || len(ready) != 2 || len(batch.FilteredFiles) != 5 || ready[0].FileName != input[3].FileName || batch.TotalFiles != 2 {
 		t.Fatalf("wrong selection filter: %+v %+v %v", batch, ready, err)
 	}
 	s.runSQLFileSequence(batch, ready, "op", SQLExecuteOptions{})
 	got, done, err := s.GetSQLBatch(batch.ID)
-	if err != nil || got.ExecuteStatus != "SUCCESS" || len(done) != 1 || done[0].ExecuteStatus != "SUCCESS" {
+	if err != nil || got.ExecuteStatus != "SUCCESS" || len(done) != 2 || done[0].ExecuteStatus != "SUCCESS" {
 		t.Fatalf("normal file blocked by invalid files: %+v %+v %v", got, done, err)
 	}
 	var exists bool
@@ -84,7 +84,7 @@ func TestReleaseSQLUploadEmptyAndBadSyntaxRemainManageable(t *testing.T) {
 		{"empty.sql", "", ""},
 		{"V1__1__sql_release.sql", "", "为空"},
 		{"V1__2__sql_release.sql", "SELECT 'broken", "拆分"},
-		{"V1__3__sql_release.sql", "BEGIN; SELECT 1; COMMIT;", "事务"},
+		{"V1__3__sql_release.sql", "BEGIN; SELECT 1;", "事务"},
 	} {
 		file, _, err := s.ParseSQL(ParseSQLRequest{FileName: tc.name, Content: tc.content})
 		if err != nil || file == nil || file.ImportMessage == "" {

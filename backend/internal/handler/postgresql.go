@@ -148,7 +148,7 @@ func (h *PostgreSQLHandler) AnalyzeSQLViewDependencyTask(c *gin.Context) {
 	}
 	task, items, err := h.svc.AnalyzeSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
 	if err != nil {
-		response.Fail(c, 14018, err.Error())
+		response.Fail(c, 14018, service.SQLViewDependencyErrorMessage(err))
 		return
 	}
 	h.respondSQLViewDependencyTask(c, task, items)
@@ -162,7 +162,7 @@ func (h *PostgreSQLHandler) PrecheckSQLViewDependencyTask(c *gin.Context) {
 	}
 	task, items, err := h.svc.PrecheckSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
 	if err != nil {
-		response.Fail(c, 14018, err.Error())
+		response.Fail(c, 14018, service.SQLViewDependencyErrorMessage(err))
 		return
 	}
 	h.respondSQLViewDependencyTask(c, task, items)
@@ -176,7 +176,7 @@ func (h *PostgreSQLHandler) ExecuteSQLViewDependencyTask(c *gin.Context) {
 	}
 	task, items, err := h.svc.StartSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
 	if err != nil {
-		response.Fail(c, 14018, err.Error())
+		response.Fail(c, 14018, service.SQLViewDependencyErrorMessage(err))
 		return
 	}
 	h.respondSQLViewDependencyTask(c, task, items)
@@ -190,7 +190,7 @@ func (h *PostgreSQLHandler) RestoreSQLViewDependencyTask(c *gin.Context) {
 	}
 	task, items, err := h.svc.RestoreSQLViewDependencyTask(c.Request.Context(), uint(id), middleware.GetCurrentUsername(c))
 	if err != nil {
-		response.Fail(c, 14018, err.Error())
+		response.Fail(c, 14018, service.SQLViewDependencyErrorMessage(err))
 		return
 	}
 	h.respondSQLViewDependencyTask(c, task, items)
@@ -209,7 +209,7 @@ func (h *PostgreSQLHandler) RestoreSQLViewDependencyItem(c *gin.Context) {
 	}
 	task, items, err := h.svc.RestoreSQLViewDependencyItem(c.Request.Context(), uint(id), uint(itemID), middleware.GetCurrentUsername(c))
 	if err != nil {
-		response.Fail(c, 14018, err.Error())
+		response.Fail(c, 14018, service.SQLViewDependencyErrorMessage(err))
 		return
 	}
 	h.respondSQLViewDependencyTask(c, task, items)
@@ -228,7 +228,7 @@ func (h *PostgreSQLHandler) VerifySQLViewDependencyItem(c *gin.Context) {
 	}
 	task, items, err := h.svc.VerifySQLViewDependencyItem(c.Request.Context(), uint(id), uint(itemID), middleware.GetCurrentUsername(c))
 	if err != nil {
-		response.Fail(c, 14018, err.Error())
+		response.Fail(c, 14018, service.SQLViewDependencyErrorMessage(err))
 		return
 	}
 	h.respondSQLViewDependencyTask(c, task, items)

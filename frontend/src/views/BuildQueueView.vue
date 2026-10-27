@@ -20,36 +20,47 @@ const selectedBatch = ref<ArtifactDeployBatch | null>(null)
 const selectedRecords = ref<ArtifactDeployRecord[]>([])
 const batchDrawerVisible = ref(false)
 const loading = ref(true)
-let refreshTimer: any = null
+const refreshing = ref(false)
+const queueError = ref(''), batchError = ref('')
+let refreshTimer: ReturnType<typeof setTimeout> | undefined
+let disposed = false
 const imageReadyBatches = computed(() => deployBatches.value)
 const rollingBatch = ref<string | null>(null)
 
 async function load() {
+  if (refreshing.value || disposed) return
+  if (refreshTimer) clearTimeout(refreshTimer)
+  refreshing.value = true
   try {
-    const [queueData, batchData] = await Promise.all([
+    const [queueResult, batchResult] = await Promise.allSettled([
       getBuildQueue(),
-      listArtifactDeployBatches(undefined, true),
+      listArtifactDeployBatches(undefined, true, true),
     ])
-    runningTasks.value = queueData.running || []
-    queuedTasks.value = queueData.pending || []
-    deployBatches.value = batchData.batches || []
-  } catch (e) {
-    runningTasks.value = []
-    queuedTasks.value = []
-    deployBatches.value = []
+    if (disposed) return
+    if (queueResult.status === 'fulfilled') {
+      runningTasks.value = queueResult.value.running || []
+      queuedTasks.value = queueResult.value.pending || []
+      queueError.value = ''
+    } else queueError.value = queueResult.reason instanceof Error ? queueResult.reason.message : '读取构建队列失败'
+    if (batchResult.status === 'fulfilled') {
+      deployBatches.value = batchResult.value.batches || []
+      batchError.value = ''
+    } else batchError.value = batchResult.reason instanceof Error ? batchResult.reason.message : '读取待更新批次失败'
   } finally {
     loading.value = false
+    refreshing.value = false
+    if (!disposed) refreshTimer = setTimeout(load, 5000)
   }
 }
 
 onMounted(async () => {
   loading.value = true
   await load()
-  refreshTimer = setInterval(load, 5000)
 })
 
 onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
+  disposed = true
+  if (refreshTimer) clearTimeout(refreshTimer)
 })
 
 function currentStage(task: Pipeline) {
@@ -121,6 +132,7 @@ function batchStatusText(status: string) {
 
 <template>
   <div class="build-queue-page" v-loading="loading">
+    <div v-if="queueError||batchError" class="queue-errors"><el-alert v-if="queueError" :title="`构建队列刷新失败：${queueError}`" description="保留上次读取结果，当前任务状态暂未确认。稍后自动重试。" type="warning" :closable="false" show-icon/><el-alert v-if="batchError" :title="`待更新批次刷新失败：${batchError}`" description="保留上次读取结果，其他队列信息仍可查看。" type="warning" :closable="false" show-icon/><el-button :loading="refreshing" @click="load">重试刷新</el-button></div>
     <el-card class="section-card" shadow="never">
       <template #header>
         <div class="section-header">
@@ -148,7 +160,7 @@ function batchStatusText(status: string) {
           <template #default="{ row }">{{ formatTime(row.startTime) }}</template>
         </el-table-column>
       </el-table>
-      <el-empty v-else style="padding: 16px 0;" description="当前没有运行中的任务" :image-size="60" />
+      <el-empty v-else style="padding: 16px 0;" :description="queueError?'运行任务状态暂未读取成功':'当前没有运行中的任务'" :image-size="60" />
     </el-card>
 
     <el-card class="section-card" shadow="never">
@@ -176,7 +188,7 @@ function batchStatusText(status: string) {
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-else style="padding: 16px 0;" description="队列为空" :image-size="60" />
+      <el-empty v-else style="padding: 16px 0;" :description="queueError?'排队任务状态暂未读取成功':'队列为空'" :image-size="60" />
     </el-card>
 
     <el-card class="section-card" shadow="never">
@@ -209,7 +221,7 @@ function batchStatusText(status: string) {
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-else style="padding: 16px 0;" description="暂无待滚动更新的批次" :image-size="60" />
+      <el-empty v-else style="padding: 16px 0;" :description="batchError?'待更新批次暂未读取成功':'暂无待滚动更新的批次'" :image-size="60" />
     </el-card>
 
     <el-drawer v-model="batchDrawerVisible" size="56%" title="待手动滚动更新详情">

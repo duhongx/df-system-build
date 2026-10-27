@@ -510,13 +510,30 @@ func runSQLViewDependencyStepExecution(executor sqlViewDependencyExecutor, plan 
 // Fixed plan indices survive early failures; skipped ALTERs never receive restore results.
 func runViewStepPlan(plan SQLViewDependencyStepExecutionPlan, run func(int, string, string, bool) error, skip func(int) error) error {
 	dropEnd, alterEnd := len(plan.DropSteps), len(plan.DropSteps)+len(plan.AlterSteps)
-	restore := func(cause error, stage string, indices []int, mappingErr error) error {
-		restoreErr := mappingErr
+	runRestore := func(indices []int, recovering bool) error {
+		var result error
+		blockedUntil := -1
 		for _, idx := range indices {
-			if err := run(alterEnd+idx, "恢复依赖视图", plan.RestoreSteps[idx], true); err != nil {
-				restoreErr = errors.Join(restoreErr, err)
+			if idx < blockedUntil {
+				result = errors.Join(result, skip(alterEnd+idx))
+				continue
+			}
+			err := run(alterEnd+idx, "恢复依赖视图", plan.RestoreSteps[idx], recovering)
+			result = errors.Join(result, err)
+			var conflict sqlViewRecoveryConflictError
+			if errors.As(err, &conflict) {
+				for _, group := range plan.RestoreGroups {
+					if idx == group.Start {
+						blockedUntil = group.End
+						break
+					}
+				}
 			}
 		}
+		return result
+	}
+	restore := func(cause error, stage string, indices []int, mappingErr error) error {
+		restoreErr := errors.Join(mappingErr, runRestore(indices, true))
 		for idx := range plan.RestoreSteps {
 			selected := false
 			for _, used := range indices {
@@ -557,10 +574,11 @@ func runViewStepPlan(plan SQLViewDependencyStepExecutionPlan, run func(int, stri
 			return restore(err, "字段变更", indices, nil)
 		}
 	}
-	var restoreErr error
-	for idx, step := range plan.RestoreSteps {
-		restoreErr = errors.Join(restoreErr, run(alterEnd+idx, "恢复依赖视图", step, false))
+	indices := make([]int, len(plan.RestoreSteps))
+	for i := range indices {
+		indices[i] = i
 	}
+	restoreErr := runRestore(indices, false)
 	if restoreErr != nil {
 		return SQLViewDependencyStepExecutionError{Stage: "恢复依赖视图", Err: restoreErr, RestoreAttempted: true, RestoreSucceeded: false, RestoreErr: restoreErr}
 	}

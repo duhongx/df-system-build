@@ -489,8 +489,16 @@ func (s *PostgreSQLService) CreateSQLViewDependencyTask(req SQLViewDependencyTas
 	if err != nil {
 		return nil, err
 	}
+	target, err := currentReleaseSQLTarget()
+	if err != nil {
+		return nil, err
+	}
+	if target == "" {
+		return nil, fmt.Errorf("请先配置 PostgreSQL 数据库连接")
+	}
 	firstRef := refs[0]
 	task := &model.SQLViewDependencyTask{
+		DatabaseTarget:   target,
 		SchemaName:       firstRef.schema,
 		TableName:        firstRef.table,
 		ColumnName:       firstRef.column,
@@ -626,6 +634,10 @@ func (s *PostgreSQLService) AnalyzeSQLViewDependencyTask(ctx context.Context, id
 		return nil, nil, err
 	}
 	defer settleViewTaskPhase(id, "ANALYZING", username)
+	failed := func(cause error) (*model.SQLViewDependencyTask, []model.SQLViewDependencyItem, error) {
+		_, saveErr := markSQLViewDependencyTaskStatus(id, "FAILED", "分析依赖失败（尚未执行字段变更）: "+SQLViewDependencyErrorMessage(cause), username)
+		return nil, nil, errors.Join(cause, saveErr)
+	}
 	task := *claimed
 	if err := s.ensureSQLViewSourceContext(ctx, &task); err != nil {
 		_, saveErr := markSQLViewDependencyTaskStatus(id, "FAILED", err.Error(), username)
@@ -633,15 +645,21 @@ func (s *PostgreSQLService) AnalyzeSQLViewDependencyTask(ctx context.Context, id
 	}
 	changes, err := ensureSQLViewDependencyChanges(task)
 	if err != nil {
-		return nil, nil, err
+		return failed(err)
 	}
 	db, err := s.getDB(task.DatabaseTarget)
 	if err != nil {
-		return nil, nil, err
+		return failed(err)
 	}
-	snapshots, err := s.loadViewDependencySnapshotsForChanges(ctx, db, changes)
+	probeCtx, cancelProbe := context.WithTimeout(ctx, 8*time.Second)
+	probeErr := validateSQLViewDependencyColumns(probeCtx, db, changes)
+	cancelProbe()
+	if probeErr != nil {
+		return failed(probeErr)
+	}
+	snapshots, err := s.loadViewDependencySnapshotsForChanges(ctx, db, changes, viewInspectionProgress(ctx, task.ID, "ANALYZING"))
 	if err != nil {
-		return nil, nil, err
+		return failed(err)
 	}
 	items := make([]model.SQLViewDependencyItem, 0, len(snapshots))
 	err = repository.DB.Transaction(func(tx *gorm.DB) error {
@@ -678,7 +696,7 @@ func (s *PostgreSQLService) AnalyzeSQLViewDependencyTask(ctx context.Context, id
 		return nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return failed(err)
 	}
 	return &task, items, nil
 }
@@ -718,35 +736,27 @@ func (s *PostgreSQLService) PrecheckSQLViewDependencyTask(ctx context.Context, i
 	}
 	db, err := s.getDB(task.DatabaseTarget)
 	if err != nil {
-		return nil, nil, err
+		_, saveErr := markSQLViewDependencyTaskStatus(id, "PRECHECK_FAILED", SQLViewDependencyErrorMessage(err), username)
+		return nil, nil, errors.Join(err, saveErr)
 	}
 	precheckCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	inspector := NewSQLMetadataInspector(db)
-	tableSeen := make(map[string]alterColumnRef)
-	for _, change := range changes {
-		if _, err := inspector.GetColumnInfo(precheckCtx, change.SchemaName, change.TableName, change.ColumnName); err != nil {
-			msg := fmt.Sprintf("目标字段 %s.%s.%s 不存在或无法读取: %s", change.SchemaName, change.TableName, change.ColumnName, err.Error())
-			_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", msg, username)
-			return nil, nil, err
-		}
-		key := strings.ToLower(strings.TrimSpace(change.SchemaName)) + "." + strings.ToLower(strings.TrimSpace(change.TableName))
-		tableSeen[key] = alterColumnRef{schema: change.SchemaName, table: change.TableName}
+	if err := validateSQLViewDependencyColumns(precheckCtx, db, changes); err != nil {
+		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", SQLViewDependencyErrorMessage(err), username)
+		return nil, nil, err
 	}
-	for _, table := range tableSeen {
-		waitingLocks, err := countWaitingLocksForRelation(precheckCtx, db, table.schema, table.table)
-		if err != nil {
-			_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", "锁检查失败: "+err.Error(), username)
-			return nil, nil, err
-		}
-		if waitingLocks > 0 {
-			msg := fmt.Sprintf("目标表 %s.%s 当前存在 %d 个等待锁，建议稍后再执行", table.schema, table.table, waitingLocks)
-			_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", msg, username)
-			return nil, nil, errors.New(msg)
-		}
+	if err := validateSQLViewDependencyLocks(precheckCtx, db, changes); err != nil {
+		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", SQLExecutionErrorMessage(err), username)
+		return nil, nil, err
 	}
-	if err := s.validateCurrentViewDependencyBackup(precheckCtx, db, *task, changes, items); err != nil {
-		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", err.Error(), username)
+
+	// The 8-second budget is only for the field/lock probes. A batch snapshot
+	// must have the same per-column timeout as Analyze, rather than sharing an
+	// almost exhausted deadline across every changed column and dependent view.
+	cancel()
+	if err := s.validateCurrentViewDependencyBackup(ctx, db, *task, changes, items); err != nil {
+		err = fmt.Errorf("执行前校验依赖视图备份失败（尚未执行字段变更）: %w", err)
+		_, _ = markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", SQLViewDependencyErrorMessage(err), username)
 		return nil, nil, err
 	}
 	msg := fmt.Sprintf("预检通过，字段变更 %d 条，依赖视图 %d 个；执行变更将使用 lock_timeout=%s", len(changes), len(items), task.LockTimeout)
@@ -803,9 +813,10 @@ func (s *PostgreSQLService) executeClaimedSQLViewDependencyTask(ctx context.Cont
 		return nil, nil, errors.Join(err, saveErr)
 	}
 	if err := s.validateCurrentViewDependencyBackup(ctx, db, *task, changes, items); err != nil {
-		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", err.Error(), username)
+		err = fmt.Errorf("执行前校验依赖视图备份失败（尚未执行字段变更）: %w", err)
+		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "PRECHECK_FAILED", SQLViewDependencyErrorMessage(err), username)
 		if saveErr != nil {
-			return nil, nil, saveErr
+			return nil, nil, errors.Join(err, saveErr)
 		}
 		return updated, items, err
 	}
@@ -820,32 +831,34 @@ func (s *PostgreSQLService) executeClaimedSQLViewDependencyTask(ctx context.Cont
 	}
 	if err != nil {
 		status := "FAILED"
-		msg := "执行变更失败: " + err.Error()
+		msg := "执行变更失败: " + SQLViewDependencyErrorMessage(err)
 		var stepErr SQLViewDependencyStepExecutionError
 		if errors.As(err, &stepErr) {
 			if stepErr.RestoreAttempted && stepErr.RestoreSucceeded {
 				status = "RESTORED"
-				msg = "字段变更失败，已按备份恢复视图: " + stepErr.Err.Error()
+				msg = "字段变更失败，已按备份恢复视图: " + SQLViewDependencyErrorMessage(stepErr.Err)
 			} else if stepErr.RestoreAttempted && !stepErr.RestoreSucceeded {
 				status = "RESTORE_FAILED"
-				msg = "字段变更失败，且自动恢复视图失败，请查看备份并恢复视图: " + err.Error()
+				msg = "字段变更失败，且自动恢复视图失败，请查看备份并恢复视图: " + SQLViewDependencyErrorMessage(err)
 			}
 		} else if executionMode == SQLViewDependencyExecutionModeTransaction {
-			msg = "事务执行失败，请核实回滚及目标对象状态: " + err.Error()
+			msg = "事务执行失败，请核实回滚及目标对象状态: " + SQLViewDependencyErrorMessage(err)
 		}
 		var unknown sqlViewOutcomeUnknownError
 		if errors.As(err, &unknown) {
 			status = "UNKNOWN"
-			msg = "数据库结果待核实，不能直接重放变更: " + err.Error()
+			msg = "数据库结果待核实，不能直接重放变更: " + SQLViewDependencyErrorMessage(err)
 		}
 		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, status, msg, username)
 		if saveErr != nil {
-			return nil, nil, saveErr
+			return nil, nil, errors.Join(err, saveErr)
 		}
 		return updated, items, err
 	}
 	if err := db.QueryRowContext(ctx, "SELECT current_user").Scan(&task.DatabaseUser); err != nil {
-		return nil, nil, err
+		err = fmt.Errorf("字段变更步骤已结束，但读取数据库身份失败，执行结果待核实: %w", err)
+		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "UNKNOWN", SQLViewDependencyErrorMessage(err), username)
+		return updated, items, errors.Join(err, saveErr)
 	}
 	now := time.Now()
 	task.Status = "SUCCESS"
@@ -874,7 +887,9 @@ func (s *PostgreSQLService) executeClaimedSQLViewDependencyTask(ctx context.Cont
 		}
 		return completeSQLViewTaskSource(tx, task, username)
 	}); err != nil {
-		return nil, nil, err
+		err = fmt.Errorf("字段变更和视图恢复已执行，但保存任务或回写源 SQL 结果失败，禁止重放变更: %w", err)
+		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "UNKNOWN", SQLViewDependencyErrorMessage(err), username)
+		return updated, items, errors.Join(err, saveErr)
 	}
 	return task, items, nil
 }
@@ -893,7 +908,7 @@ func (s *PostgreSQLService) RestoreSQLViewDependencyTask(ctx context.Context, id
 	steps := BuildSQLViewDependencyRestoreTransactionalSteps(*task, items)
 	err = s.runSQLViewDependencyAdhocStepsOnDB(ctx, db, task.ID, steps)
 	if err != nil {
-		msg := "恢复视图失败，请查看备份并恢复视图: " + err.Error()
+		msg := "恢复视图失败，请查看备份并恢复视图: " + SQLViewDependencyErrorMessage(err)
 		updated, saveErr := markSQLViewDependencyTaskStatus(task.ID, "RESTORE_FAILED", msg, username)
 		if saveErr != nil {
 			return nil, nil, saveErr
@@ -985,8 +1000,8 @@ func updateSQLViewDependencyItemActionResult(taskID, itemID uint, username, prev
 	itemError := ""
 	if actionErr != nil {
 		status = failureStatus
-		message = actionErr.Error()
-		itemError = actionErr.Error()
+		message = SQLViewDependencyErrorMessage(actionErr)
+		itemError = SQLViewDependencyErrorMessage(actionErr)
 	}
 	return repository.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&model.SQLViewDependencyItem{}).Where("task_id = ? AND id = ?", taskID, itemID).Updates(map[string]interface{}{
@@ -1025,6 +1040,7 @@ type sqlConnViewDependencyExecutor struct {
 	conn        *sql.Conn
 	timeout     time.Duration
 	nameContext *sqlViewConnectionContext
+	recovery    bool
 }
 
 func (e sqlConnViewDependencyExecutor) Exec(sqlText string) error {
@@ -1036,6 +1052,9 @@ func (e sqlConnViewDependencyExecutor) Exec(sqlText string) error {
 	defer cancel()
 	if err := e.nameContext.apply(ctx, e.conn, sqlText); err != nil {
 		return err
+	}
+	if e.recovery {
+		return execSQLViewRecovery(ctx, e.conn, sqlText)
 	}
 	_, err := e.conn.ExecContext(ctx, sqlText)
 	return err
@@ -1053,10 +1072,10 @@ func (s *PostgreSQLService) runSQLViewDependencyAdhocStepsOnDB(ctx context.Conte
 	if err != nil {
 		return err
 	}
-	return runLoggedViewSQL(ctx, db, taskID, steps, models)
+	return runLoggedViewSQL(ctx, db, taskID, steps, models, true)
 }
 
-func runLoggedViewSQL(ctx context.Context, db *sql.DB, taskID uint, steps []string, models []model.SQLViewDependencyStep) (resultErr error) {
+func runLoggedViewSQL(ctx context.Context, db *sql.DB, taskID uint, steps []string, models []model.SQLViewDependencyStep, recovery ...bool) (resultErr error) {
 	var task model.SQLViewDependencyTask
 	if err := repository.DB.First(&task, taskID).Error; err != nil {
 		return err
@@ -1078,7 +1097,7 @@ func runLoggedViewSQL(ctx context.Context, db *sql.DB, taskID uint, steps []stri
 			break
 		}
 	}
-	executor := sqlConnViewDependencyExecutor{ctx: ctx, conn: conn, timeout: timeout, nameContext: nameContext}
+	executor := sqlConnViewDependencyExecutor{ctx: ctx, conn: conn, timeout: timeout, nameContext: nameContext, recovery: len(recovery) > 0 && recovery[0]}
 	inTx := false
 	var txSteps []uint
 	defer func() {
@@ -1105,11 +1124,12 @@ func runLoggedViewSQL(ctx context.Context, db *sql.DB, taskID uint, steps []stri
 		execErr := executor.Exec(text)
 		if execErr != nil {
 			status := "FAILED"
-			if pgState(execErr) == "" {
+			var conflict sqlViewRecoveryConflictError
+			if pgState(execErr) == "" && !errors.As(execErr, &conflict) {
 				status = "UNKNOWN"
 				execErr = sqlViewOutcomeUnknownError{execErr}
 			}
-			if err := markSQLViewDependencyStepFinished(models[idx].ID, status, execErr.Error()); err != nil {
+			if err := markSQLViewDependencyStepFinished(models[idx].ID, status, SQLViewDependencyErrorMessage(execErr)); err != nil {
 				execErr = errors.Join(execErr, sqlViewOutcomeUnknownError{err})
 			}
 			for pending := idx + 1; pending < len(models); pending++ {
@@ -1178,11 +1198,12 @@ func (s *PostgreSQLService) runSQLViewDependencyStepExecutionOnDB(ctx context.Co
 		if recovering {
 			stepContext = nil // Recovery runs only backup SQL in the original admin context.
 		}
-		err := (sqlConnViewDependencyExecutor{ctx: stepCtx, conn: stepConn, timeout: timeout, nameContext: stepContext}).Exec(text)
+		err := (sqlConnViewDependencyExecutor{ctx: stepCtx, conn: stepConn, timeout: timeout, nameContext: stepContext, recovery: stage == "恢复依赖视图"}).Exec(text)
 		status, message := "SUCCESS", ""
 		if err != nil {
-			status, message = "FAILED", err.Error()
-			if pgState(err) == "" {
+			status, message = "FAILED", SQLViewDependencyErrorMessage(err)
+			var conflict sqlViewRecoveryConflictError
+			if pgState(err) == "" && !errors.As(err, &conflict) {
 				status = "UNKNOWN"
 				err = sqlViewOutcomeUnknownError{err}
 			}
@@ -1209,23 +1230,31 @@ func (s *PostgreSQLService) validateCurrentViewDependencyBackup(ctx context.Cont
 			return err
 		}
 	}
-	current, err := s.loadViewDependencySnapshotsForChanges(ctx, db, changes)
+	current, err := s.loadViewDependencySnapshotsForChanges(ctx, db, changes, viewInspectionProgress(ctx, task.ID, task.Status))
 	if err != nil {
 		return err
 	}
 	return validateViewDependencyBackupFresh(items, current)
 }
 
-func (s *PostgreSQLService) loadViewDependencySnapshotsForChanges(ctx context.Context, db *sql.DB, changes []model.SQLViewDependencyChange) ([]viewDependencySnapshot, error) {
-	all := make([]viewDependencySnapshot, 0)
-	for _, change := range changes {
-		snapshots, err := s.loadViewDependencySnapshots(ctx, db, change.SchemaName, change.TableName, change.ColumnName)
-		if err != nil {
-			return nil, fmt.Errorf("分析 %s.%s.%s 依赖失败: %w", change.SchemaName, change.TableName, change.ColumnName, err)
-		}
-		all = append(all, snapshots...)
+func (s *PostgreSQLService) loadViewDependencySnapshotsForChanges(ctx context.Context, db *sql.DB, changes []model.SQLViewDependencyChange, progress ...func(string) error) ([]viewDependencySnapshot, error) {
+	if len(changes) == 0 {
+		return nil, nil
 	}
-	return mergeViewDependencySnapshots(all), nil
+	report := func(message string) error {
+		if len(progress) == 0 || progress[0] == nil {
+			return nil
+		}
+		return progress[0](fmt.Sprintf("批量分析 %d 个字段；%s", len(changes), message))
+	}
+	// Build the union dependency graph in one catalog statement. Repeating the
+	// same graph/deparse for every column scales as columns × shared views even
+	// when the individual metadata records are cached.
+	snapshots, err := s.loadViewDependencySnapshotsForTargets(ctx, db, changes, nil, report)
+	if err != nil {
+		return nil, fmt.Errorf("批量分析 %d 个字段依赖失败（首个目标 %s.%s.%s）: %w", len(changes), changes[0].SchemaName, changes[0].TableName, changes[0].ColumnName, err)
+	}
+	return snapshots, nil
 }
 
 func mergeViewDependencySnapshots(snapshots []viewDependencySnapshot) []viewDependencySnapshot {
@@ -1296,6 +1325,31 @@ func (s *PostgreSQLService) markSQLViewDependencyTaskRunning(id uint, status, me
 			if applied > 0 {
 				return fmt.Errorf("任务已有字段变更生效或结果待核实，不能重放；请核实并创建新的变更任务")
 			}
+		}
+		target, err := readReleaseSQLTarget(tx)
+		if err != nil {
+			return err
+		}
+		if target == "" {
+			return fmt.Errorf("请先配置 PostgreSQL 数据库连接")
+		}
+		if task.DatabaseTarget == "" {
+			// Old manual plans may only be rebound by a fresh, safe analysis.
+			// Never guess the database for an already submitted DDL/recovery.
+			if status != "ANALYZING" {
+				return fmt.Errorf("旧任务未记录数据库目标，请先在确认连接后重新分析；不能直接执行或恢复旧备份")
+			}
+			var submitted int64
+			if err := tx.Model(&model.SQLViewDependencyStep{}).Where("task_id = ? AND status IN ?", id, []string{"SUCCESS", "RUNNING", "UNKNOWN"}).Count(&submitted).Error; err != nil {
+				return err
+			}
+			if submitted > 0 {
+				return fmt.Errorf("旧任务已有执行记录且未记录数据库目标，请保留备份并人工核实，不能重新绑定数据库")
+			}
+			task.DatabaseTarget = target
+		}
+		if task.DatabaseTarget != target {
+			return fmt.Errorf("数据库连接目标已变化，本视图任务属于其他数据库，请切回原数据库或创建新任务")
 		}
 		if err := validateSQLViewTaskSource(tx, task, status); err != nil {
 			return err
@@ -1464,10 +1518,46 @@ WHERE n.nspname = $1
 }
 
 func (s *PostgreSQLService) loadViewDependencySnapshots(ctx context.Context, db *sql.DB, schemaName, tableName, columnName string) ([]viewDependencySnapshot, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	rows, err := db.QueryContext(ctx, `
-WITH RECURSIVE dep_tree AS (
+	return s.loadViewDependencySnapshotsCached(ctx, db, schemaName, tableName, columnName, nil)
+}
+
+func (s *PostgreSQLService) loadViewDependencySnapshotsCached(ctx context.Context, db *sql.DB, schemaName, tableName, columnName string, cache map[int64]viewDependencySnapshot, progress ...func(string) error) ([]viewDependencySnapshot, error) {
+	return s.loadViewDependencySnapshotsForTargets(ctx, db, []model.SQLViewDependencyChange{{SchemaName: schemaName, TableName: tableName, ColumnName: columnName}}, cache, progress...)
+}
+
+func (s *PostgreSQLService) loadViewDependencySnapshotsForTargets(ctx context.Context, db *sql.DB, changes []model.SQLViewDependencyChange, cache map[int64]viewDependencySnapshot, progress ...func(string) error) ([]viewDependencySnapshot, error) {
+	report := func(message string) error {
+		if len(progress) > 0 && progress[0] != nil {
+			return progress[0](message)
+		}
+		return nil
+	}
+	if err := report("读取依赖关系"); err != nil {
+		return nil, err
+	}
+	type target struct {
+		Schema string `json:"schema_name"`
+		Table  string `json:"table_name"`
+		Column string `json:"column_name"`
+	}
+	targets := make([]target, 0, len(changes))
+	for _, change := range changes {
+		targets = append(targets, target{change.SchemaName, change.TableName, change.ColumnName})
+	}
+	data, err := json.Marshal(targets)
+	if err != nil {
+		return nil, err
+	}
+	// Ten seconds bounds this catalog query, not the combined backup of every
+	// dependent view. Hundreds of individually fast metadata reads need separate
+	// budgets and must still honor cancellation of the parent operation.
+	queryCtx, cancelQuery := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelQuery()
+	rows, err := db.QueryContext(queryCtx, `
+WITH RECURSIVE targets AS (
+  SELECT DISTINCT * FROM jsonb_to_recordset($1::jsonb)
+    AS t(schema_name text, table_name text, column_name text)
+), dep_tree AS (
   SELECT dependent_view.oid,
          dependent_ns.nspname AS object_schema,
          dependent_view.relname AS object_name,
@@ -1480,11 +1570,11 @@ WITH RECURSIVE dep_tree AS (
   JOIN pg_class source_table ON source_table.oid = d.refobjid
   JOIN pg_namespace source_ns ON source_ns.oid = source_table.relnamespace
   JOIN pg_attribute a ON a.attrelid = source_table.oid AND a.attnum = d.refobjsubid
+  JOIN targets target ON target.schema_name = source_ns.nspname
+    AND target.table_name = source_table.relname AND target.column_name = a.attname
   WHERE d.deptype = 'n'
     AND d.classid = 'pg_rewrite'::regclass
-    AND source_ns.nspname = $1
-    AND source_table.relname = $2
-    AND a.attname = $3
+    AND d.refclassid = 'pg_class'::regclass
     AND dependent_view.relkind IN ('v', 'm')
   UNION
   SELECT dependent_view.oid,
@@ -1499,6 +1589,7 @@ WITH RECURSIVE dep_tree AS (
   JOIN dep_tree ON dep_tree.oid = d.refobjid
   WHERE d.deptype = 'n'
     AND d.classid = 'pg_rewrite'::regclass
+    AND d.refclassid = 'pg_class'::regclass
     AND dependent_view.relkind IN ('v', 'm')
     AND dependent_view.oid <> dep_tree.oid
 )
@@ -1513,7 +1604,7 @@ SELECT t.oid::bigint,
 FROM dep_tree t
 JOIN pg_class c ON c.oid = t.oid
 GROUP BY t.oid, t.object_schema, t.object_name, t.object_kind, c.relowner, c.reloptions
-ORDER BY max(t.depth) DESC, t.object_schema, t.object_name`, schemaName, tableName, columnName)
+ORDER BY max(t.depth) DESC, t.object_schema, t.object_name`, string(data))
 	if err != nil {
 		return nil, err
 	}
@@ -1540,59 +1631,86 @@ ORDER BY max(t.depth) DESC, t.object_schema, t.object_name`, schemaName, tableNa
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	cancelQuery()
 	snapshots := make([]viewDependencySnapshot, 0, len(depRows))
 	total := len(depRows)
 	for idx, row := range depRows {
-		grantSQL, err := loadViewGrantSQL(ctx, db, row.schema, row.name)
-		if err != nil {
-			return nil, err
-		}
-		commentSQL, err := loadViewCommentSQL(ctx, db, row.oid, row.schema, row.name, row.kind)
-		if err != nil {
-			return nil, err
-		}
-		indexSQL, err := loadViewIndexSQL(ctx, db, row.schema, row.name, row.kind)
-		if err != nil {
-			return nil, err
-		}
-		ruleSQL, err := loadViewRuleSQL(ctx, db, row.schema, row.name)
-		if err != nil {
-			return nil, err
-		}
-		triggerSQL, err := loadViewTriggerSQL(ctx, db, row.schema, row.name)
-		if err != nil {
+		if err := report(fmt.Sprintf("核对依赖对象 %d/%d：%s.%s", idx+1, total, row.schema, row.name)); err != nil {
 			return nil, err
 		}
 		additionalSQL, optionsJSON := buildViewOptionsBackupSQL(row.schema, row.name, row.kind, row.reloptions)
-		snapshots = append(snapshots, viewDependencySnapshot{
+		if saved, ok := cache[row.oid]; ok && saved.Schema == row.schema && saved.Name == row.name && saved.Kind == row.kind && saved.Definition == row.definition && saved.Owner == row.owner && saved.OptionsJSON == optionsJSON {
+			// Dependency depth/order belong to this column's graph, not the
+			// cached object. The merged plan uses the maximum depth as before.
+			saved.Depth, saved.DropOrder, saved.RestoreOrder = row.depth, idx+1, total-idx
+			snapshots = append(snapshots, saved)
+			continue
+		}
+		snapshot, err := loadViewSnapshotMetadata(ctx, db, row.oid, viewDependencySnapshot{
 			Schema:        row.schema,
 			Name:          row.name,
 			Kind:          row.kind,
 			Depth:         row.depth,
 			Definition:    row.definition,
 			Owner:         row.owner,
-			GrantSQL:      grantSQL,
-			CommentSQL:    commentSQL,
-			IndexSQL:      indexSQL,
-			RuleSQL:       ruleSQL,
-			TriggerSQL:    triggerSQL,
 			OptionsJSON:   optionsJSON,
 			DropOrder:     idx + 1,
 			RestoreOrder:  total - idx,
 			Materialized:  row.kind == "m",
 			AdditionalSQL: additionalSQL,
 		})
+		if err != nil {
+			return nil, fmt.Errorf("备份依赖对象 %s.%s 元数据失败: %w", row.schema, row.name, err)
+		}
+		snapshots = append(snapshots, snapshot)
+		if cache != nil {
+			cache[row.oid] = snapshots[len(snapshots)-1]
+		}
 	}
 	return snapshots, nil
 }
 
+func loadViewSnapshotMetadata(ctx context.Context, db *sql.DB, oid int64, snapshot viewDependencySnapshot) (viewDependencySnapshot, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var err error
+	if snapshot.GrantSQL, err = loadViewGrantSQL(ctx, db, snapshot.Schema, snapshot.Name); err != nil {
+		return snapshot, err
+	}
+	if snapshot.CommentSQL, err = loadViewCommentSQL(ctx, db, oid, snapshot.Schema, snapshot.Name, snapshot.Kind); err != nil {
+		return snapshot, err
+	}
+	if snapshot.IndexSQL, err = loadViewIndexSQL(ctx, db, snapshot.Schema, snapshot.Name, snapshot.Kind); err != nil {
+		return snapshot, err
+	}
+	if snapshot.RuleSQL, err = loadViewRuleSQL(ctx, db, snapshot.Schema, snapshot.Name); err != nil {
+		return snapshot, err
+	}
+	if snapshot.TriggerSQL, err = loadViewTriggerSQL(ctx, db, snapshot.Schema, snapshot.Name); err != nil {
+		return snapshot, err
+	}
+	return snapshot, nil
+}
+
 func loadViewGrantSQL(ctx context.Context, db *sql.DB, schemaName, viewName string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
-SELECT privilege_type, grantee, is_grantable
-FROM information_schema.role_table_grants
-WHERE table_schema = $1
-  AND table_name = $2
-ORDER BY grantee, privilege_type`, schemaName, viewName)
+WITH relation AS (
+ SELECT c.oid, c.relowner, c.relacl FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+ WHERE n.nspname=$1 AND c.relname=$2
+), grants AS (
+ SELECT x.privilege_type, x.grantee, x.is_grantable, ''::text AS column_name
+ FROM relation r CROSS JOIN LATERAL aclexplode(COALESCE(r.relacl, acldefault('r', r.relowner))) x
+ UNION ALL
+ SELECT x.privilege_type, x.grantee, x.is_grantable, a.attname::text
+ FROM relation r JOIN pg_attribute a ON a.attrelid=r.oid
+ CROSS JOIN LATERAL aclexplode(a.attacl) x
+ WHERE a.attnum>0 AND NOT a.attisdropped
+)
+SELECT privilege_type, CASE WHEN grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(grantee) END,
+ is_grantable, column_name FROM grants ORDER BY grantee, privilege_type, column_name`, schemaName, viewName)
 	if err != nil {
 		return nil, err
 	}
@@ -1600,12 +1718,16 @@ ORDER BY grantee, privilege_type`, schemaName, viewName)
 	qualifiedName := quoteQualifiedName(schemaName, viewName)
 	var grants []string
 	for rows.Next() {
-		var privilege, grantee, grantable string
-		if err := rows.Scan(&privilege, &grantee, &grantable); err != nil {
+		var privilege, grantee, column string
+		var grantable bool
+		if err := rows.Scan(&privilege, &grantee, &grantable, &column); err != nil {
 			return nil, err
 		}
-		sqlText := fmt.Sprintf("GRANT %s ON %s TO %s", strings.ToUpper(privilege), qualifiedName, quoteRoleIdent(grantee))
-		if strings.EqualFold(grantable, "YES") {
+		if column != "" {
+			privilege += " (" + quoteIdent(column) + ")"
+		}
+		sqlText := fmt.Sprintf("GRANT %s ON %s TO %s", privilege, qualifiedName, quoteRoleIdent(grantee))
+		if grantable {
 			sqlText += " WITH GRANT OPTION"
 		}
 		grants = append(grants, sqlText+";")
@@ -1820,6 +1942,9 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 				return nil, nil, fmt.Errorf("原文件第 %d 行执行结果待核实，请核实并处理后再覆盖", stmt.LineNumber)
 			}
 		}
+		if err := validateReleaseSQLInheritanceContexts(previousStatements, parsed); err != nil {
+			return nil, nil, err
+		}
 		if err := db.Model(&previous).Update("is_deleted", true).Error; err != nil {
 			return nil, nil, err
 		}
@@ -1881,6 +2006,9 @@ func (s *PostgreSQLService) parseSQLWithDB(db *gorm.DB, req ParseSQLRequest) (*m
 	// including whole committed BEGIN/COMMIT groups.
 	parsed, _, err = normalizeReleaseSQLAddColumns(db, file, parsed, req.CreatedUser)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateReleaseSQLInheritanceContexts(previousStatements, parsed); err != nil {
 		return nil, nil, err
 	}
 	for i, prior := range releaseSQLInheritanceCandidates(previousStatements, parsed) {
@@ -3178,14 +3306,14 @@ func (s *PostgreSQLService) runPreparedSQLFileExecution(ctx context.Context, fil
 
 func (s *PostgreSQLService) markSQLFileExecutionFailed(fileID uint, username string, executionErr error) {
 	err := repository.DB.Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&model.SQLChangeFile{}).Where("id = ? AND is_deleted = false AND execute_status = ?", fileID, "RUNNING").Updates(map[string]any{"execute_status": "FAILED", "execute_user": username, "execute_time": time.Now(), "execute_message": executionErr.Error()})
+		result := tx.Model(&model.SQLChangeFile{}).Where("id = ? AND is_deleted = false AND execute_status = ?", fileID, "RUNNING").Updates(map[string]any{"execute_status": "FAILED", "execute_user": username, "execute_time": time.Now(), "execute_message": SQLExecutionErrorMessage(executionErr)})
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected == 0 {
 			return nil
 		}
-		if err := tx.Model(&model.SQLStatementRecord{}).Where("file_id = ? AND status = ?", fileID, "RUNNING").Updates(map[string]any{"status": "UNKNOWN", "message": executionErr.Error(), "finished_at": time.Now()}).Error; err != nil {
+		if err := tx.Model(&model.SQLStatementRecord{}).Where("file_id = ? AND status = ?", fileID, "RUNNING").Updates(map[string]any{"status": "UNKNOWN", "message": SQLExecutionErrorMessage(executionErr), "finished_at": time.Now()}).Error; err != nil {
 			return err
 		}
 		var file model.SQLChangeFile
@@ -3276,7 +3404,7 @@ func (s *PostgreSQLService) ExecuteSQLStatementWithOptions(ctx context.Context, 
 			stmt.ExecuteMessage = skipMessage
 		} else {
 			stmt.ExecuteStatus = "FAILED"
-			stmt.ExecuteMessage = execErr.Error()
+			stmt.ExecuteMessage = SQLExecutionErrorMessage(execErr)
 		}
 	} else {
 		stmt.ExecuteStatus = "SUCCESS"
@@ -3908,7 +4036,7 @@ func recomputeSQLFileStatusWithDB(db *gorm.DB, fileID uint, username string) (*m
 		return &file, nil
 	}
 	var statements []model.SQLChangeStatement
-	if err := db.Where("file_id = ?", fileID).Find(&statements).Error; err != nil {
+	if err := db.Where("file_id = ?", fileID).Order("line_number ASC, id ASC").Find(&statements).Error; err != nil {
 		return nil, err
 	}
 	if len(statements) == 0 {
@@ -3948,6 +4076,20 @@ func recomputeSQLFileStatusWithDB(db *gorm.DB, fileID uint, username string) (*m
 	file.ExecuteUser = username
 	file.ExecuteTime = &now
 	file.ExecuteMessage = fmt.Sprintf("成功 %d，失败 %d，不可执行 %d，跳过 %d，取消 %d", successCount, failedCount, blockedCount, skippedCount, canceledCount)
+	// Recomputing the file summary after a retry must not erase the failure
+	// details already recorded on its statements and execution attempts.
+	if failedCount > 0 {
+		for _, stmt := range statements {
+			switch stmt.ExecuteStatus {
+			case "FAILED", "PARTIAL_FAILED", "UNKNOWN", "TIMEOUT":
+				file.ExecuteMessage += fmt.Sprintf("\n首个失败位于第 %d 行：\n%s", stmt.LineNumber, stmt.ExecuteMessage)
+			default:
+				continue
+			}
+			break
+		}
+	}
+
 	if err := db.Save(&file).Error; err != nil {
 		return nil, err
 	}
@@ -4113,7 +4255,7 @@ func (s *PostgreSQLService) markSQLBatchFailed(batchID uint, username string, er
 			"execute_status":  "FAILED",
 			"execute_user":    username,
 			"execute_time":    &now,
-			"execute_message": err.Error(),
+			"execute_message": SQLExecutionErrorMessage(err),
 		}).Error
 }
 

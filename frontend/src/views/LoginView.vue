@@ -11,7 +11,7 @@ const loading = ref(false)
 
 const form = ref({
   username: 'admin',
-  password: '123456',
+  password: 'cloudhis@2123',
 })
 
 async function handleLogin() {

@@ -388,16 +388,16 @@ func saveReleaseSQLViewPairResult(drop, create *model.SQLChangeStatement, dropRe
 		create.SQLState = pgState(execErr)
 	}
 	drop.ExecuteMessage = releaseSQLViewPairRollbackMessage
-	create.ExecuteMessage = "CREATE VIEW 失败，组合事务已回滚：" + execErr.Error()
+	create.ExecuteMessage = "CREATE VIEW 失败，组合事务已回滚：" + SQLExecutionErrorMessage(execErr)
 	if status == "UNKNOWN" {
-		drop.ExecuteMessage = "视图组合事务回滚结果待核实：" + rollbackErr.Error()
-		create.ExecuteMessage = "视图组合事务结果待核实：" + execErr.Error() + "；回滚失败：" + rollbackErr.Error()
+		drop.ExecuteMessage = "视图组合事务回滚结果待核实：" + SQLExecutionErrorMessage(rollbackErr)
+		create.ExecuteMessage = "视图组合事务结果待核实：" + SQLExecutionErrorMessage(execErr) + "；回滚失败：" + SQLExecutionErrorMessage(rollbackErr)
 	}
 	if !dropSubmitted {
-		drop.ExecuteMessage = "视图组合事务未能启动：" + execErr.Error()
+		drop.ExecuteMessage = "视图组合事务未能启动：" + SQLExecutionErrorMessage(execErr)
 	}
 	if dropSubmitted && !createSubmitted {
-		create.ExecuteMessage = "未执行 CREATE VIEW，因为 DROP VIEW 失败；事务已回滚：" + execErr.Error()
+		create.ExecuteMessage = "未执行 CREATE VIEW，因为 DROP VIEW 失败；事务已回滚：" + SQLExecutionErrorMessage(execErr)
 	}
 	dropRecord.Status, dropRecord.Message, dropRecord.SQLState, dropRecord.FinishedAt = drop.ExecuteStatus, drop.ExecuteMessage, drop.SQLState, &now
 	createRecord.Status, createRecord.Message, createRecord.SQLState, createRecord.FinishedAt = create.ExecuteStatus, create.ExecuteMessage, create.SQLState, &now
@@ -457,7 +457,7 @@ func (s *PostgreSQLService) runReleaseSQLFile(ctx context.Context, file *model.S
 // schema/search_path, identity and subsequent execution configuration stay intact.
 func (s *PostgreSQLService) runReleaseSQLFileWithConfig(ctx context.Context, file *model.SQLChangeFile, statements []model.SQLChangeStatement, username string, options SQLExecuteOptions, retryConfig *PostgreSQLConfig) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
 	failed := func(err error) (*model.SQLChangeFile, []model.SQLChangeStatement, error) {
-		message := fmt.Sprintf("文件 %s 执行失败: %v", file.FileName, err)
+		message := fmt.Sprintf("文件 %s 执行失败: %s", file.FileName, SQLExecutionErrorMessage(err))
 		if saveErr := saveReleaseSQLFile(file, "FAILED", message, username); saveErr != nil {
 			return file, statements, errors.Join(err, saveErr)
 		}
@@ -636,9 +636,9 @@ func (s *PostgreSQLService) runReleaseSQLFileWithConfig(ctx context.Context, fil
 		if indexErr != nil {
 			stmt.ExecuteStatus = "FAILED"
 			if execErr != nil {
-				stmt.ExecuteMessage = fmt.Sprintf("数据库原始错误：%s；dfops 校验：%s；未自动跳过本条 SQL", execErr.Error(), indexErr.Error())
+				stmt.ExecuteMessage = fmt.Sprintf("数据库原始错误：%s；dfops 校验：%s；未自动跳过本条 SQL", SQLExecutionErrorMessage(execErr), SQLExecutionErrorMessage(indexErr))
 			} else {
-				stmt.ExecuteMessage = "数据库已返回执行成功，但 dfops 索引状态校验未通过：" + indexErr.Error()
+				stmt.ExecuteMessage = "数据库已返回执行成功，但 dfops 索引状态校验未通过：" + SQLExecutionErrorMessage(indexErr)
 			}
 		} else if execErr == nil {
 			stmt.AffectedRows, _ = result.RowsAffected()
@@ -648,10 +648,10 @@ func (s *PostgreSQLService) runReleaseSQLFileWithConfig(ctx context.Context, fil
 			stmt.ExecuteMessage = skipMessage
 		} else {
 			stmt.ExecuteStatus = "FAILED"
-			stmt.ExecuteMessage = execErr.Error()
+			stmt.ExecuteMessage = SQLExecutionErrorMessage(execErr)
 			if stmt.SQLState == "" {
 				stmt.ExecuteStatus = "UNKNOWN"
-				stmt.ExecuteMessage = "数据库未返回确定结果，请核实后处理: " + execErr.Error()
+				stmt.ExecuteMessage = "数据库未返回确定结果，请核实后处理: " + SQLExecutionErrorMessage(execErr)
 			}
 		}
 		record.Status, record.Message, record.SQLState, record.FinishedAt = stmt.ExecuteStatus, stmt.ExecuteMessage, stmt.SQLState, &now

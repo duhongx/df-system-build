@@ -8,10 +8,13 @@ import {
   type ArtifactVersion,
 } from '../api/batch-deploy'
 import { formatBeijingTime } from '../utils/time'
+import { matchesReleaseVersion } from '../utils/release-version'
 
 const router = useRouter()
 const loading = ref(false)
 const batches = ref<ArtifactVersion[]>([])
+const search = ref('')
+const visibleBatches = computed(() => batches.value.filter(batch => matchesReleaseVersion(batch, search.value)))
 
 const readyBatches = computed(() => batches.value.filter(batch => isReady(batch)))
 const failedBatches = computed(() => batches.value.filter(batch => batch.status === 'failed'))
@@ -97,6 +100,7 @@ async function deleteVersion(batch: ArtifactVersion) {
         <h4>更新记录</h4>
       </div>
       <div class="page-actions">
+        <el-input v-model="search" placeholder="搜索业务版本、记录编号或更新说明" clearable style="width: 310px" />
         <el-button type="primary" :loading="loading" @click="loadBatches">刷新</el-button>
       </div>
     </div>
@@ -117,7 +121,15 @@ async function deleteVersion(batch: ArtifactVersion) {
     </div>
 
     <el-card shadow="never" class="table-card">
-      <el-table height="100%" :data="batches" v-loading="loading" border stripe>
+      <el-table height="100%" :data="visibleBatches" v-loading="loading" border stripe>
+        <el-table-column label="业务版本" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            <el-tag v-if="row.releaseManifestError" type="warning">版本信息异常</el-tag>
+            <strong v-else>{{ row.appVersion || '未提供' }}</strong>
+          </template>
+        </el-table-column>
+        <el-table-column prop="releaseReadme" label="更新说明" min-width="240" show-overflow-tooltip />
+        <el-table-column prop="releaseTime" label="发布时间" width="180" />
         <el-table-column prop="versionNo" label="记录编号" min-width="220" show-overflow-tooltip />
         <el-table-column label="文件来源" width="120">
           <template #default="{ row }">{{ sourceTypeText(row.sourceType) }}</template>

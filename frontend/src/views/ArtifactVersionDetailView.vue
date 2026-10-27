@@ -16,6 +16,7 @@ import {
   type ArtifactVersionItem,
 } from '../api/batch-deploy'
 import { formatTime } from '../utils/time'
+import ReleaseVersionInfo from '../components/ReleaseVersionInfo.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -47,6 +48,11 @@ const deployableItems = computed(() => items.value.filter(item => item.deployabl
 const invalidItems = computed(() => items.value.filter(item => item.validateStatus === 'invalid'))
 const unmatchedItems = computed(() => items.value.filter(item => item.matchStatus === 'unmatched' && item.validateStatus === 'valid'))
 const versionEditable = computed(() => !deployBatch.value && !items.value.some(item => item.updateUsed))
+const canContinueUpdate = computed(() => versionEditable.value && deployableItems.value.length > 0 && ['available', 'ready', 'success'].includes(version.value?.status || ''))
+function continueUpdate() {
+  if (!canContinueUpdate.value || !version.value) return
+  router.push({ path: '/batch-deploy', query: { batchId: version.value.versionNo } })
+}
 const versionRows = computed(() => buildVersionRows(items.value))
 const deployRecordRows = computed(() => buildDeployRecordRows(deployRecords.value))
 
@@ -432,7 +438,7 @@ async function handleRollback() {
       <div>
         <h4>更新记录详情</h4>
       </div>
-      <el-button @click="router.push('/artifacts/versions')">返回更新记录</el-button>
+      <div><el-button v-if="canContinueUpdate" type="primary" @click="continueUpdate">继续更新</el-button><el-button @click="router.push('/artifacts/versions')">返回更新记录</el-button></div>
     </div>
 
     <el-card v-if="version" shadow="never" class="summary-card">
@@ -457,6 +463,8 @@ async function handleRollback() {
         <div v-if="version.error"><span>错误</span><strong>{{ version.error }}</strong></div>
       </div>
     </el-card>
+
+    <ReleaseVersionInfo v-if="version" :version="version" />
 
     <el-card shadow="never" class="table-card">
       <template #header>

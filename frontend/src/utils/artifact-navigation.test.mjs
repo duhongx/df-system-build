@@ -57,10 +57,10 @@ assert.match(artifactVersionDetail, /deployRecordSpanMethod/, 'deploy records sh
 assert.match(artifactVersionDetail, /label="部署目标"[\s\S]*label="更新文件"/, 'deployment target should be the first deploy record table column')
 assert.doesNotMatch(artifactVersionDetail, /label="当前版本"/, 'deploy records should not display a duplicate current version column')
 
-assert.match(batchDeploy, /listArtifactVersions/, 'batch deploy should load persisted update versions')
+assert.doesNotMatch(batchDeploy, /listArtifactVersions/, 'new update task should not load an unused record picker')
 assert.match(batchDeploy, /getArtifactVersion/, 'batch deploy should read version items from detail API')
 assert.doesNotMatch(batchDeploy, /listLocalDir|matchArtifacts/, 'batch deploy should not rescan directories or run match side effects')
-assert.match(batchDeploy, /选择更新记录/, 'batch deploy should let users select an update record')
+assert.doesNotMatch(batchDeploy, /选择更新记录/, 'new update task should not expose the duplicate record picker')
 assert.doesNotMatch(batchDeploy, /卡点部署|立即部署|deployMode/, 'image preparation must not expose deployment modes')
 assert.match(batchDeploy, /updateTaskSteps/, 'update task should use sequential workflow steps')
 assert.match(batchDeploy, /滚动更新/, 'second step should roll prepared images')

@@ -12,6 +12,7 @@ import (
 	"df-build-server/internal/frontend"
 	"df-build-server/internal/k8s"
 	"df-build-server/internal/pipeline/types"
+	"github.com/docker/distribution/reference"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -56,10 +57,10 @@ func readWebDeployment(ctx context.Context, cs kubernetes.Interface, namespace s
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("读取 web-main Deployment 失败: %w", err)
+		return nil, fmt.Errorf("读取 Deployment=%s/%s 失败: %w", namespace, target, err)
 	}
 	if webContainerImage(dep) == "" {
-		return nil, fmt.Errorf("Deployment 中不存在 web-main 目标容器，停止更新")
+		return nil, fmt.Errorf("Deployment=%s/%s 中不存在目标容器 %s 或镜像为空，停止更新", namespace, target, target)
 	}
 	return dep, nil
 }
@@ -107,10 +108,10 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 		replicas = *dep.Spec.Replicas
 	}
 	if replicas == 0 || dep.Status.ObservedGeneration < dep.Generation || dep.Status.UpdatedReplicas != replicas || dep.Status.AvailableReplicas < replicas || dep.Status.Replicas != replicas {
-		return nil, fmt.Errorf("web-main 尚未完成当前版本滚动更新，停止读取基线，请等待恢复后重试")
+		return nil, fmt.Errorf("Deployment=%s/%s 尚未完成当前版本滚动更新，停止读取基线（generation=%d；observed=%d；期望副本=%d；当前=%d；已更新=%d；可用=%d）", namespace, target, dep.Generation, dep.Status.ObservedGeneration, replicas, dep.Status.Replicas, dep.Status.UpdatedReplicas, dep.Status.AvailableReplicas)
 	}
 	if dep.Spec.Selector == nil {
-		return nil, fmt.Errorf("web-main 缺少 Pod selector")
+		return nil, fmt.Errorf("Deployment=%s/%s 缺少 Pod selector", namespace, target)
 	}
 	owned, err := currentDeploymentPods(ctx, cs, namespace, dep)
 	if err != nil {
@@ -127,7 +128,7 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 	}
 	pod, ok := selectReadyPodForDeployment(dep, owned)
 	if !ok {
-		return nil, fmt.Errorf("web-main 没有运行当前镜像且容器 Ready 的 Pod，停止更新")
+		return nil, webReadyPodSelectionError(dep, owned)
 	}
 	log.printf("开始复制运行中的前端；Pod=%s/%s；容器=%s；来源=/usr/share/nginx/html；本地目标=%s", namespace, pod.Name, target, destination)
 	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
@@ -171,7 +172,7 @@ func (s *BuildImageStage) copyFromPod(ctx context.Context, pCtx *types.PipelineC
 		log.printf("Pod=%s/%s tar 诊断：%s", namespace, pod.Name, detail)
 	}
 	if extractErr != nil {
-		return nil, fmt.Errorf("导出前端目录失败（Pod=%s/%s；容器=web-main；来源=/usr/share/nginx/html；目标=%s；tar诊断=%s）: %w", namespace, pod.Name, destination, detail, extractErr)
+		return nil, fmt.Errorf("导出前端目录失败（Pod=%s/%s；容器=%s；来源=/usr/share/nginx/html；目标=%s；tar诊断=%s）: %w", namespace, pod.Name, target, destination, detail, extractErr)
 	}
 	if streamErr != nil {
 		return nil, fmt.Errorf("导出前端目录失败（Pod=%s/%s；目标=%s；tar诊断=%s）: %w", namespace, pod.Name, destination, detail, streamErr)
@@ -251,7 +252,7 @@ func selectReadyPodForDeployment(dep *appsv1.Deployment, pods []corev1.Pod) (*co
 		}
 		specMatches := false
 		for _, c := range pod.Spec.Containers {
-			if c.Name == frontendDeploymentName(dep) && c.Image == webContainerImage(dep) {
+			if c.Name == frontendDeploymentName(dep) && equivalentContainerImage(c.Image, webContainerImage(dep)) {
 				specMatches = true
 			}
 		}
@@ -286,7 +287,7 @@ func (b *webBaseline) validate(dep *appsv1.Deployment, cluster, namespace string
 		return fmt.Errorf("前端目标环境已变化，请在目标环境重新构建")
 	}
 	if b.Exists != (dep != nil) {
-		return fmt.Errorf("web-main 已创建或删除，原构建基线已失效，请重新构建")
+		return fmt.Errorf("%s 已创建或删除，原构建基线已失效，请重新构建", b.target())
 	}
 	expectedGeneration, expectedImage := b.Generation, b.Image
 	if b.PreparedGeneration > 0 {
@@ -296,7 +297,7 @@ func (b *webBaseline) validate(dep *appsv1.Deployment, cluster, namespace string
 		}
 	}
 	if dep != nil && (string(dep.UID) != b.UID || dep.Generation != expectedGeneration || webContainerImage(dep) != expectedImage) {
-		return fmt.Errorf("web-main 已发生更新，当前镜像基于旧版本构建，请重新构建后再部署")
+		return fmt.Errorf("%s 已发生更新，当前镜像基于旧版本构建，请重新构建后再部署", b.target())
 	}
 	return nil
 }
@@ -316,15 +317,6 @@ func validateWebBaseline(ctx context.Context, cs kubernetes.Interface, pCtx *typ
 	}
 	if err := baseline.validate(dep, cfg.Host, namespace); err != nil {
 		return err
-	}
-	for name, version := range baseline.ConfigMaps {
-		cm, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if cm.ResourceVersion != version {
-			return fmt.Errorf("ConfigMap %s 已改变，请重新构建", name)
-		}
 	}
 	return nil
 }
@@ -357,5 +349,46 @@ func containerStatusMatches(c corev1.ContainerStatus, image string) bool {
 	if at := strings.Index(image, "@sha256:"); at >= 0 {
 		return strings.Contains(c.ImageID, image[at+1:])
 	}
-	return c.Image == image
+	return equivalentContainerImage(c.Image, image)
+}
+
+// Container runtimes may report an implicit :latest (or a canonical Docker Hub
+// name) that differs textually from the Deployment. Compare parsed references;
+// never equate different explicit tags, registries, repositories or digests.
+func equivalentContainerImage(actual, expected string) bool {
+	a, err := reference.ParseNormalizedNamed(actual)
+	if err != nil {
+		return false
+	}
+	b, err := reference.ParseNormalizedNamed(expected)
+	if err != nil {
+		return false
+	}
+	return reference.TagNameOnly(a).String() == reference.TagNameOnly(b).String()
+}
+
+func webReadyPodSelectionError(dep *appsv1.Deployment, pods []corev1.Pod) error {
+	var details []string
+	for _, pod := range pods[:min(len(pods), 5)] {
+		ready := corev1.ConditionUnknown
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == corev1.PodReady {
+				ready = condition.Status
+			}
+		}
+		var containers []string
+		for _, status := range pod.Status.ContainerStatuses {
+			if status.Name == frontendDeploymentName(dep) {
+				containers = append(containers, fmt.Sprintf("容器=%s,ready=%t,镜像=%s,镜像匹配=%t", status.Name, status.Ready, status.Image, containerStatusMatches(status, webContainerImage(dep))))
+			}
+		}
+		if len(containers) == 0 {
+			containers = append(containers, "缺少目标容器状态")
+		}
+		details = append(details, fmt.Sprintf("Pod=%s,phase=%s,PodReady=%s,删除中=%t,%s", pod.Name, pod.Status.Phase, ready, pod.DeletionTimestamp != nil, strings.Join(containers, "/")))
+	}
+	if len(details) == 0 {
+		details = append(details, "未找到属于当前 Deployment 及当前 ReplicaSet 模板的 Pod")
+	}
+	return fmt.Errorf("Deployment=%s/%s 没有运行当前镜像且容器 Ready 的 Pod，停止更新（期望镜像=%s；当前版本 Pod 数=%d；%s）", dep.Namespace, frontendDeploymentName(dep), webContainerImage(dep), len(pods), strings.Join(details, "；"))
 }

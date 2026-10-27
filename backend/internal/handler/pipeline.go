@@ -1,10 +1,13 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"strconv"
+	"time"
 
 	"df-build-server/internal/middleware"
+	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/scheduler"
 	"df-build-server/pkg/response"
@@ -122,8 +125,22 @@ func (h *PipelineHandler) GetStageLogs(c *gin.Context) {
 }
 
 func (h *PipelineHandler) GetQueue(c *gin.Context) {
-	running, _ := h.pipelineRepo.GetRunning()
-	pending, _ := h.pipelineRepo.GetPending()
+	if repository.DB == nil {
+		response.FailWithStatus(c, 503, 10304, "数据库未初始化")
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	defer cancel()
+	var running, pending []model.Pipeline
+	db := repository.DB.WithContext(ctx)
+	if err := db.Preload("Stages").Where("status = ?", "RUNNING").Order("start_time ASC").Find(&running).Error; err != nil {
+		response.FailWithStatus(c, 503, 10304, "读取运行任务失败: "+err.Error())
+		return
+	}
+	if err := db.Where("status IN ?", []string{"PENDING", "DEPLOYING"}).Order("created_at ASC").Find(&pending).Error; err != nil {
+		response.FailWithStatus(c, 503, 10304, "读取排队任务失败: "+err.Error())
+		return
+	}
 
 	response.OK(c, gin.H{
 		"running": running,

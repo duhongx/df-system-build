@@ -8,8 +8,8 @@ import {
   executeBatchDeploy,
   getActiveDownloadJob,
   getArtifactVersion,
+  getArtifactVersionPipelines,
   getDownloadProgress,
-  listArtifactVersions,
   listPackageDownloadDir,
   listPackageDownloadLocalDir,
   startDownloadRemoteDir,
@@ -20,14 +20,32 @@ import {
   type MatchResult,
 } from '../api/batch-deploy'
 import { getSettings } from '../api/settings'
-import { getPipeline, rolloutPipeline, type Pipeline } from '../api/pipeline'
+import { rolloutPipeline, type Pipeline } from '../api/pipeline'
 import { updateTaskSteps, imageState, imagesSettled, rolloutState, needsExecutionPolling, parseSubmittedPipelineIds } from '../utils/update-task-workflow'
 import { useSettingsStore } from '../stores/settings'
 import { buildDeployConfirmation, isDeployableMatch, selectedDeployableFileNames } from '../utils/batch-deploy-selection'
 import type { FileItem } from '../api/server-mgmt'
+import { createUploadActivity, recordUploadActivity, uploadActivityStats, uploadPercentage, formatUploadBytes, formatUploadSpeed, formatUploadDuration, formatUploadPercent, type UploadActivity } from '../utils/upload-activity'
+import { uploadArtifacts, type UploadEntry } from '../utils/artifact-upload'
+import ReleaseVersionInfo from '../components/ReleaseVersionInfo.vue'
 
-type UploadEntry = { file: File; path: string }
-type SourceMode = 'upload' | 'download' | 'existing'
+type UploadProgress = UploadActivity & {
+  phase: 'preparing' | 'uploading' | 'processing' | 'matching' | 'paused' | 'failed' | 'success'
+  phaseStartedAt: number
+  fileCount: number
+  fileBytes: number
+  network: UploadActivity
+  inFlightBytes: number
+  completedFiles: number
+  currentFiles: string[]
+  detail: string
+  retry: string
+  validationDone: number
+  validationFile: string
+  error?: string
+  batchId?: string
+}
+type SourceMode = 'upload' | 'download'
 
 const route = useRoute()
 const router = useRouter()
@@ -43,23 +61,57 @@ const executionLoading = ref(false)
 const executionError = ref(false)
 const rolling = ref(false)
 let executionTimer: number | undefined
+let submissionTimer: number | undefined
+let submissionClock: number | undefined
+let submissionGeneration = 0
 let disposed = false
 let restoringSelection = false
 const hasSubmitted = computed(() => submittedIds.value.length > 0)
-const imagesComplete = computed(() => !executionError.value && submittedPipelines.value.length === submittedIds.value.length && imagesSettled(submittedPipelines.value))
+const imagesComplete = computed(() => !executing.value && !submissionUncertain.value && !executionError.value && submittedPipelines.value.length === submittedIds.value.length && imagesSettled(submittedPipelines.value))
 const hasReadyImages = computed(() => submittedPipelines.value.some(pipeline => imageState(pipeline) === 'ready'))
 const readyToRollout = computed(() => submittedPipelines.value.filter(pipeline => pipeline.status === 'IMAGE_READY'))
 const allUpdated = computed(() => !executionError.value && submittedPipelines.value.length === submittedIds.value.length && submittedPipelines.value.length > 0 && submittedPipelines.value.every(pipeline => rolloutState(pipeline) === 'success'))
 const uploadLoading = ref(false)
+const uploadProgress = ref<UploadProgress | null>(null)
+const uploadNow = ref(0)
+let uploadTimer: number | undefined
+let uploadController: AbortController | undefined
+let lastUploadEntries: UploadEntry[] = []
+const uploadConcurrency = ref(3)
+const uploadPercent = computed(() => {
+  const progress = uploadProgress.value
+  return progress ? uploadPercentage(progress) : 0
+})
+const uploadActivity = computed(() => uploadProgress.value ? uploadActivityStats(uploadProgress.value.network, uploadNow.value) : null)
+const uploadRemainingSeconds = computed(() => {
+  const progress = uploadProgress.value, speed = uploadActivity.value?.recentBps
+  return progress && progress.transferredAt === undefined && speed && !uploadActivity.value?.stalled
+    ? Math.ceil(Math.max(0, (progress.total ?? progress.fileBytes) - progress.loaded - progress.inFlightBytes) / speed) : undefined
+})
+const uploadPhaseWait = computed(() => uploadProgress.value ? Math.max(0, (uploadProgress.value.finishedAt ?? uploadNow.value) - uploadProgress.value.phaseStartedAt) / 1000 : 0)
+const uploadStatusText = computed(() => {
+  switch (uploadProgress.value?.phase) {
+    case 'preparing': return '正在准备上传、核对续传文件…'
+    case 'processing': return '文件传输完成，正在校验制品并生成更新记录…'
+    case 'matching': return '制品校验完成，正在加载应用匹配结果…'
+    case 'success': return '上传完成，更新记录已生成'
+    case 'paused': return '上传已暂停，已接收的分片已保留'
+    case 'failed': return uploadProgress.value?.batchId ? '文件已上传，请查看更新记录或重试读取结果' : '上传处理失败，可继续已确认的分片'
+    default: return '正在上传制品…'
+  }
+})
 const loading = ref(false)
 const executing = ref(false)
+const submissionError = ref('')
+const submissionUncertain = ref(false)
+const submissionStartedAt = ref(0), submissionNow = ref(0)
 const batchId = ref('')
 const sourceType = ref('')
 const sourceDir = ref('')
+const releaseVersion = ref<ArtifactVersion | null>(null)
 const matchResults = ref<MatchResult[]>([])
 const selectedFiles = ref<string[]>([])
 const matchTableRef = ref<TableInstance>()
-const versions = ref<ArtifactVersion[]>([])
 
 const remoteLoading = ref(false)
 const remoteBasePath = ref('/')
@@ -82,7 +134,6 @@ const matchedCount = computed(() => matchResults.value.filter(isDeployableMatch)
 const invalidCount = computed(() => matchResults.value.filter(result => !result.valid).length)
 const unmatchedCount = computed(() => matchResults.value.filter(result => !result.matched && !result.skipped).length)
 const skippedCount = computed(() => matchResults.value.filter(result => result.skipped).length)
-const readyVersions = computed(() => versions.value.filter(isVersionReady))
 const hasVersion = computed(() => Boolean(batchId.value))
 const selectedRemotePaths = computed(() => selectedRemoteRows.value.map(row => row.path))
 const isDownloadRunning = computed(() => {
@@ -127,14 +178,17 @@ onMounted(async () => {
   sourceDir.value = String(route.query.sourceDir || '')
   submittedIds.value = parseSubmittedPipelineIds(route.query.pipelineIds)
 
-  await Promise.allSettled([loadVersions(), loadSettingsAndRemoteRoot()])
+  await loadSettingsAndRemoteRoot()
   if (!hasSubmitted.value) await restoreActiveDownloadJob()
   if (batchId.value) {
     try {
       await loadVersionDetail(batchId.value, !hasSubmitted.value)
       workflowStep.value = 1
     } catch { /* Accepted task IDs remain available even if version loading fails. */ }
-    sourceMode.value = sourceType.value === 'upload' ? 'upload' : sourceType.value === 'download' ? 'download' : 'existing'
+    sourceMode.value = sourceType.value === 'download' ? 'download' : 'upload'
+    if (!hasSubmitted.value) {
+      try { await recoverSubmittedPipelines() } catch { /* Keep source selection usable; queue recovery can be retried. */ }
+    }
   }
   if (hasSubmitted.value) {
     workflowStep.value = 2
@@ -144,7 +198,12 @@ onMounted(async () => {
 
 onUnmounted(() => {
   disposed = true
+  uploadController?.abort()
+  stopUploadClock()
   if (executionTimer) window.clearTimeout(executionTimer)
+  if (submissionTimer) window.clearTimeout(submissionTimer)
+  if (submissionClock) window.clearInterval(submissionClock)
+  submissionGeneration++
   if (pollTimer) window.clearTimeout(pollTimer)
 })
 
@@ -179,23 +238,48 @@ async function refreshExecution() {
   if (executionTimer) window.clearTimeout(executionTimer)
   executionLoading.value = true
   try {
-    const results = await Promise.allSettled(submittedIds.value.map(async id => {
-      const pipeline = await getPipeline(id)
-      if (pipeline.batchId !== batchId.value) throw new Error('任务不属于当前更新记录')
-      return pipeline
-    }))
+    const result = await getArtifactVersionPipelines(batchId.value)
     if (disposed) return
-    executionError.value = results.some(result => result.status === 'rejected')
-    submittedPipelines.value = results.flatMap((result, index) => {
-      if (result.status === 'fulfilled') return [result.value]
-      const previous = submittedPipelines.value.find(pipeline => pipeline.id === submittedIds.value[index])
-      return previous ? [previous] : []
-    })
-    if (imagesComplete.value && hasReadyImages.value) workflowStep.value = 3
+    const rows = (result.pipelines || []).filter(pipeline => pipeline.batchId === batchId.value)
+    if (!rows.length) throw new Error('已提交的任务暂未返回')
+    submittedIds.value = rows.map(pipeline => pipeline.id)
+    submittedPipelines.value = rows
+    executionError.value = false
+    if (!executing.value && !submissionUncertain.value && imagesComplete.value && hasReadyImages.value) workflowStep.value = 3
+  } catch {
+    if (!disposed) executionError.value = true
   } finally {
     executionLoading.value = false
-    if (!disposed && (executionError.value || needsExecutionPolling(submittedPipelines.value))) executionTimer = window.setTimeout(refreshExecution, 3000)
+    if (!disposed && (executing.value || submissionUncertain.value || executionError.value || needsExecutionPolling(submittedPipelines.value))) executionTimer = window.setTimeout(refreshExecution, 3000)
   }
+}
+
+async function recoverSubmittedPipelines(generation?: number) {
+  const versionNo = batchId.value
+  if (!versionNo || disposed) return false
+  const result = await getArtifactVersionPipelines(versionNo)
+  if (disposed || batchId.value !== versionNo || generation !== undefined && generation !== submissionGeneration) return false
+  const rows = (result.pipelines || []).filter(pipeline => pipeline.batchId === versionNo)
+  if (!rows.length) return false
+  submittedIds.value = rows.map(pipeline => pipeline.id)
+  submittedPipelines.value = rows
+  workflowStep.value = 2
+  await router.replace({ path: '/batch-deploy', query: { batchId: versionNo, pipelineIds: submittedIds.value.join(',') } })
+  return true
+}
+
+async function pollSubmission(generation: number) {
+  try { await recoverSubmittedPipelines(generation) } catch { /* Submission result is reconciled after the request returns. */ }
+  if (!disposed && executing.value && generation === submissionGeneration) submissionTimer = window.setTimeout(() => pollSubmission(generation), 3000)
+}
+
+async function checkSubmissionResult() {
+  if (executing.value) return
+  try {
+    const found = await recoverSubmittedPipelines()
+    if (found) await refreshExecution()
+    else submissionError.value = '暂未查到已创建任务，请稍后重新查询或查看任务队列；不会自动重复提交。'
+  } catch (error) { submissionError.value = error instanceof Error ? error.message : '查询提交结果失败' }
 }
 
 async function startRollout() {
@@ -225,37 +309,8 @@ function executionStatus(pipeline: Pipeline) {
   return { type: type as 'success' | 'warning' | 'danger' | 'info', text }
 }
 
-async function loadVersions() {
-  loading.value = true
-  try {
-    const result = await listArtifactVersions(true)
-    versions.value = result.versions || []
-  } finally {
-    loading.value = false
-  }
-}
-
-function isVersionReady(version: ArtifactVersion) {
-  return (version.status === 'available' || version.status === 'ready' || version.status === 'success') && (version.remainingDeployableCount ?? version.deployableCount) > 0
-}
-
-function versionStatusType(version: ArtifactVersion) {
-  if (isVersionReady(version)) return 'success'
-  if (version.status === 'failed') return 'danger'
-  return 'warning'
-}
-
-function versionStatusText(version: ArtifactVersion) {
-  if (isVersionReady(version)) return '可部署'
-  if (version.deployableCount > 0 && version.remainingDeployableCount === 0) return '已提交更新'
-  if (version.status === 'failed') return '失败'
-  if (version.status === 'collecting' || version.status === 'running') return '导入中'
-  if (version.deployableCount === 0) return '无可部署制品'
-  return version.status || '未知'
-}
-
-async function activateVersion(versionNo: string) {
-  await loadVersionDetail(versionNo)
+async function activateVersion(versionNo: string, notifyEmpty = true) {
+  await loadVersionDetail(versionNo, notifyEmpty)
   workflowStep.value = 1
   await router.replace({
     path: '/batch-deploy',
@@ -263,19 +318,11 @@ async function activateVersion(versionNo: string) {
   })
 }
 
-async function selectVersion(version: ArtifactVersion) {
-  if (!isVersionReady(version)) {
-    ElMessage.warning('请选择可部署的更新记录')
-    return
-  }
-  sourceMode.value = 'existing'
-  await activateVersion(version.versionNo)
-}
-
 async function loadVersionDetail(versionNo: string, notifyEmpty = true) {
   loading.value = true
   try {
     const result = await getArtifactVersion(versionNo)
+    releaseVersion.value = result.version
     batchId.value = result.version.versionNo
     sourceType.value = result.version.sourceType
     sourceDir.value = result.version.targetPath || result.version.localDir || sourceDir.value
@@ -306,13 +353,6 @@ function versionItemToMatchResult(item: ArtifactVersionItem): MatchResult {
   }
 }
 
-function sourceTypeText(type: string) {
-  if (type === 'upload') return '本地上传'
-  if (type === 'download') return '服务器下载'
-  if (type === 'artifact') return '历史制品导入'
-  return type || '-'
-}
-
 function resultStatus(result: MatchResult) {
   if (result.updateUsed) return { type: 'info', text: '已提交更新' }
   if (result.skipped) return { type: 'info', text: '忽略' }
@@ -327,12 +367,15 @@ function startNewTask() {
   submittedIds.value = []
   submittedPipelines.value = []
   executionError.value = false
+  submissionError.value = ''
+  submissionUncertain.value = false
   sourceMode.value = 'upload'
   resetSelection()
 }
 
 function resetSelection() {
-  if (hasSubmitted.value) return
+  if (uploadLoading.value || hasSubmitted.value) return
+  uploadProgress.value = null
   workflowStep.value = 0
   batchId.value = ''
   sourceDir.value = ''
@@ -343,13 +386,18 @@ function resetSelection() {
 }
 
 async function executeDeploy() {
-  if (executing.value || hasSubmitted.value) return
+  if (executing.value || hasSubmitted.value || submissionUncertain.value) return
   if (deployableResults.value.length === 0) {
     ElMessage.warning('没有可部署制品')
     return
   }
   const items = deployableResults.value.map(result => ({ fileName: result.fileName, appId: result.appId }))
+  let submissionSent = false
+  let submissionAccepted = false
   executing.value = true
+  submissionError.value = ''
+  submissionStartedAt.value = submissionNow.value = Date.now()
+  submissionClock = window.setInterval(() => { submissionNow.value = Date.now() }, 1000)
   try {
     await settingsStore.fetchSettings()
     if (deployableResults.value.some(item => item.appType === 'vue')) {
@@ -360,8 +408,16 @@ async function executeDeploy() {
         )
       } catch { return }
     }
+    const generation = ++submissionGeneration
+    submissionSent = true
+    void pollSubmission(generation)
     const result = await executeBatchDeploy(sourceDir.value, items, batchId.value)
-    submittedIds.value = (result.pipelines || []).map(pipeline => Number(pipeline.id)).filter(id => Number.isSafeInteger(id) && id > 0)
+    submissionAccepted = true
+    submissionGeneration++
+    if (submissionTimer) window.clearTimeout(submissionTimer)
+    submissionTimer = undefined
+    if (disposed) return
+    submittedIds.value = [...new Set([...submittedIds.value, ...(result.pipelines || []).map(pipeline => Number(pipeline.id)).filter(id => Number.isSafeInteger(id) && id > 0)])]
     if (hasSubmitted.value) {
       // Persist accepted task IDs before any follow-up reads can fail.
       await router.replace({ path: '/batch-deploy', query: { batchId: batchId.value, pipelineIds: submittedIds.value.join(',') } })
@@ -372,7 +428,7 @@ async function executeDeploy() {
     matchResults.value.forEach(item => { if (submittedFiles.has(item.fileName)) item.updateUsed = true })
     selectedFiles.value = selectedFiles.value.filter(file => !submittedFiles.has(file))
     // Refresh failures must not hide accepted tasks or re-enable their inputs.
-    await Promise.allSettled([loadVersionDetail(batchId.value, false), loadVersions()])
+    await loadVersionDetail(batchId.value, false).catch(() => {})
     const errors = result.errors || []
     if (errors.length > 0) {
       await ElMessageBox.alert(
@@ -383,16 +439,45 @@ async function executeDeploy() {
     } else {
       ElMessage.success(`已创建 ${result.pipelines?.length || 0} 个制品更新任务`)
     }
+  } catch (error) {
+    if (disposed) return
+    const message = error instanceof Error ? error.message : '提交连接中断'
+    if (!submissionSent) {
+      submissionError.value = `提交前检查失败，本次尚未创建任务，可修正后重试。${message}`
+      return
+    }
+    submissionUncertain.value = !submissionAccepted
+    try { await recoverSubmittedPipelines() } catch { /* Retain any task IDs observed before the network failed. */ }
+    submissionError.value = submissionAccepted ? `任务已提交，界面刷新失败。请查看任务队列或重新查询。${message}` : hasSubmitted.value ? `提交返回异常，但已找到 ${submittedIds.value.length} 个任务。请核对下方任务及队列，避免重复提交。${message}` : `提交结果尚未确认，请查询已创建任务，避免重复提交。${message}`
   } finally {
     executing.value = false
+    submissionGeneration++
+    if (submissionTimer) window.clearTimeout(submissionTimer)
+    if (submissionClock) window.clearInterval(submissionClock)
+    submissionTimer = submissionClock = undefined
+    if (!disposed && hasSubmitted.value) void refreshExecution()
   }
 }
 
 function chooseFiles() {
+  if (uploadLoading.value) return
   fileInput.value?.click()
 }
 
+function stopUploadClock() {
+  if (uploadTimer !== undefined) window.clearInterval(uploadTimer)
+  uploadTimer = undefined
+}
+
+function setUploadPhase(progress: UploadProgress, phase: UploadProgress['phase']) {
+  if (progress.phase !== phase) {
+    progress.phase = phase
+    progress.phaseStartedAt = Date.now()
+  }
+}
+
 function chooseDirectory() {
+  if (uploadLoading.value) return
   dirInput.value?.click()
 }
 
@@ -413,39 +498,121 @@ async function handleDrop(event: DragEvent) {
   await uploadEntries(files.map(file => ({ file, path: file.name })))
 }
 
-async function uploadEntries(entries: UploadEntry[]) {
+function pauseUpload() {
+  uploadController?.abort()
+}
+
+async function retryUpload(restart = false) {
+  const progress = uploadProgress.value
+  if (uploadLoading.value || !progress) return
+  if (progress.batchId) {
+    uploadLoading.value = true
+    progress.finishedAt = undefined
+    uploadNow.value = Date.now()
+    uploadTimer = window.setInterval(() => { uploadNow.value = Date.now() }, 1000)
+    try {
+      setUploadPhase(progress, 'matching')
+      progress.error = undefined
+      await activateVersion(progress.batchId)
+      setUploadPhase(progress, 'success')
+    } catch (error) {
+      setUploadPhase(progress, 'failed')
+      progress.error = `更新记录 ${progress.batchId} 已生成，无需重新上传。${error instanceof Error ? error.message : '读取失败'}`
+    } finally {
+      progress.finishedAt = Date.now()
+      uploadNow.value = progress.finishedAt
+      stopUploadClock()
+      uploadLoading.value = false
+    }
+    return
+  }
+  await uploadEntries(lastUploadEntries, restart)
+}
+
+async function uploadEntries(entries: UploadEntry[], restart = false) {
   if (uploadLoading.value || hasSubmitted.value) return
   const artifacts = entries.filter(entry => {
     const name = entry.path.toLowerCase()
-    return name.endsWith('.jar') || name.endsWith('.zip')
+    return name.endsWith('.jar') || name.endsWith('.zip') || entry.path.replace(/\\/g, '/').split('/').pop() === 'version.json'
   })
   if (artifacts.length === 0) {
-    ElMessage.warning('未找到 .jar / .zip 制品文件')
+    ElMessage.warning('未找到 .jar / .zip 制品或 version.json')
     return
   }
 
-  const formData = new FormData()
-  for (const entry of artifacts) {
-    formData.append('files', entry.file, entry.path)
-  }
-
   uploadLoading.value = true
+  lastUploadEntries = artifacts
+  uploadController = new AbortController()
+  const controller = uploadController
+  stopUploadClock()
+  uploadNow.value = Date.now()
+  uploadProgress.value = {
+    ...createUploadActivity(uploadNow.value),
+    phase: 'preparing',
+    phaseStartedAt: uploadNow.value,
+    fileCount: artifacts.length,
+    fileBytes: artifacts.reduce((total, entry) => total + entry.file.size, 0),
+    network: createUploadActivity(uploadNow.value),
+    inFlightBytes: 0, completedFiles: 0, currentFiles: [], detail: '', retry: '', validationDone: 0, validationFile: '',
+  }
+  const progress = uploadProgress.value
+  uploadTimer = window.setInterval(() => { uploadNow.value = Date.now() }, 1000)
   try {
-    const resp = await fetch('/api/batch-deploy/upload', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${localStorage.getItem('df-token') || ''}` },
-      body: formData,
+    const result = await uploadArtifacts(artifacts, {
+      signal: controller.signal,
+      concurrency: uploadConcurrency.value,
+      restart,
+      onProgress(event) {
+        if (disposed || controller.signal.aborted) return
+        uploadNow.value = Date.now()
+        recordUploadActivity(progress, event.confirmedBytes, event.totalBytes, uploadNow.value)
+        recordUploadActivity(progress.network, event.transferredBytes, undefined, uploadNow.value)
+        progress.inFlightBytes = event.inFlightBytes
+        progress.completedFiles = event.completedFiles
+        progress.currentFiles = event.currentFiles
+      },
+      onPhase(phase, detail) {
+        if (disposed || controller.signal.aborted) return
+        setUploadPhase(progress, phase)
+        progress.detail = detail
+        progress.retry = ''
+        if (phase === 'processing') progress.network.transferredAt ??= Date.now()
+      },
+      onSnapshot(session) {
+        if (disposed || controller.signal.aborted) return
+        progress.validationDone = session.completedFiles
+        progress.validationFile = session.currentFile
+      },
+      onRetry(detail) { if (!disposed && !controller.signal.aborted) progress.retry = detail },
     })
-    const data = await resp.json()
-    if (data.code !== 0) {
-      ElMessage.error(data.message || '上传失败')
+    if (disposed) return
+    progress.transferredAt ??= Date.now()
+    progress.batchId = result.batchId
+    const metadataOnly = artifacts.every(entry => entry.path.replace(/\\/g, '/').split('/').pop() === 'version.json')
+    if (result.count === 0 && (!metadataOnly || result.failed?.length)) {
+      const message = result.failed?.map(file => `${file.fileName}：${file.error}`).join('；') || '没有上传成功的制品文件'
+      setUploadPhase(progress, 'failed')
+      progress.error = message
+      ElMessage.error(message)
       return
     }
-    ElMessage.success(`已上传 ${data.data.count} 个制品文件，生成版本 ${data.data.batchId}`)
-    await loadVersions()
-    await activateVersion(data.data.batchId)
+    setUploadPhase(progress, 'matching')
+    if (result.failed?.length) ElMessage.warning(`${result.failed.length} 个制品上传失败，其余 ${result.count} 个已上传`)
+    else ElMessage.success(metadataOnly ? '业务版本信息已保存' : `已上传 ${result.count} 个制品文件，生成记录 ${result.batchId}`)
+    await activateVersion(result.batchId, !metadataOnly)
+    setUploadPhase(progress, 'success')
+  } catch (error) {
+    if (disposed) return
+    setUploadPhase(progress, controller.signal.aborted ? 'paused' : 'failed')
+    const message = error instanceof Error ? error.message : '请求失败，请重试'
+    progress.error = controller.signal.aborted ? undefined : progress.batchId ? `更新记录 ${progress.batchId} 已生成，无需重新上传。${message}` : message
   } finally {
+    progress.finishedAt = Date.now()
+    progress.network.finishedAt = progress.finishedAt
+    uploadNow.value = progress.finishedAt
+    stopUploadClock()
     uploadLoading.value = false
+    if (uploadController === controller) uploadController = undefined
   }
 }
 
@@ -582,7 +749,6 @@ async function pollDownload(jobId: string) {
     ElMessage.success('下载完成，已生成更新记录')
     await loadLocalDownloadDir(job.targetPath || job.localDir)
     activeDownloadJob.value = null
-    await loadVersions()
     if (job.batchId && workflowStep.value === 0 && !hasSubmitted.value) await activateVersion(job.batchId)
     return
   }
@@ -688,6 +854,8 @@ function formatDownloadSize(size?: number) {
       </el-steps>
     </section>
 
+    <el-alert v-if="executing" :title="`正在校验制品并创建镜像任务，已等待 ${formatUploadDuration((submissionNow-submissionStartedAt)/1000)}`" :description="`已查询到 ${submittedIds.length} 个任务。已生成的任务会显示在下方并进入队列，其余文件仍在准备，请勿重复提交。`" type="info" :closable="false" show-icon />
+    <div v-if="submissionError" class="submission-error"><el-alert :title="submissionError" type="warning" :closable="false" show-icon/><el-button :disabled="executing" :loading="executionLoading" @click="checkSubmissionResult">查询已创建任务</el-button></div>
     <section v-if="workflowStep === 0" class="workflow-section">
       <div class="section-title">
         <div>
@@ -695,23 +863,71 @@ function formatDownloadSize(size?: number) {
         </div>
         <el-segmented
           v-model="sourceMode"
+          :disabled="uploadLoading"
           :options="[
             { label: '离线上传', value: 'upload' },
             { label: '服务器下载', value: 'download' },
-            { label: '选择更新记录', value: 'existing' },
           ]"
         />
       </div>
 
-      <div v-if="sourceMode === 'upload'" class="upload-zone" v-loading="uploadLoading" @dragover.prevent @drop.prevent="handleDrop">
+      <div v-if="sourceMode === 'upload'" class="upload-zone" :aria-busy="uploadLoading" @dragover.prevent @drop.prevent="handleDrop">
         <el-icon :size="40"><Upload /></el-icon>
         <strong>拖拽 JAR / ZIP 到此处</strong>
 
-        <div class="upload-actions">
-          <el-button type="primary" @click="chooseFiles">选择文件</el-button>
-          <el-button @click="chooseDirectory">选择目录</el-button>
+        <div v-if="uploadProgress" class="upload-progress" role="group" aria-label="制品上传进度">
+          <div class="upload-progress-title" role="status" aria-live="polite">{{ uploadStatusText }}</div>
+          <div class="upload-progress-detail">共 {{ uploadProgress.fileCount }} 个制品文件 · {{ uploadProgress.fileBytes ? formatDownloadSize(uploadProgress.fileBytes) : '0 B' }}</div>
+          <div class="upload-progress-detail">服务端确认接收进度 · 已接收 {{ uploadProgress.completedFiles }} / {{ uploadProgress.fileCount }} 个文件</div>
+          <el-progress
+            :percentage="uploadPercent"
+            :show-text="Boolean(uploadProgress.total) || uploadProgress.transferredAt !== undefined"
+            :format="formatUploadPercent"
+            :indeterminate="uploadLoading && uploadProgress.phase === 'preparing' && !uploadProgress.total"
+            :status="uploadProgress.phase === 'failed' ? 'exception' : uploadProgress.phase === 'success' ? 'success' : undefined"
+          />
+          <div class="upload-progress-detail">
+            已确认 {{ formatUploadBytes(uploadProgress.loaded) }} / {{ formatUploadBytes(uploadProgress.fileBytes) }}
+            <template v-if="uploadProgress.inFlightBytes"> · 正在发送 {{ formatUploadBytes(uploadProgress.inFlightBytes) }}（待确认）</template>
+          </div>
+          <div v-if="uploadProgress.currentFiles.length" class="upload-progress-detail">当前文件：{{ uploadProgress.currentFiles.join('、') }}</div>
+          <div v-if="uploadProgress.phase === 'preparing'" class="upload-progress-detail">{{ uploadProgress.detail }}</div>
+          <div v-if="uploadProgress.retry && uploadLoading" class="upload-progress-detail">{{ uploadProgress.retry }}</div>
+          <template v-if="uploadActivity">
+            <div class="upload-metrics">
+              <div><span>近 10 秒速度</span><strong>{{ formatUploadSpeed(uploadActivity.recentBps) }}</strong></div>
+              <div><span>已用时间</span><strong>{{ formatUploadDuration(uploadActivity.elapsedMs / 1000) }}</strong></div>
+              <div><span>传输预计剩余</span><strong>{{ uploadProgress.network.transferredAt !== undefined ? '传输已完成' : uploadRemainingSeconds !== undefined ? `约 ${formatUploadDuration(uploadRemainingSeconds)}` : '暂无法估算' }}</strong></div>
+            </div>
+            <div class="upload-progress-detail">
+              平均速度 {{ formatUploadSpeed(uploadActivity.averageBps) }}
+              <template v-if="uploadProgress.network.transferredAt === undefined"> · {{ uploadProgress.network.loaded ? `${formatUploadDuration(uploadActivity.idleMs / 1000)}前有新增传输` : '尚无新增传输' }}</template>
+            </div>
+            <el-alert v-if="uploadLoading && uploadProgress.phase === 'uploading' && uploadActivity.stalled" class="upload-notice" title="上传进度暂未更新" :description="`已 ${formatUploadDuration(uploadActivity.idleMs / 1000)} 无新增传输。当前分片连续 90 秒无进展将自动重试，也可暂停后继续。`" type="warning" :closable="false" show-icon />
+          </template>
+          <div v-if="uploadLoading && (uploadProgress.phase === 'processing' || uploadProgress.phase === 'matching')" class="upload-progress-detail">
+            {{ uploadProgress.phase === 'processing' ? `已校验 ${uploadProgress.validationDone} / ${uploadProgress.fileCount} 个文件${uploadProgress.validationFile ? `，当前：${uploadProgress.validationFile}` : ''}` : '读取应用匹配结果' }} · 已等待 {{ formatUploadDuration(uploadPhaseWait) }}。文件传输已结束，收到处理结果后会自动继续。
+          </div>
+          <div v-if="uploadProgress.error" class="upload-error">{{ uploadProgress.error }}</div>
+          <el-button v-if="uploadLoading && ['preparing', 'uploading', 'processing'].includes(uploadProgress.phase)" @click="pauseUpload">{{ uploadProgress.phase === 'processing' ? '暂停等待' : '暂停上传' }}</el-button>
+          <template v-if="!uploadLoading && ['paused', 'failed'].includes(uploadProgress.phase)">
+            <el-button type="primary" @click="retryUpload()">{{ uploadProgress.batchId ? '读取更新记录' : '继续上传' }}</el-button>
+            <el-button v-if="!uploadProgress.batchId && uploadProgress.network.transferredAt === undefined" @click="retryUpload(true)">重新上传</el-button>
+          </template>
+          <el-button v-if="uploadProgress.phase === 'failed' && uploadProgress.batchId" link type="primary" @click="router.push('/artifacts/versions')">查看已上传的更新记录</el-button>
         </div>
-        <input ref="fileInput" type="file" multiple accept=".jar,.zip" hidden @change="handleUploadInput" />
+        <div class="upload-actions">
+          <el-button type="primary" :disabled="uploadLoading" @click="chooseFiles">选择文件</el-button>
+          <el-button :disabled="uploadLoading" @click="chooseDirectory">选择目录</el-button>
+          <el-select v-model="uploadConcurrency" :disabled="uploadLoading" style="width: 160px" aria-label="上传并发数">
+            <el-option label="稳定模式 · 1 路" :value="1" />
+            <el-option label="标准模式 · 3 路" :value="3" />
+            <el-option label="高速模式 · 6 路" :value="6" />
+          </el-select>
+        </div>
+        <div class="upload-progress-detail">支持分片续传。中断或刷新页面后，重新选择原文件或目录即可继续。</div>
+        <div class="upload-progress-detail">目录中可包含 version.json，用于记录业务版本、更新说明及其他业务信息。</div>
+        <input ref="fileInput" type="file" multiple accept=".jar,.zip,.json" hidden @change="handleUploadInput" />
         <input ref="dirInput" type="file" multiple webkitdirectory directory hidden @change="handleUploadInput" />
       </div>
 
@@ -834,34 +1050,11 @@ function formatDownloadSize(size?: number) {
         </div>
       </div>
 
-      <div v-if="sourceMode === 'existing'" class="existing-layout" v-loading="loading">
-        <el-table :data="readyVersions" border stripe height="320" table-layout="auto">
-          <el-table-column prop="versionNo" label="版本号" min-width="210" show-overflow-tooltip />
-          <el-table-column label="来源" width="110">
-            <template #default="{ row }">{{ sourceTypeText(row.sourceType) }}</template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <el-tag :type="versionStatusType(row)" size="small">{{ versionStatusText(row) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="count" label="制品数" width="86" />
-          <el-table-column prop="remainingDeployableCount" label="可更新" width="86" />
-          <el-table-column prop="invalidCount" label="不可读" width="86" />
-          <el-table-column prop="unmatchedCount" label="未匹配" width="86" />
-          <el-table-column label="更新时间" width="170">
-            <template #default="{ row }">{{ row.updatedAt ? new Date(row.updatedAt).toLocaleString() : '-' }}</template>
-          </el-table-column>
-          <el-table-column label="操作" width="96" fixed="right">
-            <template #default="{ row }">
-              <el-button link type="primary" @click="selectVersion(row)">选择</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
+
     </section>
 
     <section v-if="workflowStep === 1" class="workflow-section matching-section">
+      <ReleaseVersionInfo v-if="releaseVersion" :version="releaseVersion" />
       <div class="section-title">
         <div>
           <strong>应用匹配</strong>
@@ -936,13 +1129,13 @@ function formatDownloadSize(size?: number) {
       <span v-if="hasVersion" class="version-label">{{ batchId }}</span>
       <div class="step-actions">
         <template v-if="workflowStep === 0">
-          <el-button @click="resetSelection">清除选择</el-button>
-          <el-button type="primary" @click="workflowStep = 1">下一步：应用匹配</el-button>
+          <el-button :disabled="uploadLoading" @click="resetSelection">清除选择</el-button>
+          <el-button type="primary" :disabled="uploadLoading" @click="workflowStep = 1">下一步：应用匹配</el-button>
         </template>
         <template v-else-if="!hasSubmitted">
           <el-button :disabled="executing" @click="workflowStep--">上一步</el-button>
-          <el-button v-if="workflowStep === 1" type="primary" :disabled="!deployableResults.length" @click="workflowStep = 2">下一步：制作镜像（{{ deployableResults.length }}）</el-button>
-          <el-button v-else type="primary" :disabled="!deployableResults.length" :loading="executing" @click="executeDeploy">{{ settingsStore.autoRollout ? '开始更新' : '开始制作镜像' }}</el-button>
+          <el-button v-if="workflowStep === 1" type="primary" :disabled="!deployableResults.length||submissionUncertain" @click="workflowStep = 2">下一步：制作镜像（{{ deployableResults.length }}）</el-button>
+          <el-button v-else type="primary" :disabled="!deployableResults.length||submissionUncertain" :loading="executing" @click="executeDeploy">{{ settingsStore.autoRollout ? '开始更新' : '开始制作镜像' }}</el-button>
         </template>
         <template v-else-if="workflowStep === 2">
           <el-button type="primary" :disabled="!imagesComplete || !hasReadyImages" @click="workflowStep = 3">下一步：滚动更新</el-button>
@@ -1010,6 +1203,14 @@ function formatDownloadSize(size?: number) {
 }
 .upload-zone span { max-width: 520px; text-align: center; font-size: 12px; color: #909399; }
 .upload-actions { margin-top: 8px; display: flex; gap: 10px; }
+.upload-progress { box-sizing: border-box; width: min(560px, 100%); padding: 12px 20px; }
+.upload-progress-title { margin-bottom: 8px; text-align: center; font-weight: 600; }
+.upload-progress-detail { margin: 6px 0; text-align: center; font-size: 12px; color: #606266; }
+.upload-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+.upload-metrics > div { display: flex; flex-direction: column; gap: 5px; text-align: center; font-size: 12px; }
+.upload-metrics strong { font-size: 13px; overflow-wrap: anywhere; }
+.upload-notice { margin-top: 10px; text-align: left; }
+.upload-error { margin-top: 8px; color: #f56c6c; overflow-wrap: anywhere; }
 .download-layout { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(360px, 0.92fr); gap: 12px; }
 .download-column { min-width: 0; }
 .column-title { height: 30px; display: flex; align-items: center; font-size: 14px; font-weight: 600; color: #303133; }

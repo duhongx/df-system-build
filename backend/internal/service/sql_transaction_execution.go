@@ -87,18 +87,19 @@ func executeReleaseSQLTransactionGroup(ctx context.Context, file *model.SQLChang
 		settled = rollbackErr == nil
 		unknown := commitUncertain || rollbackErr != nil
 		now := time.Now()
+		causeMessage := SQLExecutionErrorMessage(cause)
 		for i := range rows {
 			status, outcome := "FAILED", "NOT_EXECUTED"
-			message := fmt.Sprintf("%s在第 %d 行失败，本句未执行；整个事务组需一起重试：%v", label, rows[index].LineNumber, cause)
+			message := fmt.Sprintf("%s在第 %d 行失败，本句未执行；整个事务组需一起重试：%v", label, rows[index].LineNumber, causeMessage)
 			if submitted[i] {
 				outcome = "ROLLED_BACK"
-				message = fmt.Sprintf("%s已整体回滚，本句的修改未提交；失败位置为第 %d 行：%v", label, rows[index].LineNumber, cause)
+				message = fmt.Sprintf("%s已整体回滚，本句的修改未提交；失败位置为第 %d 行：%v", label, rows[index].LineNumber, causeMessage)
 			}
 			if i == index {
-				outcome, message = "FAILED", fmt.Sprintf("%s失败，事务组已回滚：%v", label, cause)
+				outcome, message = "FAILED", fmt.Sprintf("%s失败，事务组已回滚：%v", label, causeMessage)
 			}
 			if !started {
-				message = fmt.Sprintf("%s未能开始，本句未执行：%v", label, cause)
+				message = fmt.Sprintf("%s未能开始，本句未执行：%v", label, causeMessage)
 				outcome = "NOT_EXECUTED"
 			}
 			if stopped {
@@ -114,9 +115,9 @@ func executeReleaseSQLTransactionGroup(ctx context.Context, file *model.SQLChang
 			}
 			if unknown {
 				status, outcome = "UNKNOWN", "UNKNOWN"
-				message = fmt.Sprintf("%s执行结果待核实，不能直接重试：%v", label, cause)
+				message = fmt.Sprintf("%s执行结果待核实，不能直接重试：%v", label, causeMessage)
 				if rollbackErr != nil {
-					message += "；回滚未获确认：" + rollbackErr.Error()
+					message += "；回滚未获确认：" + SQLExecutionErrorMessage(rollbackErr)
 				}
 				if commitUncertain {
 					message += "；COMMIT 未获确定结果，事务可能已经提交"
@@ -146,7 +147,7 @@ func executeReleaseSQLTransactionGroup(ctx context.Context, file *model.SQLChang
 			return fmt.Errorf("%s结束后保存记录失败，结果待核实: %w", label, err)
 		}
 		if unknown {
-			return fmt.Errorf("%s结果待核实：%v", label, cause)
+			return fmt.Errorf("%s结果待核实：%v", label, causeMessage)
 		}
 		if stopped {
 			return errReleaseSQLTransactionStopped

@@ -36,7 +36,7 @@ PY
 cd "$stage/backend"
 # Check the frontend actually embedded by Go, including the route referenced
 # by index.html, before producing a customer binary.
-go test ./internal/web -run 'TestEmbeddedSQLExecutionActions|TestSPACacheAndMissingAssets' -count=1
+go test ./internal/web -run 'TestEmbeddedSQLExecutionActions|TestEmbeddedResumableArtifactUpload|TestEmbeddedOperationalFixes|TestSPACacheAndMissingAssets' -count=1
 CGO_ENABLED=1 GOOS="$target_os" GOARCH="$target_arch" CC="$build_cc" \
   go build -trimpath -ldflags='-s -w' -o "$stage/dfops" ./cmd/server
 

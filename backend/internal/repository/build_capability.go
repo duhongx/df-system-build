@@ -4,6 +4,8 @@ import (
 	"df-build-server/internal/model"
 	"fmt"
 	"strings"
+
+	"gorm.io/gorm"
 )
 
 // Source builds are enabled only by the deployment environment. Legacy
@@ -32,7 +34,19 @@ func migrateLocalBuildConfigs() error {
 		return nil
 	}
 	return DB.Exec(`
-UPDATE build_configs SET status = 'offline', build_mode = 'local' WHERE build_mode = 'docker';
+UPDATE build_configs SET status = 'offline', build_mode = 'local', retired = true WHERE build_mode = 'docker';
 ALTER TABLE build_configs ALTER COLUMN build_mode SET DEFAULT 'local';
 `).Error
+}
+
+// Earlier releases already converted build_mode to local. The retained image
+// column identifies those historical container configs without matching names
+// or hiding ordinary disabled native configurations. Applied once via v8.
+func archiveLegacyDockerBuildConfigs(tx *gorm.DB) error {
+	if !tx.Migrator().HasColumn("build_configs", "docker_image") {
+		return nil
+	}
+	return tx.Model(&model.BuildConfig{}).
+		Where("status = ? AND COALESCE(docker_image, '') <> ''", "offline").
+		UpdateColumn("retired", true).Error
 }

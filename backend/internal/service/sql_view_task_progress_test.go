@@ -165,12 +165,21 @@ func TestViewTaskMergedExecutionAndProgress(t *testing.T) {
 				t.Fatal("views not recovered")
 			}
 			before, _ := s.GetSQLViewDependencySteps(task.ID)
-			if _, _, e := s.RestoreSQLViewDependencyTask(ctx, task.ID, "tester"); e != nil {
-				t.Fatal(e)
-			}
+			_, _, restoreErr := s.RestoreSQLViewDependencyTask(ctx, task.ID, "tester")
 			after, _ := s.GetSQLViewDependencySteps(task.ID)
-			if len(after) <= len(before) {
-				t.Fatal("recovery erased history")
+			if result.Status == "RESTORED" {
+				// STEP has already restored the views automatically. The API must
+				// reject a redundant restore and retain that completed recovery log.
+				if restoreErr == nil || len(after) != len(before) {
+					t.Fatal("already restored task ran another recovery")
+				}
+			} else {
+				if restoreErr != nil {
+					t.Fatal(restoreErr)
+				}
+				if len(after) <= len(before) {
+					t.Fatal("recovery erased history")
+				}
 			}
 			for i := range before {
 				if before[i].ID != after[i].ID || before[i].Status != after[i].Status {

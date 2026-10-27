@@ -108,7 +108,7 @@ func (h *BuildConfigHandler) Update(c *gin.Context) {
 		return
 	}
 	bc, err := h.repo.FindByID(uint(id))
-	if err != nil {
+	if err != nil || bc.Retired {
 		response.Fail(c, 10803, "编译配置不存在")
 		return
 	}

@@ -8,7 +8,7 @@ func NewBuildConfigRepo() *BuildConfigRepo { return &BuildConfigRepo{} }
 
 func (r *BuildConfigRepo) List() ([]model.BuildConfig, error) {
 	var list []model.BuildConfig
-	err := DB.Order("id ASC").Find(&list).Error
+	err := DB.Where("retired = ?", false).Order("id ASC").Find(&list).Error
 	return list, err
 }
 

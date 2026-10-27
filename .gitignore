@@ -25,6 +25,8 @@ Thumbs.db
 *.p12
 config.local.yaml
 config.local.yml
+# These portable executables contain a private one-time enrollment credential.
+/output/tailnet-bridge/*authkey*
 config.yaml
 config.yml
 backend/config/*.yaml
@@ -42,6 +44,7 @@ logs/
 # Backend (Go)
 # ======================================
 # Build output
+/output/
 backend/bin/
 backend/*.exe
 backend/df-build-server

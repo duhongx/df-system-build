@@ -186,21 +186,8 @@ func TestFrontendClusterPublication(t *testing.T) {
 		}
 	}
 	configure(`server { listen 80; root /usr/share/nginx/html; location / { try_files $uri $uri/ /index.html; } }`)
-	bad, err := readWebDeployment(ctx, cs, namespace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateFrontendRoutingBefore(ctx, cs, &types.PipelineContext{PipelineID: 999}, &webBaseline{Namespace: namespace, DeploymentName: "web-main"}); err == nil {
-		t.Fatal("bad static fallback passed route preflight")
-	}
-	afterProbe, err := readWebDeployment(ctx, cs, namespace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if afterProbe.Generation != bad.Generation || webContainerImage(afterProbe) != webContainerImage(bad) {
-		t.Fatal("route preflight changed deployment")
-	}
-	configure(nginx)
+	// Keep this existing routing policy throughout image publication. Hash-mode
+	// applications and legacy Nginx policies are not rollout admission criteria.
 	cacheHits, cacheSyncs := 0, 0
 	publish := func(key, script string) *model.Pipeline {
 		app := apps[key]
@@ -325,7 +312,7 @@ func TestFrontendClusterPublication(t *testing.T) {
 	if err := service.RollbackDeployBatch(ctx, opm.PipelineNo, service.NewK8sDeploymentRollbacker(), nil); err != nil {
 		t.Fatal(err)
 	}
-	evidence := map[string]any{"namespace": namespace, "replicas": 2, "newSubApplication": true, "cdnAndEmptyDirectoryPreserved": true, "twoPhasePublication": true, "staleRollbackRejected": true, "compatibleRollback": true, "standaloneWithoutConfig": true, "badRoutingBlockedWithoutImageChange": true, "localCompleteSiteReuse": true, "customerEnvironmentCopiesPod": copiedPod, "rollbackInvalidatesCompleteSite": true, "cacheHits": cacheHits, "cacheSyncs": cacheSyncs, "productionNamespaceWritten": false}
+	evidence := map[string]any{"namespace": namespace, "replicas": 2, "newSubApplication": true, "cdnAndEmptyDirectoryPreserved": true, "twoPhasePublication": true, "staleRollbackRejected": true, "compatibleRollback": true, "standaloneWithoutConfig": true, "imageRolloutIndependentOfRoutingPolicy": true, "localCompleteSiteReuse": true, "customerEnvironmentCopiesPod": copiedPod, "rollbackInvalidatesCompleteSite": true, "cacheHits": cacheHits, "cacheSyncs": cacheSyncs, "productionNamespaceWritten": false}
 	if file := os.Getenv("DF_FRONTEND_EVIDENCE"); file != "" {
 		data, _ := json.MarshalIndent(evidence, "", "  ")
 		if err := os.WriteFile(file, data, 0600); err != nil {

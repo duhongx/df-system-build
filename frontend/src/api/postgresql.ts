@@ -256,7 +256,7 @@ export const getSQLViewDependencyTask = (id: number, silentError = false) =>
   request.get<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}`, { silentError })
 
 // 多步 DDL 同步等待服务端完成；执行时限由服务端 lock_timeout / statement_timeout 控制。
-const viewDependencyOperationOptions = { timeout: 0 }
+const viewDependencyOperationOptions = { timeout: 0, silentError: true }
 
 export const analyzeSQLViewDependencyTask = (id: number) =>
   request.post<any, SQLViewDependencyTaskResult>(`/postgresql/view-dependency-tasks/${id}/analyze`, undefined, viewDependencyOperationOptions)
@@ -466,12 +466,12 @@ export interface SQLFileViewTransferPreview {
   fileId: number
   fileName: string
   units: SQLViewTransferUnit[]
-  excluded: {id: number; startLine: number; endLine: number; reason: string}[]
+  excluded: {id: number; startLine: number; endLine: number; reason: string; taskIds?: number[]}[]
   previewHash: string
 }
 export const previewSQLFileViewTransfer = (target: SQLFileViewTransferTarget) =>
-  request.post<any, SQLFileViewTransferPreview>(`/postgresql/sql-files/${target.fileId}/view-dependency/preview`, {all: !!target.all, statementIds: target.statementIds})
+  request.post<any, SQLFileViewTransferPreview>(`/postgresql/sql-files/${target.fileId}/view-dependency/preview`, {all: !!target.all, statementIds: target.statementIds}, viewDependencyOperationOptions)
 export const transferSQLFileToViewTask = (target: SQLFileViewTransferTarget, selectedIds: number[], previewHash: string) =>
-  request.post<any, SQLViewDependencyTask>(`/postgresql/sql-files/${target.fileId}/view-dependency`, {all: !!target.all, statementIds: target.statementIds, selectedIds, previewHash})
+  request.post<any, SQLViewDependencyTask>(`/postgresql/sql-files/${target.fileId}/view-dependency`, {all: !!target.all, statementIds: target.statementIds, selectedIds, previewHash}, viewDependencyOperationOptions)
 
 export const cancelSQLViewTaskTransfer=(id:number)=>request.post<any,null>(`/postgresql/view-dependency-tasks/${id}/cancel-transfer`)

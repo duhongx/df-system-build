@@ -119,7 +119,7 @@ func SeedCoreData() {
 	// === Always: Admin user (only if "admin" doesn't exist) ===
 	var adminUser model.User
 	if DB.Where("username = ?", "admin").First(&adminUser).Error != nil {
-		hash, _ := bcrypt.GenerateFromPassword([]byte("123456"), bcrypt.DefaultCost)
+		hash, _ := bcrypt.GenerateFromPassword([]byte("cloudhis@2123"), bcrypt.DefaultCost)
 		admin := model.User{
 			Username:     "admin",
 			PasswordHash: string(hash),
@@ -128,7 +128,7 @@ func SeedCoreData() {
 			Department:   "技术部",
 		}
 		DB.Create(&admin)
-		logger.Log.Info("Default admin user created (admin/123456)")
+		logger.Log.Info("Default admin user created")
 	}
 
 	// === Always: Settings keys (only insert missing) ===

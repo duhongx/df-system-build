@@ -90,6 +90,7 @@ func (s *K8sDeployStage) Run(ctx context.Context, pCtx *types.PipelineContext) (
 		runErr = fmt.Errorf("%w；部署进度=%s；线上状态=%s", runErr, phase, states[phase])
 		if result != nil {
 			result.Error = runErr.Error()
+			result.OnlineState = states[phase]
 		}
 	}()
 	checkpoint := func(next string) error {

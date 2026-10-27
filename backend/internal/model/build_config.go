@@ -12,6 +12,7 @@ type BuildConfig struct {
 	EnvVars        string    `gorm:"type:text" json:"envVars"`              // local mode, KEY=VALUE per line
 	Description    string    `gorm:"size:255" json:"description"`
 	Status         string    `gorm:"size:20;default:online" json:"status"`
+	Retired        bool      `gorm:"not null;default:false" json:"-"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 }

@@ -38,6 +38,7 @@ type SQLViewTransferExclusion struct {
 	StartLine int    `json:"startLine"`
 	EndLine   int    `json:"endLine"`
 	Reason    string `json:"reason"`
+	TaskIDs   []uint `json:"taskIds,omitempty"`
 }
 
 type SQLFileViewTransferPreview struct {
@@ -129,7 +130,16 @@ func buildSQLFileViewTransferPreview(file model.SQLChangeFile, rows []model.SQLC
 				}
 			}
 			if issue != nil {
-				preview.Excluded = append(preview.Excluded, SQLViewTransferExclusion{ID: block[0].ID, StartLine: block[0].LineNumber, EndLine: block[len(block)-1].LineNumber, Reason: issue.Error()})
+				linked := map[uint]bool{}
+				var taskIDs []uint
+				for _, row := range block {
+					if row.ViewDependencyTaskID > 0 && !linked[row.ViewDependencyTaskID] {
+						linked[row.ViewDependencyTaskID] = true
+						taskIDs = append(taskIDs, row.ViewDependencyTaskID)
+					}
+				}
+				sort.Slice(taskIDs, func(i, j int) bool { return taskIDs[i] < taskIDs[j] })
+				preview.Excluded = append(preview.Excluded, SQLViewTransferExclusion{ID: block[0].ID, StartLine: block[0].LineNumber, EndLine: block[len(block)-1].LineNumber, Reason: issue.Error(), TaskIDs: taskIDs})
 			} else {
 				preview.Units = append(preview.Units, unit)
 			}

@@ -14,7 +14,7 @@ func DefaultBuildConfig(appType string) (*model.BuildConfig, error) {
 		return nil, fmt.Errorf("不支持的应用类型: %s", appType)
 	}
 	var configs []model.BuildConfig
-	err := DB.Model(&model.BuildConfig{}).Where("build_configs.category = ? AND build_configs.status = ?", appType, "online").Order("(SELECT COUNT(*) FROM tasks WHERE tasks.build_config_id = build_configs.id) DESC").Order("build_configs.id ASC").Find(&configs).Error
+	err := DB.Model(&model.BuildConfig{}).Where("build_configs.category = ? AND build_configs.status = ? AND build_configs.retired = ?", appType, "online", false).Order("(SELECT COUNT(*) FROM tasks WHERE tasks.build_config_id = build_configs.id) DESC").Order("build_configs.id ASC").Find(&configs).Error
 	if err != nil {
 		return nil, err
 	}

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, type TableInstance } from 'element-plus'
 import {
   previewSQLFileViewTransfer, transferSQLFileToViewTask,
@@ -9,10 +10,13 @@ import {
 
 const props = defineProps<{ target: SQLFileViewTransferTarget | null; busy?: boolean }>()
 const emit = defineEmits<{ close: []; created: [task: SQLViewDependencyTask] }>()
+const router = useRouter()
 const preview = ref<SQLFileViewTransferPreview | null>(null)
 const table = ref<TableInstance>()
 const selection = ref<SQLViewTransferUnit[]>([])
 const loading = ref(false), creating = ref(false), error = ref('')
+const excludedExpanded = ref<string[]>([])
+const linkedTaskIDs = computed(() => [...new Set(preview.value?.excluded.flatMap(item => item.taskIds || []) || [])].sort((a, b) => a - b))
 let generation = 0, disposed = false
 
 const changeCount = computed(() => selection.value.reduce((n, unit) => n + unit.changeCount, 0))
@@ -33,6 +37,7 @@ async function load() {
     const result = await previewSQLFileViewTransfer(target)
     if (disposed || current !== generation) return
     preview.value = result
+    excludedExpanded.value = result.units.length ? [] : ['excluded']
     await nextTick()
     if (!disposed && current === generation) table.value?.toggleAllSelection()
   } catch (err) {
@@ -59,6 +64,11 @@ async function create() {
 }
 
 function close() { if (!creating.value) emit('close') }
+async function openLinkedTask(id: number) {
+  if (creating.value || props.busy || !Number.isSafeInteger(id) || id <= 0) return
+  await router.push({ name: 'PostgreSQLViewDependencyChange', query: { taskId: String(id) } })
+  emit('close')
+}
 function lineRange(unit: { startLine: number; endLine: number }) {
   return unit.startLine === unit.endLine ? `${unit.startLine}` : `${unit.startLine}–${unit.endLine}`
 }
@@ -73,7 +83,9 @@ onBeforeUnmount(() => { disposed = true; generation++ })
       <p class="transfer-note">同一文件的字段类型变更可合并为一个任务。转入只创建待分析任务，选中的原 SQL 会暂缓普通执行；任务执行、视图恢复及校验全部成功后，逐条回写成功结果。</p>
       <el-alert v-if="error" :title="error" type="error" :closable="false" />
       <template v-if="preview">
-        <strong class="transfer-file">{{ preview.fileName }}</strong>
+        <strong class="transfer-file">{{ preview.fileName }}<el-tag v-if="target?.all" size="small">整文件 · 跨页预览</el-tag></strong>
+        <p class="transfer-note">可转入 {{ preview.units.length }} 个变更单元，已排除 {{ preview.excluded.length }} 项。已关联任务、已完成及不支持的 SQL 不会重复转入。</p>
+        <div v-if="linkedTaskIDs.length" class="linked-tasks">已有 SQL 关联任务，可直接打开继续处理：<el-button v-for="id in linkedTaskIDs" :key="id" link type="primary" :disabled="creating||busy" @click="openLinkedTask(id)">任务 #{{id}}</el-button></div>
         <p class="transfer-note">已选择 {{ changeCount }} 条字段变更，涉及 {{ tableCount }} 张表。可取消勾选部分变更；原 BEGIN/COMMIT 事务组作为一个整体选择。</p>
         <el-alert v-if="transactionConflict" title="请选择一个完整原事务组，或仅选择组外语句。不同原事务组及组外语句须分别转入，保留原提交边界。" type="warning" :closable="false" />
         <el-alert v-if="contextConflict" title="选中的 SQL 使用不同 search_path 或会话配置，请按原上下文分别转入。" type="warning" :closable="false" />
@@ -87,7 +99,7 @@ onBeforeUnmount(() => { disposed = true; generation++ })
           <el-table-column label="实际目标字段" min-width="410"><template #default="{row}"><div class="transfer-targets"><span v-for="(targetName,index) in row.targets" :key="index">{{targetName}}</span></div></template></el-table-column>
         </el-table>
         <el-empty v-if="!preview.units.length" :description="preview.excluded.length?'没有可转入的字段类型变更，请查看下方原因':'当前范围没有字段类型变更'" :image-size="60" />
-        <el-collapse v-if="preview.excluded.length"><el-collapse-item :title="`未纳入 ${preview.excluded.length} 项 · 查看原因`" name="excluded"><el-table :data="preview.excluded" max-height="240"><el-table-column label="行号" width="125"><template #default="{row}">{{lineRange(row)}}</template></el-table-column><el-table-column prop="reason" label="原因" min-width="500" /></el-table></el-collapse-item></el-collapse>
+        <el-collapse v-if="preview.excluded.length" v-model="excludedExpanded"><el-collapse-item :title="`未纳入 ${preview.excluded.length} 项 · 查看原因`" name="excluded"><el-table :data="preview.excluded" max-height="240"><el-table-column label="行号" width="125"><template #default="{row}">{{lineRange(row)}}</template></el-table-column><el-table-column prop="reason" label="原因" min-width="360" /><el-table-column label="关联任务" width="180"><template #default="{row}"><el-button v-for="id in row.taskIds||[]" :key="id" link type="primary" :disabled="creating||busy" @click="openLinkedTask(id)">#{{id}}</el-button></template></el-table-column></el-table></el-collapse-item></el-collapse>
       </template>
     </div>
     <template #footer><el-button :disabled="creating" @click="close">取消</el-button><el-button :disabled="creating||loading" @click="load">重新预览</el-button><el-button type="primary" :disabled="!canCreate" :loading="creating" @click="create">创建一个视图依赖任务（{{changeCount}} 条变更）</el-button></template>
@@ -95,5 +107,5 @@ onBeforeUnmount(() => { disposed = true; generation++ })
 </template>
 
 <style scoped>
-.transfer-content{display:flex;flex-direction:column;gap:12px;min-height:140px}.transfer-note{margin:0;color:var(--el-text-color-secondary);font-size:13px;line-height:1.7}.transfer-file{overflow-wrap:anywhere}.transfer-targets{display:flex;flex-direction:column;gap:4px;max-height:120px;overflow:auto;overflow-wrap:anywhere}.transfer-source{padding:12px 24px}.transfer-source>span{font-size:12px;color:var(--el-text-color-secondary)}.transfer-source pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.7 ui-monospace,monospace;max-height:250px;overflow:auto;margin:6px 0 14px}
+.transfer-content{display:flex;flex-direction:column;gap:12px;min-height:140px}.linked-tasks{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:13px}.transfer-note{margin:0;color:var(--el-text-color-secondary);font-size:13px;line-height:1.7}.transfer-file{display:flex;align-items:center;gap:12px;overflow-wrap:anywhere}.transfer-targets{display:flex;flex-direction:column;gap:4px;max-height:120px;overflow:auto;overflow-wrap:anywhere}.transfer-source{padding:12px 24px}.transfer-source>span{font-size:12px;color:var(--el-text-color-secondary)}.transfer-source pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.7 ui-monospace,monospace;max-height:250px;overflow:auto;margin:6px 0 14px}
 </style>

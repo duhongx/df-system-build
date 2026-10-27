@@ -193,3 +193,63 @@ func releaseSQLInheritanceCandidates(previous, current []model.SQLChangeStatemen
 	}
 	return result
 }
+
+// A text match is only reusable in the same session context. Reject ambiguous
+// overwrites instead of replaying already committed business statements.
+func validateReleaseSQLInheritanceContexts(previous, current []model.SQLChangeStatement) error {
+	for _, row := range previous {
+		if row.ExecuteStatus == "SUCCESS" || row.ExecuteStatus == "SKIPPED" {
+			if err := validateReleaseSQLTransactionStates(previous); err != nil {
+				return fmt.Errorf("原文件事务历史需要核实，不能覆盖并重放: %w", err)
+			}
+			break
+		}
+	}
+	candidates := releaseSQLInheritanceCandidates(previous, current)
+	contexts := func(rows []model.SQLChangeStatement, inherited map[int]model.SQLChangeStatement, historical bool) []string {
+		result := make([]string, len(rows))
+		var settings []string
+		var beforeTransaction []string
+		for i, row := range rows {
+			result[i] = strings.Join(settings, "\x00")
+			if control := releaseSQLNode(row.SQLContent).GetTransactionStmt(); control != nil {
+				switch control.Kind {
+				case pg_query.TransactionStmtKind_TRANS_STMT_BEGIN, pg_query.TransactionStmtKind_TRANS_STMT_START:
+					beforeTransaction = append([]string(nil), settings...)
+				case pg_query.TransactionStmtKind_TRANS_STMT_ROLLBACK:
+					settings = beforeTransaction
+				}
+			}
+			status := row.ExecuteStatus
+			if prior, ok := inherited[i]; ok {
+				status = prior.ExecuteStatus
+			}
+			if isReleaseSQLSessionSetting(row.SQLContent) && (status == "SUCCESS" || (!historical && (status == "PENDING" || status == ""))) {
+				settings = append(settings, row.SQLContent)
+			}
+		}
+		return result
+	}
+	oldContexts := contexts(previous, nil, true)
+	oldBySQL := make(map[string][]int, len(previous))
+	for i, row := range previous {
+		oldBySQL[row.SQLContent] = append(oldBySQL[row.SQLContent], i)
+	}
+	newContexts := contexts(current, candidates, false)
+	for i, row := range current {
+		matches := oldBySQL[row.SQLContent]
+		if len(matches) == 0 {
+			continue
+		}
+		oldIndex := matches[0]
+		oldBySQL[row.SQLContent] = matches[1:]
+		prior := previous[oldIndex]
+		// Check text matches even inside changed transaction groups. Such a group
+		// cannot inherit individual results, but a changed SET must not silently
+		// replay already committed DML in a different schema/account either.
+		if (prior.ExecuteStatus == "SUCCESS" || prior.ExecuteStatus == "SKIPPED") && oldContexts[oldIndex] != newContexts[i] {
+			return fmt.Errorf("第 %d 行已完成 SQL 的前置 SET/RESET 会话配置已变化，不能沿用原执行结果或自动重放；请保留已完成部分，并将新上下文下需要执行的 SQL 另建文件", row.LineNumber)
+		}
+	}
+	return nil
+}

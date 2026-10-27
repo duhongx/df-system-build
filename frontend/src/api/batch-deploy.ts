@@ -1,5 +1,7 @@
 import request from './request'
+import type { AxiosProgressEvent } from 'axios'
 import type { FileItem } from './server-mgmt'
+import type { Pipeline } from './pipeline'
 
 export interface MatchResult {
   regions?: {appName: string; role: string; appCode?: string; path: string}[]
@@ -16,6 +18,59 @@ export interface MatchResult {
   matchReason: string
 }
 
+export interface BatchUploadResult {
+  batchId: string
+  uploadDir: string
+  success: string[]
+  failed: { fileName: string; error: string }[]
+  count: number
+}
+
+export const uploadBatchArtifacts = (formData: FormData, onUploadProgress: (event: AxiosProgressEvent) => void) =>
+  request.post<any, BatchUploadResult>('/batch-deploy/upload', formData, {
+    // Large directory uploads must not inherit the default 30-second timeout.
+    timeout: 0,
+    onUploadProgress,
+  })
+
+export interface ArtifactUploadFile {
+  path: string
+  name?: string
+  size: number
+  lastModified: number
+  chunks?: string[]
+}
+
+export interface ArtifactUploadSession {
+  id: string
+  batchId: string
+  status: 'uploading' | 'processing' | 'completed' | 'failed' | 'canceled'
+  chunkSize: number
+  maxConcurrency: number
+  files: ArtifactUploadFile[]
+  receivedBytes: number
+  totalBytes: number
+  completedFiles: number
+  currentFile: string
+  error: string
+  result?: BatchUploadResult
+}
+
+const uploadOptions = (signal?: AbortSignal) => ({ signal, silentError: true })
+export const createArtifactUpload = (id: string, files: ArtifactUploadFile[], signal?: AbortSignal) =>
+  request.post<any, ArtifactUploadSession>('/batch-deploy/uploads', { id, files }, uploadOptions(signal))
+export const getArtifactUpload = (id: string, signal?: AbortSignal) =>
+  request.get<any, ArtifactUploadSession>(`/batch-deploy/uploads/${id}`, uploadOptions(signal))
+export const putArtifactUploadChunk = (id: string, file: number, chunk: number, body: Blob, sha256: string, signal: AbortSignal, onUploadProgress: (event: AxiosProgressEvent) => void) =>
+  request.put<any, { receivedBytes: number }>(`/batch-deploy/uploads/${id}/files/${file}/chunks/${chunk}`, body, {
+    ...uploadOptions(signal), timeout: 0, onUploadProgress,
+    headers: { 'Content-Type': 'application/octet-stream', 'X-Chunk-SHA256': sha256 },
+  })
+export const completeArtifactUpload = (id: string, signal?: AbortSignal) =>
+  request.post<any, ArtifactUploadSession>(`/batch-deploy/uploads/${id}/complete`, {}, uploadOptions(signal))
+export const cancelArtifactUpload = (id: string, signal?: AbortSignal) =>
+  request.delete<any, { id: string }>(`/batch-deploy/uploads/${id}`, uploadOptions(signal))
+
 export const matchArtifacts = (files: string[], sourceDir?: string, batchId?: string) =>
   request.post<any, { results: MatchResult[]; total: number; matched: number; invalid: number; skipped: number; sourceDir: string; batchId: string }>('/batch-deploy/match', { files, sourceDir, batchId })
 
@@ -24,7 +79,10 @@ export const executeBatchDeploy = (
   items: { fileName: string; appId: number }[],
   batchId?: string,
 ) =>
-  request.post<any, { pipelines: any[]; errors: string[]; consumedFiles: string[] }>('/batch-deploy/execute', { sourceDir, items, batchId })
+  request.post<any, { pipelines: any[]; errors: string[]; consumedFiles: string[] }>('/batch-deploy/execute', { sourceDir, items, batchId }, { timeout: 0, silentError: true })
+
+export const getArtifactVersionPipelines = (versionNo: string) =>
+  request.get<any, { pipelines: Pipeline[] }>(`/batch-deploy/artifact-versions/${encodeURIComponent(versionNo)}/pipelines`, { silentError: true })
 
 export const listLocalDir = (path: string, batchId?: string) =>
   request.get<any, { path: string; files: string[]; count: number }>('/batch-deploy/local-dir', { params: { path, batchId } })
@@ -80,6 +138,11 @@ export interface ArtifactSourceBatch {
 }
 
 export interface ArtifactVersion {
+  appVersion?: string
+  releaseTime?: string
+  releaseReadme?: string
+  releaseManifestJson?: string
+  releaseManifestError?: string
   remainingDeployableCount?: number
   id: number
   versionNo: string
@@ -217,8 +280,8 @@ export const replaceArtifactVersionItem = (versionNo: string, itemId: number, fi
 export const redownloadArtifactVersionItem = (versionNo: string, itemId: number) =>
   request.post<any, { version: ArtifactVersion; items: ArtifactVersionItem[] }>(`/batch-deploy/artifact-versions/${encodeURIComponent(versionNo)}/items/${itemId}/redownload`)
 
-export const listArtifactDeployBatches = (status?: string, readyForRollout = false) =>
-  request.get<any, { batches: ArtifactDeployBatch[] }>('/batch-deploy/deploy-batches', { params: { status, readyForRollout: readyForRollout || undefined } })
+export const listArtifactDeployBatches = (status?: string, readyForRollout = false, silentError = false) =>
+  request.get<any, { batches: ArtifactDeployBatch[] }>('/batch-deploy/deploy-batches', { params: { status, readyForRollout: readyForRollout || undefined }, silentError })
 
 export const getArtifactDeployBatch = (batchNo: string) =>
   request.get<any, { batch: ArtifactDeployBatch; records: ArtifactDeployRecord[] }>(`/batch-deploy/deploy-batches/${encodeURIComponent(batchNo)}`)

@@ -48,6 +48,7 @@ type BatchDeployHandler struct {
 	appRepo       *repository.ApplicationRepo
 	pipelineRepo  *repository.PipelineRepo
 	runtimeReader service.ArtifactDeployRuntimeReader
+	uploads       *artifactUploadStore
 }
 
 type deployRecordRef struct {
@@ -122,6 +123,7 @@ func NewBatchDeployHandler() *BatchDeployHandler {
 		appRepo:       repository.NewApplicationRepo(),
 		pipelineRepo:  repository.NewPipelineRepo(),
 		runtimeReader: service.NewK8sRuntimeVersionReader(),
+		uploads:       defaultArtifactUploads,
 	}
 }
 
@@ -130,6 +132,11 @@ func (h *BatchDeployHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g.Use(middleware.AuthRequired())
 	{
 		g.POST("/upload", h.Upload)
+		g.POST("/uploads", h.CreateArtifactUpload)
+		g.GET("/uploads/:uploadID", h.GetArtifactUpload)
+		g.PUT("/uploads/:uploadID/files/:fileIndex/chunks/:chunkIndex", h.PutArtifactUploadChunk)
+		g.POST("/uploads/:uploadID/complete", h.CompleteArtifactUpload)
+		g.DELETE("/uploads/:uploadID", h.CancelArtifactUpload)
 		g.POST("/remote-dir", h.ImportRemoteDir)
 		g.GET("/package-server/:id/list", h.ListPackageServerDir)
 		g.GET("/package-download/list", h.ListPackageDownloadDir)
@@ -139,6 +146,7 @@ func (h *BatchDeployHandler) RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/artifact-versions", h.ListArtifactVersions)
 		g.POST("/artifact-versions/sync-workspace", h.SyncArtifactVersionsFromWorkspace)
 		g.GET("/artifact-versions/:versionNo", h.GetArtifactVersion)
+		g.GET("/artifact-versions/:versionNo/pipelines", h.GetArtifactVersionPipelines)
 		g.DELETE("/artifact-versions/:versionNo", h.DeleteArtifactVersion)
 		g.DELETE("/artifact-versions/:versionNo/items/:itemID", h.DeleteArtifactVersionItem)
 		g.POST("/artifact-versions/:versionNo/items/:itemID/replace", h.ReplaceArtifactVersionItem)
@@ -188,7 +196,7 @@ func (h *BatchDeployHandler) ListArtifactVersions(c *gin.Context) {
 		return
 	}
 	versions := []model.ArtifactVersion{}
-	query := repository.DB.Order("updated_at DESC")
+	query := repository.DB.Omit("release_manifest_json").Order("updated_at DESC")
 	if c.Query("deployable") == "true" {
 		query = query.Where("status = ? AND deployable_count > 0", "available")
 	}
@@ -213,7 +221,7 @@ func (h *BatchDeployHandler) SyncArtifactVersionsFromWorkspace(c *gin.Context) {
 		return
 	}
 	versions := []model.ArtifactVersion{}
-	if err := repository.DB.Order("updated_at DESC").Find(&versions).Error; err != nil {
+	if err := repository.DB.Omit("release_manifest_json").Order("updated_at DESC").Find(&versions).Error; err != nil {
 		response.Fail(c, 13019, "读取更新版本失败: "+err.Error())
 		return
 	}
@@ -271,6 +279,27 @@ func (h *BatchDeployHandler) GetArtifactVersion(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"version": version, "items": items})
+}
+
+func (h *BatchDeployHandler) GetArtifactVersionPipelines(c *gin.Context) {
+	if repository.DB == nil {
+		response.FailWithStatus(c, 503, 13020, "数据库未初始化")
+		return
+	}
+	versionNo := strings.TrimSpace(c.Param("versionNo"))
+	if versionNo == "" || safePathSegment(versionNo) != versionNo {
+		response.Fail(c, 13020, "版本号无效")
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	defer cancel()
+	var pipelines []model.Pipeline
+	if err := repository.DB.WithContext(ctx).Preload("Stages", func(db *gorm.DB) *gorm.DB { return db.Order("stage_order ASC") }).Where("batch_id = ?", versionNo).Order("id ASC").Find(&pipelines).Error; err != nil {
+		response.FailWithStatus(c, 503, 13020, "读取镜像任务进度失败: "+err.Error())
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	response.OK(c, gin.H{"pipelines": pipelines})
 }
 
 func (h *BatchDeployHandler) DeleteArtifactVersion(c *gin.Context) {
@@ -510,7 +539,9 @@ func (h *BatchDeployHandler) ListArtifactDeployBatches(c *gin.Context) {
 		return
 	}
 	batches := []model.ArtifactDeployBatch{}
-	query := repository.DB.Order("updated_at DESC")
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	defer cancel()
+	query := repository.DB.WithContext(ctx).Order("updated_at DESC")
 	if c.Query("readyForRollout") == "true" {
 		query = query.Where("deploy_batch_no IN (?)", repository.DB.Model(&model.Pipeline{}).Select("batch_id").Where("status = ?", "IMAGE_READY"))
 	}
@@ -744,9 +775,10 @@ func (h *BatchDeployHandler) Upload(c *gin.Context) {
 	var successFiles []string
 	var failedFiles []uploadFailure
 	seenNames := map[string]bool{}
+	manifestSaved := false
 
 	for _, file := range files {
-		fileName, err := safeArtifactFileName(file.Filename)
+		fileName, err := safeUploadFileName(file.Filename)
 		if err != nil {
 			failedFiles = append(failedFiles, uploadFailure{FileName: file.Filename, Error: err.Error()})
 			continue
@@ -756,10 +788,18 @@ func (h *BatchDeployHandler) Upload(c *gin.Context) {
 			continue
 		}
 		seenNames[fileName] = true
+		if fileName == service.ReleaseManifestFileName && file.Size > service.MaxReleaseManifestBytes {
+			failedFiles = append(failedFiles, uploadFailure{FileName: fileName, Error: "version.json 不能超过 1 MiB"})
+			continue
+		}
 
 		dst := filepath.Join(uploadDir, fileName)
 		if err := c.SaveUploadedFile(file, dst); err != nil {
 			failedFiles = append(failedFiles, uploadFailure{FileName: fileName, Error: "保存文件失败"})
+			continue
+		}
+		if fileName == service.ReleaseManifestFileName {
+			manifestSaved = true
 			continue
 		}
 
@@ -773,7 +813,7 @@ func (h *BatchDeployHandler) Upload(c *gin.Context) {
 		successFiles = append(successFiles, fileName)
 	}
 
-	if len(successFiles) > 0 {
+	if len(successFiles) > 0 || manifestSaved {
 		if _, _, err := persistArtifactVersionFromDir(artifactVersionInput{
 			VersionNo:   batchID,
 			SourceType:  "upload",
@@ -1206,14 +1246,20 @@ func runDownloadJob(jobID string, serverID uint, remotePath string, selectedPath
 	if snapshot, ok := getDownloadJobSnapshot(jobID); ok && strings.TrimSpace(snapshot.BatchID) != "" {
 		versionNo = snapshot.BatchID
 	}
+	var releaseMetadata *model.ReleaseMetadata
+	if snapshot, ok := getDownloadJobSnapshot(jobID); ok {
+		metadata := downloadedReleaseMetadata(snapshot.Items)
+		releaseMetadata = &metadata
+	}
 	if _, _, err := persistArtifactVersionFromDir(artifactVersionInput{
-		VersionNo:   versionNo,
-		SourceType:  "download",
-		SourceLabel: "服务器下载",
-		Status:      "available",
-		LocalDir:    targetDir,
-		TargetPath:  targetDir,
-		RemotePath:  remotePath,
+		VersionNo:       versionNo,
+		SourceType:      "download",
+		SourceLabel:     "服务器下载",
+		Status:          "available",
+		LocalDir:        targetDir,
+		TargetPath:      targetDir,
+		RemotePath:      remotePath,
+		ReleaseMetadata: releaseMetadata,
 	}); err != nil {
 		failDownloadJob(jobID, "制品版本入库失败: "+err.Error())
 		return
@@ -1304,6 +1350,10 @@ func scanSourceBatchRoot(sourceRoot, sourceType string) ([]artifactSourceBatch, 
 			continue
 		}
 		dir := filepath.Join(sourceRoot, entry.Name())
+		// Resumable uploads publish only after validation and metadata persistence.
+		if _, err := os.Stat(filepath.Join(dir, artifactUploadPendingMarker)); err == nil {
+			continue
+		}
 		files, err := collectArtifactFilesFromDir(dir)
 		errMessage := ""
 		if err != nil {
@@ -1331,14 +1381,17 @@ func scanSourceBatchRoot(sourceRoot, sourceType string) ([]artifactSourceBatch, 
 }
 
 type artifactVersionInput struct {
-	VersionNo   string
-	SourceType  string
-	SourceLabel string
-	Status      string
-	LocalDir    string
-	TargetPath  string
-	RemotePath  string
-	Error       string
+	// An explicit download re-import uses only manifests selected in that job;
+	// cached files from earlier downloads must not supply stale business notes.
+	ReleaseMetadata *model.ReleaseMetadata
+	VersionNo       string
+	SourceType      string
+	SourceLabel     string
+	Status          string
+	LocalDir        string
+	TargetPath      string
+	RemotePath      string
+	Error           string
 }
 
 type artifactVersionCounters struct {
@@ -1386,7 +1439,13 @@ func persistArtifactVersionFromDir(input artifactVersionInput) (model.ArtifactVe
 
 	apps, _, _ := repository.NewApplicationRepo().List(repository.AppListParams{PageSize: 1000})
 	items, counters := buildArtifactVersionItems(input.VersionNo, input.TargetPath, files, apps)
+	return persistPreparedArtifactVersion(input, items, counters)
+}
+
+// Keep persistence separate so resumable uploads can validate once before publishing.
+func persistPreparedArtifactVersion(input artifactVersionInput, items []model.ArtifactVersionItem, counters artifactVersionCounters) (model.ArtifactVersion, []model.ArtifactVersionItem, error) {
 	version := model.ArtifactVersion{
+		ReleaseMetadata: service.ReadReleaseManifest(firstNonEmptyString(input.TargetPath, input.LocalDir)),
 		VersionNo:       input.VersionNo,
 		SourceType:      input.SourceType,
 		SourceLabel:     input.SourceLabel,
@@ -1405,16 +1464,24 @@ func persistArtifactVersionFromDir(input artifactVersionInput) (model.ArtifactVe
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
 	}
+	if input.ReleaseMetadata != nil {
+		version.ReleaseMetadata = *input.ReleaseMetadata
+	}
 
 	tx := repository.DB.Begin()
 	if tx.Error != nil {
 		return model.ArtifactVersion{}, nil, tx.Error
 	}
 	var existing model.ArtifactVersion
-	err = tx.Where("version_no = ?", version.VersionNo).First(&existing).Error
+	err := tx.Where("version_no = ?", version.VersionNo).First(&existing).Error
 	if err == nil {
 		version.ID = existing.ID
 		version.CreatedAt = existing.CreatedAt
+		// Keep the imported business information as an audit snapshot. Replacing
+		// an artifact or refreshing matching must not rewrite a release's notes.
+		if input.ReleaseMetadata == nil && (existing.ReleaseManifestJSON != "" || existing.ReleaseManifestError != "") {
+			version.ReleaseMetadata = existing.ReleaseMetadata
+		}
 		version.UpdatedAt = time.Now()
 		if err := tx.Save(&version).Error; err != nil {
 			tx.Rollback()
@@ -1444,6 +1511,26 @@ func persistArtifactVersionFromDir(input artifactVersionInput) (model.ArtifactVe
 		return model.ArtifactVersion{}, nil, err
 	}
 	return version, items, nil
+}
+
+func downloadedReleaseMetadata(items []downloadJobItem) model.ReleaseMetadata {
+	var manifest *downloadJobItem
+	for i := range items {
+		if items[i].Name != service.ReleaseManifestFileName {
+			continue
+		}
+		if manifest != nil {
+			return model.ReleaseMetadata{ReleaseManifestError: "本次下载包含多个 version.json，请按业务版本分别导入"}
+		}
+		manifest = &items[i]
+	}
+	if manifest == nil {
+		return model.ReleaseMetadata{}
+	}
+	if manifest.Status != "success" && manifest.Status != "skipped" {
+		return model.ReleaseMetadata{ReleaseManifestError: "version.json 下载失败，未导入业务版本信息: " + manifest.Error}
+	}
+	return service.ReadReleaseManifestFile(manifest.LocalPath)
 }
 
 func refreshArtifactVersion(version model.ArtifactVersion) (model.ArtifactVersion, []model.ArtifactVersionItem, error) {
@@ -1483,9 +1570,15 @@ func firstNonEmptyString(values ...string) string {
 
 func buildArtifactVersionItems(versionNo, sourceDir string, files []string, apps []model.Application) ([]model.ArtifactVersionItem, artifactVersionCounters) {
 	items := make([]model.ArtifactVersionItem, 0, len(files))
-	counters := artifactVersionCounters{total: len(files)}
 	for _, fileName := range files {
-		item := buildArtifactVersionItem(versionNo, sourceDir, fileName, apps)
+		items = append(items, buildArtifactVersionItem(versionNo, sourceDir, fileName, apps))
+	}
+	return items, countArtifactVersionItems(items)
+}
+
+func countArtifactVersionItems(items []model.ArtifactVersionItem) artifactVersionCounters {
+	counters := artifactVersionCounters{total: len(items)}
+	for _, item := range items {
 		if item.Deployable {
 			counters.deployable++
 		}
@@ -1504,9 +1597,8 @@ func buildArtifactVersionItems(versionNo, sourceDir string, files []string, apps
 		if item.MatchStatus == "unmatched" && item.ValidateStatus == "valid" {
 			counters.unmatched++
 		}
-		items = append(items, item)
 	}
-	return items, counters
+	return counters
 }
 
 func buildArtifactVersionItem(versionNo, sourceDir, fileName string, apps []model.Application) model.ArtifactVersionItem {
@@ -2671,10 +2763,10 @@ func importArtifactsFromRemoteDir(fs remoteArtifactFS, remoteDir, destDir string
 			}
 
 			ext := strings.ToLower(filepath.Ext(entry.Name()))
-			if ext != ".jar" && ext != ".zip" {
+			if ext != ".jar" && ext != ".zip" && entry.Name() != service.ReleaseManifestFileName {
 				continue
 			}
-			fileName, err := safeArtifactFileName(entry.Name())
+			fileName, err := safeUploadFileName(entry.Name())
 			if err != nil {
 				return err
 			}
@@ -2682,6 +2774,9 @@ func importArtifactsFromRemoteDir(fs remoteArtifactFS, remoteDir, destDir string
 				return fmt.Errorf("远程目录内存在同名制品文件: %s", fileName)
 			}
 			seen[fileName] = true
+			if fileName == service.ReleaseManifestFileName && entry.Size() > service.MaxReleaseManifestBytes {
+				return fmt.Errorf("version.json 不能超过 1 MiB")
+			}
 
 			src, err := fs.Open(remotePath)
 			if err != nil {
@@ -2705,6 +2800,9 @@ func importArtifactsFromRemoteDir(fs remoteArtifactFS, remoteDir, destDir string
 			}
 			if closeErr != nil {
 				return closeErr
+			}
+			if fileName == service.ReleaseManifestFileName {
+				continue
 			}
 			if err := validateArtifact(dstPath); err != nil {
 				os.Remove(dstPath)
@@ -3501,6 +3599,15 @@ func isGeneratedBatchID(value string) bool {
 
 func batchIDTimestamp(t time.Time) string {
 	return t.In(time.FixedZone("Asia/Shanghai", 8*60*60)).Format("20060102150405")
+}
+
+// Only the upload/import boundary accepts this reserved metadata file.
+// Deployment inputs continue to require a JAR or ZIP.
+func safeUploadFileName(name string) (string, error) {
+	if filepath.Base(strings.ReplaceAll(name, "\\", "/")) == service.ReleaseManifestFileName {
+		return service.ReleaseManifestFileName, nil
+	}
+	return safeArtifactFileName(name)
 }
 
 func safeArtifactFileName(name string) (string, error) {

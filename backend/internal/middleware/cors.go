@@ -10,7 +10,7 @@ func CORS() gin.HandlerFunc {
 		// Use wildcard function instead of "*" so AllowCredentials can work
 		AllowOriginFunc:  func(origin string) bool { return true },
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept", "X-Chunk-SHA256"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
 	})

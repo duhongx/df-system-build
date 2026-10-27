@@ -9,9 +9,10 @@ import (
 
 // StageResult holds the outcome of a stage execution
 type StageResult struct {
-	ExitCode int
-	Output   string
-	Error    string
+	ExitCode    int
+	Output      string
+	Error       string
+	OnlineState string // Deployment runner's actual submission boundary on failure.
 }
 
 // StageRunner is the interface all stage implementations must satisfy

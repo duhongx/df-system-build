@@ -225,14 +225,7 @@ func TestReleaseSQLManualSchemaAndNaturalOrder(t *testing.T) {
 		f := saveSequenceFile(t, s, v+"__5__sql_release.sql", "SELECT 1;")
 		ids = append(ids, f.ID)
 	}
-	_, ordered, err := s.prepareSQLFileSequence(ids, "op")
-	if err != nil {
-		t.Fatal(err)
-	}
-	versions := []string{ordered[0].Version, ordered[1].Version, ordered[2].Version}
-	if strings.Join(versions, ",") != "V1,V2,V10" {
-		t.Fatal("not natural order", versions)
-	}
+
 	list, _, err := s.ListSQLFilesByStatus(1, 100, "todo")
 	if err != nil {
 		t.Fatal(err)
@@ -245,6 +238,14 @@ func TestReleaseSQLManualSchemaAndNaturalOrder(t *testing.T) {
 	}
 	if strings.Join(found, ",") != "V1,V2,V10" {
 		t.Fatal("list order differs from execution", found)
+	}
+	_, ordered, err := s.prepareSQLFileSequence(ids, "op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := []string{ordered[0].Version, ordered[1].Version, ordered[2].Version}
+	if strings.Join(versions, ",") != "V1,V2,V10" {
+		t.Fatal("not natural order", versions)
 	}
 }
 func TestReleaseSQLHistoryMustPersistBeforeDatabaseExecution(t *testing.T) {

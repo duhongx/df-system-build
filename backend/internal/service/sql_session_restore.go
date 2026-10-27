@@ -49,7 +49,7 @@ func restoreReleaseSQLSession(ctx context.Context, conn *sql.Conn, file *model.S
 	yes := true
 	record.Submitted = &yes
 	if execErr != nil {
-		record.Status, record.SQLState, record.Message = "FAILED", pgState(execErr), execErr.Error()
+		record.Status, record.SQLState, record.Message = "FAILED", pgState(execErr), SQLExecutionErrorMessage(execErr)
 		if record.SQLState == "" {
 			record.Status, record.Submitted = "UNKNOWN", nil
 		}

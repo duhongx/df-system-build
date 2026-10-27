@@ -290,7 +290,7 @@ func (s *PostgreSQLService) runSQLFileSequence(batch *model.SQLChangeBatch, file
 		stop, err := releaseSQLBatchStopped(ctx, batch.ID)
 		if err != nil {
 			failed++
-			message = "文件 " + item.FileName + " 执行失败：" + err.Error()
+			message = "文件 " + item.FileName + " 执行失败：" + SQLExecutionErrorMessage(err)
 			return
 		}
 		if stop {
@@ -303,7 +303,7 @@ func (s *PostgreSQLService) runSQLFileSequence(batch *model.SQLChangeBatch, file
 		if err != nil {
 			s.markSQLFileExecutionFailed(item.ID, username, err)
 			failed++
-			message = err.Error()
+			message = SQLExecutionErrorMessage(err)
 			return
 		}
 		if file.ExecuteStatus == "SUCCESS" {
