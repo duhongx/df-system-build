@@ -59,9 +59,14 @@ func TestWorkbenchAPIAuthenticationTargetAndCSV(t *testing.T) {
 		return w
 	}
 	base := fmt.Sprintf("/api/operations/databases/%d", row.ID)
-	for _, path := range []string{"/catalog", "/objects/1", "/statements", "/query-records", "/slow-analysis"} {
+	for _, path := range []string{"/catalog", "/objects/1", "/statements", "/query-records", "/slow-analysis", "/access", "/access/privileges?role=postgres"} {
 		if w := call("GET", base+path, "", false); w.Code != http.StatusUnauthorized {
 			t.Fatalf("unprotected %s: %d", path, w.Code)
+		}
+	}
+	for _, path := range []string{"/access/preview", "/access/apply"} {
+		if w := call("POST", base+path, `{}`, false); w.Code != http.StatusUnauthorized {
+			t.Fatalf("unprotected permission mutation: %s", path)
 		}
 	}
 	if w := call("POST", base+"/query", `{"sql":"select 1","revision":3}`, false); w.Code != http.StatusUnauthorized {

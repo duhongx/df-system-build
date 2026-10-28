@@ -52,11 +52,16 @@ func (s *OperationsService) Start(ctx context.Context) {
 		defer tick.Stop()
 		cleanup := time.NewTicker(time.Hour)
 		defer cleanup.Stop()
+		var lastAccessAuditCheck time.Time
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
+				if time.Since(lastAccessAuditCheck) > time.Minute {
+					s.db.WithContext(ctx).Model(&model.DatabaseQueryRecord{}).Where("kind='access' AND status='RUNNING' AND started_at<?", time.Now().Add(-2*time.Minute)).Updates(map[string]any{"status": "UNKNOWN", "error": "操作未记录最终状态，请核对实际用户与权限后再操作"})
+					lastAccessAuditCheck = time.Now()
+				}
 				s.scheduleHosts(ctx)
 				s.scheduleLogSync(ctx)
 				s.scheduleInspections(ctx)

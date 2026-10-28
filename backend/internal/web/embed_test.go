@@ -93,7 +93,7 @@ func TestEmbeddedOperationalFixes(t *testing.T) {
 		"BatchDeployView":                    {"查询已创建任务", "正在校验制品并创建镜像任务"},
 		"BuildQueueView":                     {"构建队列刷新失败", "重试刷新", "运行任务状态暂未读取成功"},
 		"PostgreSQLViewDependencyChangeView": {"视图依赖任务记录", "按编号打开", "关联任务编号无效", "复制完整错误详情"},
-		"PostgreSQLWorkbenchView":            {"固定目标", "SQL 模板排行", "累计 SQL 统计", "重新执行并导出 CSV"},
+		"PostgreSQLWorkbenchView":            {"固定目标", "SQL 模板排行", "累计 SQL 统计", "重新执行并导出 CSV", "用户与权限", "创建用户", "创建 Schema", "预览变更"},
 	} {
 		name := regexp.MustCompile(route + `-[A-Za-z0-9_-]+\.js`).Find(module)
 		if name == nil {

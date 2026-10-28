@@ -41,13 +41,14 @@ import DiagnosticsPanel from "../components/postgresql/DiagnosticsPanel.vue";
 import SlowSQLPanel from "../components/postgresql/SlowSQLPanel.vue";
 import QueryPlan from "../components/postgresql/QueryPlan.vue";
 import QueryHistory from "../components/postgresql/QueryHistory.vue";
+import DatabaseAccessPanel from "../components/postgresql/DatabaseAccessPanel.vue";
 import QueryResultGrid from "../components/postgresql/QueryResultGrid.vue";
 import ObjectDataBrowser from "../components/postgresql/ObjectDataBrowser.vue";
 import SavedQueries from "../components/postgresql/SavedQueries.vue";
 import { useDatabaseWorkspace } from "../composables/useDatabaseWorkspace";
 import { quoteIdentifier } from "../utils/database-workbench.mjs";
 defineOptions({ name: "PostgreSQLWorkbenchView" });
-type Pane = "sql" | "objects" | "sessions" | "locks" | "slow" | "records";
+type Pane = "sql" | "objects" | "access" | "sessions" | "locks" | "slow" | "records";
 interface QueryTab {
   id: number;
   name: string;
@@ -114,6 +115,7 @@ let sequence = 0;
 const panes: Array<{ id: Pane; label: string; icon: string }> = [
   { id: "sql", label: "SQL 窗口", icon: "EditPen" },
   { id: "objects", label: "对象管理", icon: "Grid" },
+  { id: "access", label: "用户与权限", icon: "Key" },
   { id: "sessions", label: "会话", icon: "User" },
   { id: "locks", label: "锁诊断", icon: "Connection" },
   { id: "slow", label: "慢 SQL", icon: "DataAnalysis" },
@@ -1713,6 +1715,11 @@ onBeforeUnmount(() => {
           >
         </div></template
       >
+      <DatabaseAccessPanel
+        v-else-if="connection && pane === 'access'"
+        :connection="connection"
+        @changed="loadCatalog(connection.id)"
+      />
       <DiagnosticsPanel
         v-else-if="connection && (pane === 'sessions' || pane === 'locks')"
         :connection="connection"

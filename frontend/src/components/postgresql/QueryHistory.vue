@@ -46,7 +46,7 @@ watch(
   <section class="query-history">
     <div class="pg-toolbar">
       <div class="pg-title">
-        <strong>查询执行记录</strong
+        <strong>执行记录</strong
         ><span>保留当时的连接目标、SQL、参数与执行结果状态</span>
       </div>
       <span class="toolbar-spacer" /><el-button
@@ -66,15 +66,23 @@ watch(
         ><template #default="{ row }"
           ><div class="history-expanded">
             <p>
-              {{ row.target }} · Schema {{ row.schema || "默认" }} · 连接版本
+              {{ row.target }} ·
+              {{
+                row.kind === "access"
+                  ? "用户权限变更"
+                  : `Schema ${row.schema || "默认"}`
+              }}
+              · 连接版本
               {{ row.revision }}
             </p>
             <pre class="sql-code">{{ row.sql }}</pre>
             <pre
               v-if="row.parametersJSON && row.parametersJSON !== 'null'"
               class="sql-code"
+              >{{
+                row.kind === "access" ? "变更参数（不含密码）" : "绑定参数"
+              }}：{{ row.parametersJSON }}</pre
             >
-绑定参数：{{ row.parametersJSON }}</pre>
             <el-alert
               v-if="row.error"
               :title="row.error"
@@ -87,16 +95,36 @@ watch(
         }}</template></el-table-column
       ><el-table-column label="类型" width="95"
         ><template #default="{ row }">{{
-          ({ query: "查询", explain: "预估计划", export: "CSV 导出" } as any)[
-            row.kind
-          ] || row.kind
+          (
+            {
+              query: "查询",
+              explain: "预估计划",
+              export: "CSV 导出",
+              access: "用户权限",
+            } as any
+          )[row.kind] || row.kind
         }}</template></el-table-column
       ><el-table-column label="状态" width="85"
         ><template #default="{ row }"
           ><el-tag
             size="small"
-            :type="row.status === 'SUCCESS' ? 'success' : 'danger'"
-            >{{ row.status === "SUCCESS" ? "成功" : "失败" }}</el-tag
+            :type="
+              row.status === 'SUCCESS'
+                ? 'success'
+                : row.status === 'FAILED'
+                  ? 'danger'
+                  : 'warning'
+            "
+            >{{
+              (
+                {
+                  SUCCESS: "成功",
+                  FAILED: "失败",
+                  RUNNING: "执行中",
+                  UNKNOWN: "待核实",
+                } as any
+              )[row.status] || row.status
+            }}</el-tag
           ></template
         ></el-table-column
       ><el-table-column label="耗时" width="110"
@@ -119,6 +147,7 @@ watch(
       /><el-table-column label="操作" width="100"
         ><template #default="{ row }"
           ><el-button
+            v-if="row.kind !== 'access'"
             text
             size="small"
             type="primary"
