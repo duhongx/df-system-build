@@ -53,7 +53,7 @@ func (s *OperationsService) createInspectionTx(tx *gorm.DB, req InspectionReques
 		}
 	}
 	if req.Name == "" {
-		req.Name = "主机与数据库巡检"
+		req.Name = "系统巡检报告"
 	}
 	if len([]rune(req.Name)) > 128 {
 		return nil, fmt.Errorf("任务名称过长")

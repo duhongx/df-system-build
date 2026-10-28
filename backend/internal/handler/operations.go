@@ -333,7 +333,9 @@ func (h *OperationsHandler) History(c *gin.Context) {
 func (h *OperationsHandler) Runs(c *gin.Context) {
 	page, size := opsPage(c)
 	q := repository.DB.Model(&model.InspectionRun{}).Omit("report_snapshot_json")
-	if c.Query("status") != "" {
+	if c.Query("status") == "ENDED" {
+		q = q.Where("status IN ?", []string{"COMPLETED", "PARTIAL"})
+	} else if c.Query("status") != "" {
 		q = q.Where("status=?", c.Query("status"))
 	}
 	var total int64
@@ -346,7 +348,26 @@ func (h *OperationsHandler) Runs(c *gin.Context) {
 		opsFail(c, err)
 		return
 	}
-	response.OKWithPage(c, rows, total, page, size)
+	ids := make([]uint, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	summaries, err := h.svc.InspectionSummaries(c.Request.Context(), ids)
+	if err != nil {
+		opsFail(c, err)
+		return
+	}
+	type entry struct {
+		model.InspectionRun
+		ReportSummary  *inspection.Summary `json:"reportSummary,omitempty"`
+		ExecutionLabel string              `json:"executionLabel"`
+	}
+	entries := make([]entry, 0, len(rows))
+	for _, row := range rows {
+		extra := summaries[row.ID]
+		entries = append(entries, entry{row, extra.Summary, service.InspectionExecutionLabel(row.Status, extra.UncertainTargets)})
+	}
+	response.OKWithPage(c, entries, total, page, size)
 }
 func (h *OperationsHandler) CreateRun(c *gin.Context) {
 	var req service.InspectionRequest
@@ -372,7 +393,12 @@ func (h *OperationsHandler) Run(c *gin.Context) {
 		opsFail(c, err)
 		return
 	}
-	response.OK(c, gin.H{"run": run, "targets": targets})
+	coverage, err := h.svc.InspectionCoverage(c.Request.Context(), run, targets)
+	if err != nil {
+		opsFail(c, err)
+		return
+	}
+	response.OK(c, gin.H{"run": run, "targets": targets, "coverage": coverage})
 }
 func (h *OperationsHandler) ReportData(c *gin.Context) {
 	var run model.InspectionRun
@@ -451,6 +477,9 @@ func (h *OperationsHandler) Report(c *gin.Context) {
 	if format == "html" {
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.Header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'self'")
+		c.Header("Content-Disposition", "inline")
+		c.File(name)
+		return
 	}
 	c.FileAttachment(name, fmt.Sprintf("inspection-%d.%s", run.ID, format))
 }

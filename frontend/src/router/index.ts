@@ -49,6 +49,7 @@ const routes: RouteRecordRaw[] = [
       ] },
       { path: 'inspections', name: 'Inspections', component: () => import('../views/InspectionsView.vue'), meta: { title: '巡检中心' } },
       { path: 'inspections/:id', name: 'InspectionDetail', component: () => import('../views/InspectionDetailView.vue'), meta: { title: '巡检详情' } },
+      { path: 'inspections/:id/report', name: 'InspectionReport', component: () => import('../views/InspectionReportView.vue'), meta: { title: '在线巡检报告' } },
       { path: 'settings/general', name: 'SettingsGeneral', component: () => import('../views/SettingsView.vue'), meta: { title: '全局参数', settingsTab: 'general' } },
       { path: 'settings/apps', name: 'SettingsApps', component: () => import('../views/AppListView.vue'), meta: { title: '应用管理', fillViewport: true, settingsTab: 'apps' } },
       { path: 'settings/registry', redirect: '/settings/environment' },

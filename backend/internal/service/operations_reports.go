@@ -54,7 +54,7 @@ var inspectionHTML = template.Must(template.New("report").Funcs(template.FuncMap
 }).Parse(inspectionHTMLSource))
 
 func inspectionStatusLabel(s string) string {
-	if v := map[string]string{"NOT_RUN": "未执行", "RECORDED": "已记录待核对", "NORMAL": "正常", "NOT_APPLICABLE": "不适用", "WARNING": "需关注", "CRITICAL": "严重", "UNKNOWN": "结果不完整", "QUEUED": "等待中", "RUNNING": "执行中", "COMPLETED": "已完成", "PARTIAL": "部分完成", "FAILED": "失败", "CANCELED": "已取消"}[s]; v != "" {
+	if v := map[string]string{"NOT_RUN": "未执行", "RECORDED": "已记录待核对", "NORMAL": "正常", "NOT_APPLICABLE": "不适用", "WARNING": "需关注", "CRITICAL": "严重", "UNKNOWN": "未取得完整结果", "QUEUED": "等待中", "RUNNING": "执行中", "COMPLETED": "已完成", "PARTIAL": "检查已结束，存在检查缺口", "FAILED": "失败", "CANCELED": "已取消"}[s]; v != "" {
 		return v
 	}
 	return s
@@ -128,7 +128,7 @@ func (s *OperationsService) GenerateInspectionReports(ctx context.Context, id ui
 	if err := s.freezeInspectionReport(ctx, &report); err != nil {
 		return s.reportFailure(id, "HTML", err)
 	}
-	if err := s.db.Model(&run).Updates(map[string]any{"html_status": "GENERATING", "pdf_status": "PENDING", "report_error": "", "message": "生成 HTML 报告"}).Error; err != nil {
+	if err := s.db.Model(&run).Updates(map[string]any{"html_status": "GENERATING", "pdf_status": "PENDING", "report_error": "", "message": "生成在线报告"}).Error; err != nil {
 		return err
 	}
 	var html bytes.Buffer
@@ -139,7 +139,7 @@ func (s *OperationsService) GenerateInspectionReports(ctx context.Context, id ui
 	if err := atomicReportFile(htmlPath, html.Bytes()); err != nil {
 		return s.reportFailure(id, "HTML", err)
 	}
-	if err := s.db.Model(&run).Updates(map[string]any{"html_status": "READY", "pdf_status": "GENERATING", "message": "HTML 已生成，正在生成 PDF"}).Error; err != nil {
+	if err := s.db.Model(&run).Updates(map[string]any{"html_status": "READY", "pdf_status": "GENERATING", "message": "在线报告已生成，正在生成 PDF"}).Error; err != nil {
 		return err
 	}
 	pdf, err := renderInspectionPDF(ctx, report)
@@ -150,7 +150,7 @@ func (s *OperationsService) GenerateInspectionReports(ctx context.Context, id ui
 	if err := atomicReportFile(pdfPath, pdf); err != nil {
 		return s.reportFailure(id, "PDF", err)
 	}
-	return s.db.Model(&run).Updates(map[string]any{"pdf_status": "READY", "report_error": "", "message": "巡检及 HTML／PDF 报告生成完成"}).Error
+	return s.db.Model(&run).Updates(map[string]any{"pdf_status": "READY", "report_error": "", "message": "在线报告和 PDF 已生成"}).Error
 }
 func (s *OperationsService) reportFailure(id uint, format string, err error) error {
 	message := format + " 报告生成失败: " + err.Error() + "；已采集结果保留，可单独重新生成报告"

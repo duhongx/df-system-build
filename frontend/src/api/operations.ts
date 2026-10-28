@@ -14,7 +14,9 @@ export interface InspectionCommandResult {code:string;name:string;status:string;
 export interface InspectionRef {type:'host'|'database';id:number}
 export interface InspectionCheck {code:string;name:string;status:string;value:string;evidence:string;advice:string;error:string}
 export interface InspectionResult {version:string;name:string;type:string;hostname:string;startedAt:string;finishedAt:string;checks:InspectionCheck[];error:string;metrics?:HostMetric;database?:DatabaseDiagnostic;reportChecks?:InspectionCommandResult[]}
-export interface InspectionRun {id:number;planId:number;name:string;status:string;trigger:string;operator:string;totalTargets:number;completedTargets:number;warningCount:number;criticalCount:number;errorCount:number;cancelRequested:boolean;message:string;htmlStatus:string;pdfStatus:string;reportError:string;startedAt:string|null;finishedAt:string|null;createdAt:string}
+export interface InspectionSummary {planned:number;completed:number;unknown:number;notRun:number;notApplicable:number;recorded:number;normal:number;warning:number;critical:number}
+export interface InspectionCoverage {summary:InspectionSummary|null;legacy:boolean;executionLabel:string;failedTargets:number;uncertainTargets:number;issues:Array<{code:string;name:string;object:string;status:string;reason:string}>}
+export interface InspectionRun {executionLabel?:string;id:number;planId:number;name:string;status:string;trigger:string;operator:string;totalTargets:number;completedTargets:number;warningCount:number;criticalCount:number;errorCount:number;cancelRequested:boolean;message:string;htmlStatus:string;pdfStatus:string;reportError:string;reportSummary?:InspectionSummary;startedAt:string|null;finishedAt:string|null;createdAt:string}
 export interface InspectionTarget {id:number;runId:number;type:string;targetId:number;serverId:number;serverEndpoint:string;name:string;endpoint:string;status:string;stage:string;message:string;resultJSON:string;startedAt:string|null;finishedAt:string|null;heartbeatAt:string|null}
 export interface InspectionPlan {commandsJSON?:string;id:number;name:string;enabled:boolean;dailyTime:string;timezone:string;targetsJSON:string;servicesJSON:string;nextRunAt:string|null;createdBy:string;lastError:string}
 const base='/operations'
@@ -34,7 +36,7 @@ export const collectHostMetric=(id:number)=>request.post(`${base}/hosts/${id}/co
 export const getHostHistory=(id:number,hours:number)=>request.get<any,{samples:HostMetric[];stepSeconds:number;aggregation:string}>(`${base}/hosts/${id}/history`,{params:{hours},silentError:true})
 export const listInspectionRuns=(page=1,pageSize=20,status='')=>request.get<any,PageResult<InspectionRun>>(`${base}/inspection-runs`,{params:{page,pageSize,status},silentError:true})
 export const createInspection=(name:string,targets:InspectionRef[],services:string[]=[],commands?:Record<string,InspectionCommandOptions>)=>request.post<any,InspectionRun>(`${base}/inspection-runs`,{name,targets,services,commands})
-export const getInspection=(id:number)=>request.get<any,{run:InspectionRun;targets:InspectionTarget[]}>(`${base}/inspection-runs/${id}`,{silentError:true})
+export const getInspection=(id:number)=>request.get<any,{run:InspectionRun;targets:InspectionTarget[];coverage:InspectionCoverage}>(`${base}/inspection-runs/${id}`,{silentError:true})
 export const getInspectionTarget=(run:number,id:number)=>request.get<any,InspectionTarget>(`${base}/inspection-runs/${run}/targets/${id}`)
 export const cancelInspection=(id:number)=>request.post(`${base}/inspection-runs/${id}/cancel`)
 export const reconcileInspection=(id:number)=>request.post(`${base}/inspection-runs/${id}/reconcile`)
@@ -43,8 +45,15 @@ export const deleteInspection=(id:number)=>request.delete(`${base}/inspection-ru
 export const listInspectionPlans=()=>request.get<any,InspectionPlan[]>(`${base}/inspection-plans`)
 export const saveInspectionPlan=(row:{id?:number;name:string;enabled:boolean;dailyTime:string;timezone:string;targets:InspectionRef[];services:string[];commands?:Record<string,InspectionCommandOptions>})=>row.id?request.put(`${base}/inspection-plans/${row.id}`,row):request.post(`${base}/inspection-plans`,row)
 export const deleteInspectionPlan=(id:number)=>request.delete(`${base}/inspection-plans/${id}`)
-export async function downloadInspection(id:number,format:'html'|'pdf',preview=false){
- const response=await fetch(`/api${base}/inspection-runs/${id}/report/${format}`,{headers:{Authorization:`Bearer ${getToken()}`}})
+async function inspectionReportResponse(id:number,format:'html'|'pdf',signal?:AbortSignal){
+ const response=await fetch(`/api${base}/inspection-runs/${id}/report/${format}`,{headers:{Authorization:`Bearer ${getToken()}`},signal})
  if(!response.ok||response.headers.get('content-type')?.includes('application/json')){let message='获取报告失败';try{message=(await response.json()).message||message}catch{};throw new Error(message)}
- const url=URL.createObjectURL(await response.blob());if(preview){window.open(url,'_blank','noopener')}else{const a=document.createElement('a');a.href=url;a.download=`inspection-${id}.${format}`;a.click()};setTimeout(()=>URL.revokeObjectURL(url),60000)
+ return response
+}
+export async function getInspectionReportHTML(id:number,signal?:AbortSignal){
+ return (await inspectionReportResponse(id,'html',signal)).text()
+}
+export async function downloadInspection(id:number,format:'pdf'='pdf'){
+ const response=await inspectionReportResponse(id,format)
+ const url=URL.createObjectURL(await response.blob());const a=document.createElement('a');a.href=url;a.download=`inspection-${id}.pdf`;a.click();setTimeout(()=>URL.revokeObjectURL(url),60000)
 }
