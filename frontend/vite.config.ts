@@ -22,6 +22,8 @@ export default defineConfig({
           if (!id.includes('node_modules')) {
             return undefined
           }
+          if (id.includes('/node_modules/sql-formatter/')) return 'sql-formatter'
+          if (/\/node_modules\/(?:@codemirror|@lezer|codemirror|style-mod|w3c-keyname|crelt|@marijn)\//.test(id)) return 'sql-editor'
           if (id.includes('/node_modules/xterm') || id.includes('/node_modules/xterm-addon-fit')) {
             return 'xterm'
           }

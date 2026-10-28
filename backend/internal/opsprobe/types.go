@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const Version = "1.3.0"
+const Version = "1.4.0"
 
 type Disk struct {
 	Device           string  `json:"device"`
@@ -99,6 +99,12 @@ type DatabaseConfig struct {
 	SSLMode  string `json:"sslMode"`
 }
 type Activity struct {
+	BackendStart       *time.Time `json:"backendStart"`
+	StateChange        *time.Time `json:"stateChange"`
+	BackendType        string     `json:"backendType"`
+	QueryID            string     `json:"queryId"`
+	RootBlockingPIDs   []int      `json:"rootBlockingPids"`
+	LockWaitSeconds    *float64   `json:"lockWaitSeconds"`
 	PID                int        `json:"pid"`
 	DBName             string     `json:"dbName"`
 	Username           string     `json:"username"`
@@ -115,29 +121,38 @@ type Activity struct {
 	BlockingPIDs       []int      `json:"blockingPids"`
 }
 type Lock struct {
-	PID         int        `json:"pid"`
-	LockType    string     `json:"lockType"`
-	Mode        string     `json:"mode"`
-	Granted     bool       `json:"granted"`
-	Object      string     `json:"object"`
-	WaitStart   *time.Time `json:"waitStart"`
-	WaitSeconds float64    `json:"waitSeconds"`
+	DatabaseOID   int64      `json:"databaseOid"`
+	RelationOID   int64      `json:"relationOid"`
+	TransactionID string     `json:"transactionId"`
+	PreparedGID   string     `json:"preparedGid"`
+	PID           int        `json:"pid"`
+	LockType      string     `json:"lockType"`
+	Mode          string     `json:"mode"`
+	Granted       bool       `json:"granted"`
+	Object        string     `json:"object"`
+	WaitStart     *time.Time `json:"waitStart"`
+	WaitSeconds   float64    `json:"waitSeconds"`
 }
 type Diagnostic struct {
-	CheckedAt      time.Time  `json:"checkedAt"`
-	Version        string     `json:"version"`
-	Database       string     `json:"database"`
-	Username       string     `json:"username"`
-	Role           string     `json:"role"`
-	Connections    int        `json:"connections"`
-	MaxConnections int        `json:"maxConnections"`
-	Deadlocks      int64      `json:"deadlocks"`
-	StatsReset     *time.Time `json:"statsReset"`
-	Activities     []Activity `json:"activities"`
-	Locks          []Lock     `json:"locks"`
-	Truncated      bool       `json:"truncated"`
-	Limit          int        `json:"limit"`
-	Warnings       []string   `json:"warnings"`
+	ServerVersionNum int             `json:"serverVersionNum"`
+	StatsVisible     bool            `json:"statsVisible"`
+	BlockingEdges    []BlockingEdge  `json:"blockingEdges"`
+	BlockingGroups   []BlockingGroup `json:"blockingGroups"`
+	SessionSummary   SessionSummary  `json:"sessionSummary"`
+	CheckedAt        time.Time       `json:"checkedAt"`
+	Version          string          `json:"version"`
+	Database         string          `json:"database"`
+	Username         string          `json:"username"`
+	Role             string          `json:"role"`
+	Connections      int             `json:"connections"`
+	MaxConnections   int             `json:"maxConnections"`
+	Deadlocks        int64           `json:"deadlocks"`
+	StatsReset       *time.Time      `json:"statsReset"`
+	Activities       []Activity      `json:"activities"`
+	Locks            []Lock          `json:"locks"`
+	Truncated        bool            `json:"truncated"`
+	Limit            int             `json:"limit"`
+	Warnings         []string        `json:"warnings"`
 }
 type Check struct {
 	Code     string `json:"code"`

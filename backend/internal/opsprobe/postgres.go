@@ -61,9 +61,11 @@ func Diagnose(ctx context.Context, c DatabaseConfig) (*Diagnostic, error) {
 func DiagnoseConnection(ctx context.Context, conn *pgx.Conn) (*Diagnostic, error) {
 	d := &Diagnostic{CheckedAt: time.Now(), Activities: []Activity{}, Locks: []Lock{}, Warnings: []string{}, Limit: 300}
 	var standby, statsVisible bool
-	if err := conn.QueryRow(ctx, `SELECT version(),current_database(),current_user,pg_is_in_recovery(),(SELECT rolsuper FROM pg_roles WHERE rolname=current_user) OR pg_has_role(current_user,'pg_read_all_stats','USAGE'),current_setting('max_connections')::int`).Scan(&d.Version, &d.Database, &d.Username, &standby, &statsVisible, &d.MaxConnections); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT version(),current_database(),current_user,pg_is_in_recovery(),(SELECT rolsuper FROM pg_roles WHERE rolname=current_user) OR pg_has_role(current_user,'pg_read_all_stats','USAGE'),current_setting('max_connections')::int,current_setting('server_version_num')::int,clock_timestamp()`).Scan(&d.Version, &d.Database, &d.Username, &standby, &statsVisible, &d.MaxConnections, &d.ServerVersionNum, &d.CheckedAt); err != nil {
 		return nil, err
 	}
+	d.StatsVisible = statsVisible
+	d.Limit = 0
 	d.Role = "primary"
 	if standby {
 		d.Role = "standby"
@@ -74,25 +76,30 @@ func DiagnoseConnection(ctx context.Context, conn *pgx.Conn) (*Diagnostic, error
 	if err := conn.QueryRow(ctx, `SELECT numbackends,deadlocks,stats_reset FROM pg_stat_database WHERE datname=current_database()`).Scan(&d.Connections, &d.Deadlocks, &d.StatsReset); err != nil {
 		return nil, err
 	}
-	rows, err := conn.Query(ctx, `SELECT pid,COALESCE(datname,''),COALESCE(usename,''),COALESCE(application_name,''),COALESCE(client_addr::text,''),COALESCE(state,''),COALESCE(query,''),query_start,xact_start,
- CASE WHEN state='active' THEN GREATEST(0,EXTRACT(EPOCH FROM clock_timestamp()-query_start))::float8 ELSE 0 END,
- COALESCE(GREATEST(0,EXTRACT(EPOCH FROM clock_timestamp()-xact_start))::float8,0),COALESCE(wait_event_type,''),COALESCE(wait_event,''),
- CASE WHEN wait_event_type='Lock' THEN pg_blocking_pids(pid) ELSE ARRAY[]::int[] END
- FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend'
- AND (state IS DISTINCT FROM 'idle' OR pid IN (SELECT unnest(pg_blocking_pids(pid)) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'))
- ORDER BY CASE WHEN wait_event_type='Lock' THEN 0 ELSE 1 END,xact_start NULLS LAST,query_start NULLS LAST,pid LIMIT 301`)
+	queryID := "''::text"
+	if d.ServerVersionNum >= 140000 {
+		queryID = "COALESCE(query_id::text,'')"
+	}
+	rows, err := conn.Query(ctx, `WITH RECURSIVE live AS MATERIALIZED (
+ SELECT pid,COALESCE(datname,'') AS dbname,COALESCE(usename,'') AS username,COALESCE(application_name,'') AS application,COALESCE(client_addr::text,'') AS client,COALESCE(state,'') AS state,COALESCE(query,'') AS query,query_start,xact_start,
+ CASE WHEN state='active' THEN GREATEST(0,EXTRACT(EPOCH FROM statement_timestamp()-query_start))::float8 ELSE 0 END AS elapsed,
+ COALESCE(GREATEST(0,EXTRACT(EPOCH FROM statement_timestamp()-xact_start))::float8,0) AS xact_seconds,COALESCE(wait_event_type,'') AS wait_type,COALESCE(wait_event,'') AS wait_event,
+ CASE WHEN wait_event_type='Lock' THEN pg_blocking_pids(pid) ELSE ARRAY[]::int[] END AS blockers,backend_start,state_change,COALESCE(backend_type,'') AS backend_type,`+queryID+` AS query_id
+ FROM pg_stat_activity WHERE pid<>pg_backend_pid()
+ ), needed(pid) AS (
+ SELECT pid FROM live WHERE dbname=current_database() AND backend_type IN ('client backend','')
+ UNION SELECT blocker FROM needed JOIN live ON live.pid=needed.pid CROSS JOIN LATERAL unnest(live.blockers) AS blocker
+ )
+ SELECT live.* FROM live JOIN needed ON needed.pid=live.pid
+ ORDER BY CASE WHEN wait_type='Lock' THEN 0 ELSE 1 END,xact_start NULLS LAST,query_start NULLS LAST,live.pid`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var a Activity
-		if err := rows.Scan(&a.PID, &a.DBName, &a.Username, &a.Application, &a.Client, &a.State, &a.Query, &a.QueryStart, &a.TransactionStart, &a.ElapsedSeconds, &a.TransactionSeconds, &a.WaitEventType, &a.WaitEvent, &a.BlockingPIDs); err != nil {
+		if err := rows.Scan(&a.PID, &a.DBName, &a.Username, &a.Application, &a.Client, &a.State, &a.Query, &a.QueryStart, &a.TransactionStart, &a.ElapsedSeconds, &a.TransactionSeconds, &a.WaitEventType, &a.WaitEvent, &a.BlockingPIDs, &a.BackendStart, &a.StateChange, &a.BackendType, &a.QueryID); err != nil {
 			rows.Close()
 			return nil, err
-		}
-		if len(d.Activities) == d.Limit {
-			d.Truncated = true
-			break
 		}
 		d.Activities = append(d.Activities, a)
 	}
@@ -109,24 +116,26 @@ func DiagnoseConnection(ctx context.Context, conn *pgx.Conn) (*Diagnostic, error
 		}
 	}
 	if len(pids) > 0 {
-		rows, err = conn.Query(ctx, `SELECT l.pid,l.locktype,l.mode,l.granted,
+		waitStart := "NULL::timestamptz"
+		waitSeconds := "0::float8"
+		if d.ServerVersionNum >= 140000 {
+			waitStart = "l.waitstart"
+			waitSeconds = "COALESCE(GREATEST(0,EXTRACT(EPOCH FROM statement_timestamp()-l.waitstart))::float8,0)"
+		}
+		rows, err = conn.Query(ctx, `SELECT COALESCE(l.pid,0),l.locktype,l.mode,l.granted,
   CASE WHEN l.relation IS NOT NULL AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database()) THEN COALESCE(quote_ident(n.nspname)||'.'||quote_ident(c.relname),l.relation::text)
   WHEN l.transactionid IS NOT NULL THEN 'transaction '||l.transactionid::text ELSE COALESCE(l.classid::text||':'||l.objid::text,'') END,
-  l.waitstart,COALESCE(GREATEST(0,EXTRACT(EPOCH FROM clock_timestamp()-l.waitstart))::float8,0)
-  FROM pg_locks l LEFT JOIN pg_class c ON c.oid=l.relation AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database()) LEFT JOIN pg_namespace n ON n.oid=c.relnamespace
-  WHERE l.pid=ANY($1::int[]) ORDER BY l.granted,l.waitstart NULLS LAST,l.pid,l.locktype LIMIT 501`, pids)
+  `+waitStart+`,`+waitSeconds+`,COALESCE(l.database,0)::bigint,COALESCE(l.relation,0)::bigint,COALESCE(l.transactionid::text,''),COALESCE(px.gid,'')
+  FROM pg_locks l LEFT JOIN pg_class c ON c.oid=l.relation AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database()) LEFT JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_prepared_xacts px ON l.pid IS NULL AND px.transaction=l.transactionid
+  WHERE l.pid=ANY($1::int[]) OR (l.pid IS NULL AND 0=ANY($1::int[])) ORDER BY l.granted,l.pid,l.locktype`, pids)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var l Lock
-			if err := rows.Scan(&l.PID, &l.LockType, &l.Mode, &l.Granted, &l.Object, &l.WaitStart, &l.WaitSeconds); err != nil {
+			if err := rows.Scan(&l.PID, &l.LockType, &l.Mode, &l.Granted, &l.Object, &l.WaitStart, &l.WaitSeconds, &l.DatabaseOID, &l.RelationOID, &l.TransactionID, &l.PreparedGID); err != nil {
 				rows.Close()
 				return nil, err
-			}
-			if len(d.Locks) == 500 {
-				d.Truncated = true
-				break
 			}
 			d.Locks = append(d.Locks, l)
 		}
@@ -136,6 +145,7 @@ func DiagnoseConnection(ctx context.Context, conn *pgx.Conn) (*Diagnostic, error
 			return nil, err
 		}
 	}
+	BuildBlockingGraph(d)
 	return d, nil
 }
 func DatabaseChecks(d *Diagnostic) []Check {

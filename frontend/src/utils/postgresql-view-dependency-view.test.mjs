@@ -20,7 +20,7 @@ assert.match(api, /verifySQLViewDependencyItem/, 'PostgreSQL API should verify a
 assert.match(api, /exportSQLViewDependencyPlan/, 'PostgreSQL API should export view dependency plans')
 assert.match(api, /exportSQLViewDependencyRestorePlan/, 'PostgreSQL API should export view dependency restore plans')
 
-assert.match(router, /postgresql\/view-dependency-change/, 'router should expose PostgreSQL view dependency change page')
+assert.match(router, /path:\s*'postgresql'[\s\S]*children:\s*\[[\s\S]*path:\s*'view-dependency-change'/, 'PostgreSQL module should retain the view dependency child route')
 assert.match(router, /PostgreSQLViewDependencyChangeView/, 'router should load PostgreSQL view dependency change view')
 assert.match(layout, /\/postgresql\/view-dependency-change/, 'PostgreSQL menu should link to view dependency change page')
 

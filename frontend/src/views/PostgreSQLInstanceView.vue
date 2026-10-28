@@ -24,11 +24,12 @@ onMounted(loadInstance)
   <div class="postgres-instance-page" v-loading="loading">
     <div class="page-title-row">
       <div>
-        <h4 class="page-title">实例管理</h4>
+        <h4 class="page-title">SQL 发布连接</h4>
+        <p class="release-connection-note">用于 SQL 变更发布的全局连接。工作台中登记的连接独立管理，发布任务仍使用任务自身的执行目标。</p>
       </div>
       <div class="title-actions">
         <el-button size="small" @click="loadInstance">刷新</el-button>
-        <el-button size="small" type="primary" @click="router.push('/postgresql/diagnostics')">锁与慢 SQL 诊断</el-button>
+        <el-button size="small" type="primary" @click="router.push('/postgresql/workbench')">数据库工作台</el-button>
         <el-button size="small" type="primary" @click="router.push('/settings/environment')">系统设置</el-button>
       </div>
     </div>
@@ -86,3 +87,5 @@ onMounted(loadInstance)
 .section-title { font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 12px; }
 .data-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 </style>
+
+<style scoped>.release-connection-note{font-size:12px;color:var(--ui-muted);margin:8px 0 0;line-height:1.7}</style>

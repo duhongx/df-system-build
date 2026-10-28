@@ -7,13 +7,17 @@ import { getUnreadCount, listNotificationMsgs, markAllRead, type NotificationMsg
 import { formatTime as formatNotifyTime } from '../utils/time'
 import request from '../api/request'
 import { clearToken } from '../api/request'
+import ModuleNavigation from '../components/postgresql/ModuleNavigation.vue'
 
 const settingsStore = useSettingsStore()
 settingsStore.fetchSettings()
 
 const route = useRoute()
 const router = useRouter()
-const isCollapsed = ref(window.innerWidth < 1200)
+const platformCollapsed = ref(window.innerWidth < 1200)
+const databaseExpanded = ref(false)
+const isPostgreSQL = computed(() => route.path.startsWith('/postgresql'))
+const isCollapsed = computed(() => isPostgreSQL.value ? !databaseExpanded.value : platformCollapsed.value)
 const pageSection = computed(() => {
   if (/^\/(servers|kubernetes|inspections)/.test(route.path)) return '运维管理'
   if (route.path.startsWith('/postgresql')) return '数据库管理'
@@ -28,7 +32,8 @@ const activeMenu = computed(() => {
 })
 
 const toggleCollapse = () => {
-  isCollapsed.value = !isCollapsed.value
+  if (isPostgreSQL.value) databaseExpanded.value = !databaseExpanded.value
+  else platformCollapsed.value = !platformCollapsed.value
 }
 
 const sidebarWidth = computed(() => isCollapsed.value ? '72px' : '224px')
@@ -302,9 +307,9 @@ async function handleSaveProfile() {
             <el-icon><Coin /></el-icon>
             <span>PostgreSQL 管理</span>
           </template>
-          <el-menu-item index="/postgresql/diagnostics">锁与慢 SQL 诊断</el-menu-item>
-          <el-menu-item index="/postgresql/instances">实例管理</el-menu-item>
-          <el-menu-item index="/postgresql/sql-execution">SQL 执行</el-menu-item>
+          <el-menu-item index="/postgresql/workbench">数据库工作台</el-menu-item>
+          <el-menu-item index="/postgresql/instances">发布连接</el-menu-item>
+          <el-menu-item index="/postgresql/sql-execution">SQL 变更发布</el-menu-item>
           <el-menu-item index="/postgresql/view-dependency-change">视图依赖变更</el-menu-item>
         </el-sub-menu>
 
@@ -337,7 +342,7 @@ async function handleSaveProfile() {
     </aside>
 
     <!-- Main Area -->
-    <div class="main-area">
+    <div class="main-area" :class="{'main-area--postgresql':route.path.startsWith('/postgresql')}">
       <!-- Header -->
       <header class="main-header">
         <div class="header-left">
@@ -347,7 +352,7 @@ async function handleSaveProfile() {
               <Expand v-else />
             </el-icon>
           </button>
-          <div class="header-breadcrumb"><span>{{ pageSection }}</span><span class="breadcrumb-slash">/</span><strong>{{ route.meta.title }}</strong></div>
+          <ModuleNavigation v-if="isPostgreSQL"/><div v-else class="header-breadcrumb"><span>{{ pageSection }}</span><span class="breadcrumb-slash">/</span><strong>{{ route.meta.title }}</strong></div>
         </div>
         <div class="header-right">
           <el-badge :value="unreadCount" :hidden="unreadCount === 0" :max="99" style="margin-right: 16px;">
@@ -394,7 +399,7 @@ async function handleSaveProfile() {
       </header>
 
       <!-- Tabs -->
-      <div class="tab-bar">
+      <div v-if="!isPostgreSQL" class="tab-bar">
         <div
           v-for="tab in tabs"
           :key="tab.path"
@@ -431,9 +436,9 @@ async function handleSaveProfile() {
       </div>
 
       <!-- Content -->
-      <main class="main-content" :class="{ 'main-content--fill': route.meta.fillViewport }">
-        <!-- taskId changes persist the current view task without remounting its active action. -->
-        <router-view :key="route.name === 'PostgreSQLViewDependencyChange' ? route.path : route.fullPath" />
+      <main class="main-content" :class="{ 'main-content--fill': route.meta.fillViewport, 'main-content--postgresql': route.path.startsWith('/postgresql') }">
+        <!-- Preserve the PostgreSQL workspace while module and task parameters change. -->
+        <router-view :key="route.path.startsWith('/postgresql') ? 'postgresql-module' : route.fullPath" />
       </main>
     </div>
 
@@ -523,4 +528,10 @@ async function handleSaveProfile() {
 .notify-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 550; color: var(--ui-heading); }.notify-content { font-size: 12px; color: var(--ui-text); margin-top: 8px; padding-left: 24px; }.notify-time { font-size: 11px; color: var(--ui-muted); margin-top: 8px; padding-left: 24px; }
 @media (max-width: 1100px) { .main-content { padding: 23px 22px; }.main-header { padding-inline: 20px; }.tab-bar { padding-inline: 20px; } }
 @media (max-width: 700px) { .main-content { padding: 18px 14px; }.main-header { padding-inline: 12px; height: 58px; }.user-name { display: none; }.header-breadcrumb > span:first-child, .breadcrumb-slash { display: none; }.header-left { gap: 8px; }.header-right :deep(.el-badge), .header-right :deep(.el-dropdown) { margin-right: 6px !important; }.user-info { padding-left: 8px; }.tab-bar { padding-inline: 12px; } }
+.main-area--postgresql .main-header { height: 50px; padding-inline: 20px; }
+.main-area--postgresql .tab-bar { min-height: 34px; padding-inline: 20px; }
+.main-content--postgresql { padding: 0; scrollbar-gutter: auto; }
+.main-area--postgresql .header-left { min-width: 0; flex: 1; gap: 14px; }
+.main-area--postgresql .header-right { flex-shrink: 0; }
+.main-area--postgresql .main-header { padding-inline: 16px; }
 </style>
