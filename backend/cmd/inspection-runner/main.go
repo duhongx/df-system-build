@@ -125,7 +125,17 @@ func run(mode, dir string) error {
 	}()
 	result := opsprobe.JobResult{Version: opsprobe.Version, Name: cfg.Name, Type: cfg.Type, StartedAt: time.Now(), Checks: []opsprobe.Check{}}
 	result.Hostname, _ = os.Hostname()
-	if cfg.Type == "host" {
+	if cfg.Manual != nil {
+		updates <- [2]string{"按指导书执行检查", "记录实际命令／SQL、返回输出、错误与退出码"}
+		checks, e := opsprobe.CollectManual(ctx, *cfg.Manual, cfg.Database, opsprobe.ExecuteManualCommand)
+		result.ReportChecks = checks
+		if e != nil {
+			result.Error = e.Error()
+		}
+		if cfg.Database != nil {
+			cfg.Database.Password = ""
+		}
+	} else if cfg.Type == "host" {
 		updates <- [2]string{"采集主机资源", "CPU、内存、磁盘和网络"}
 		m, e := opsprobe.CollectHost(ctx)
 		if e != nil {
@@ -158,6 +168,8 @@ func run(mode, dir string) error {
 				result.Database = d
 				result.Checks = append(result.Checks, opsprobe.DatabaseChecks(d)...)
 			}
+			updates <- [2]string{"采集报告证据", "只读 SQL、配置、复制、归档与 Top5"}
+			result.ReportChecks = opsprobe.InspectionDatabase(ctx, *cfg.Database)
 			cfg.Database.Password = ""
 		}
 	}

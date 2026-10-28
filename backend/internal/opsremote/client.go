@@ -173,6 +173,11 @@ func (c *Conn) ReadFile(name string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
+	// A zero limit is used for complete inspection result files. Progress and
+	// other small control files continue to use explicit limits.
+	if limit == 0 {
+		return io.ReadAll(f)
+	}
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err == nil && int64(len(data)) > limit {
 		return nil, fmt.Errorf("远程文件超过大小限制")

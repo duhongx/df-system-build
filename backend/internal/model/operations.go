@@ -85,6 +85,7 @@ type DatabaseLogEvent struct {
 	CreatedAt    time.Time `json:"createdAt"`
 }
 type InspectionPlan struct {
+	CommandsJSON string     `gorm:"type:jsonb;default:null" json:"commandsJSON"`
 	ID           uint       `gorm:"primaryKey" json:"id"`
 	Name         string     `gorm:"size:128;not null" json:"name"`
 	Enabled      bool       `json:"enabled"`
@@ -99,31 +100,33 @@ type InspectionPlan struct {
 	UpdatedAt    time.Time  `json:"updatedAt"`
 }
 type InspectionRun struct {
-	LeaseOwner       string     `gorm:"size:64" json:"-"`
-	LeaseUntil       *time.Time `gorm:"index" json:"-"`
-	ID               uint       `gorm:"primaryKey" json:"id"`
-	PlanID           uint       `gorm:"index" json:"planId"`
-	ScheduleKey      string     `gorm:"size:128;uniqueIndex;default:null" json:"-"`
-	Name             string     `gorm:"size:128" json:"name"`
-	Status           string     `gorm:"size:24;index" json:"status"`
-	Trigger          string     `gorm:"size:16" json:"trigger"`
-	Operator         string     `gorm:"size:64" json:"operator"`
-	TotalTargets     int        `json:"totalTargets"`
-	CompletedTargets int        `json:"completedTargets"`
-	WarningCount     int        `json:"warningCount"`
-	CriticalCount    int        `json:"criticalCount"`
-	ErrorCount       int        `json:"errorCount"`
-	CancelRequested  bool       `json:"cancelRequested"`
-	Message          string     `gorm:"type:text" json:"message"`
-	HTMLStatus       string     `gorm:"size:16" json:"htmlStatus"`
-	PDFStatus        string     `gorm:"size:16" json:"pdfStatus"`
-	ReportError      string     `gorm:"type:text" json:"reportError"`
-	StartedAt        *time.Time `json:"startedAt"`
-	FinishedAt       *time.Time `json:"finishedAt"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	UpdatedAt        time.Time  `json:"updatedAt"`
+	ReportSnapshotJSON string     `gorm:"type:jsonb;default:null" json:"-"`
+	LeaseOwner         string     `gorm:"size:64" json:"-"`
+	LeaseUntil         *time.Time `gorm:"index" json:"-"`
+	ID                 uint       `gorm:"primaryKey" json:"id"`
+	PlanID             uint       `gorm:"index" json:"planId"`
+	ScheduleKey        string     `gorm:"size:128;uniqueIndex;default:null" json:"-"`
+	Name               string     `gorm:"size:128" json:"name"`
+	Status             string     `gorm:"size:24;index" json:"status"`
+	Trigger            string     `gorm:"size:16" json:"trigger"`
+	Operator           string     `gorm:"size:64" json:"operator"`
+	TotalTargets       int        `json:"totalTargets"`
+	CompletedTargets   int        `json:"completedTargets"`
+	WarningCount       int        `json:"warningCount"`
+	CriticalCount      int        `json:"criticalCount"`
+	ErrorCount         int        `json:"errorCount"`
+	CancelRequested    bool       `json:"cancelRequested"`
+	Message            string     `gorm:"type:text" json:"message"`
+	HTMLStatus         string     `gorm:"size:16" json:"htmlStatus"`
+	PDFStatus          string     `gorm:"size:16" json:"pdfStatus"`
+	ReportError        string     `gorm:"type:text" json:"reportError"`
+	StartedAt          *time.Time `json:"startedAt"`
+	FinishedAt         *time.Time `json:"finishedAt"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
 }
 type InspectionTargetRun struct {
+	ManualJSON      string     `gorm:"type:jsonb;default:null" json:"manualJSON"`
 	ServerEndpoint  string     `gorm:"size:512" json:"serverEndpoint"`
 	ServicesJSON    string     `gorm:"type:jsonb;not null;default:'[]'" json:"servicesJSON"`
 	ID              uint       `gorm:"primaryKey" json:"id"`

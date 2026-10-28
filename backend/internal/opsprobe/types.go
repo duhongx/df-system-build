@@ -1,8 +1,11 @@
 package opsprobe
 
-import "time"
+import (
+	"df-build-server/internal/inspection"
+	"time"
+)
 
-const Version = "1.0.0"
+const Version = "1.3.0"
 
 type Disk struct {
 	Device           string  `json:"device"`
@@ -146,6 +149,7 @@ type Check struct {
 	Error    string `json:"error"`
 }
 type JobConfig struct {
+	Manual         *ManualOptions  `json:"manual,omitempty"`
 	Type           string          `json:"type"`
 	Name           string          `json:"name"`
 	Database       *DatabaseConfig `json:"database,omitempty"`
@@ -153,14 +157,15 @@ type JobConfig struct {
 	TimeoutSeconds int             `json:"timeoutSeconds"`
 }
 type JobResult struct {
-	Version    string       `json:"version"`
-	Name       string       `json:"name"`
-	Type       string       `json:"type"`
-	Hostname   string       `json:"hostname"`
-	StartedAt  time.Time    `json:"startedAt"`
-	FinishedAt time.Time    `json:"finishedAt"`
-	Checks     []Check      `json:"checks"`
-	Metrics    *HostMetrics `json:"metrics,omitempty"`
-	Database   *Diagnostic  `json:"database,omitempty"`
-	Error      string       `json:"error"`
+	Version      string                   `json:"version"`
+	Name         string                   `json:"name"`
+	Type         string                   `json:"type"`
+	Hostname     string                   `json:"hostname"`
+	StartedAt    time.Time                `json:"startedAt"`
+	FinishedAt   time.Time                `json:"finishedAt"`
+	Checks       []Check                  `json:"checks"`
+	Metrics      *HostMetrics             `json:"metrics,omitempty"`
+	Database     *Diagnostic              `json:"database,omitempty"`
+	ReportChecks []inspection.Observation `json:"reportChecks,omitempty"`
+	Error        string                   `json:"error"`
 }

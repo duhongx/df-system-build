@@ -37,7 +37,13 @@ func (s *OperationsService) ReconcileInspection(id uint) error {
 		if count == 0 {
 			return fmt.Errorf("没有可核实的远端任务")
 		}
-		return tx.Model(&run).Updates(map[string]any{"status": "QUEUED", "message": "等待核实原远端任务，不重复下发", "finished_at": nil, "html_status": "PENDING", "pdf_status": "PENDING"}).Error
+		s.mu.Lock()
+		rendering := s.active[id]
+		s.mu.Unlock()
+		if rendering {
+			return fmt.Errorf("报告正在生成，请稍后核实")
+		}
+		return tx.Model(&run).Updates(map[string]any{"status": "QUEUED", "message": "等待核实原远端任务，不重复下发", "finished_at": nil, "html_status": "PENDING", "pdf_status": "PENDING", "report_snapshot_json": nil}).Error
 	})
 }
 func (s *OperationsService) RegenerateReportsAsync(id uint) error {

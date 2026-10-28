@@ -22,9 +22,10 @@ type InspectionTargetRequest struct {
 	ID   uint   `json:"id"`
 }
 type InspectionRequest struct {
-	Name     string                    `json:"name"`
-	Targets  []InspectionTargetRequest `json:"targets"`
-	Services []string                  `json:"services"`
+	Commands map[string]opsprobe.ManualOptions `json:"commands"`
+	Name     string                            `json:"name"`
+	Targets  []InspectionTargetRequest         `json:"targets"`
+	Services []string                          `json:"services"`
 }
 
 func (s *OperationsService) CreateInspection(req InspectionRequest, operator string) (*model.InspectionRun, error) {
@@ -37,6 +38,9 @@ func (s *OperationsService) CreateInspection(req InspectionRequest, operator str
 	return out, err
 }
 func (s *OperationsService) createInspectionTx(tx *gorm.DB, req InspectionRequest, operator string, planID uint, key string, validateOnly ...bool) (*model.InspectionRun, error) {
+	if err := validateInspectionCommands(req.Commands, req.Targets); err != nil {
+		return nil, err
+	}
 	if len(req.Targets) == 0 || len(req.Targets) > 500 {
 		return nil, fmt.Errorf("请选择 1～500 个巡检对象")
 	}
@@ -95,6 +99,9 @@ func (s *OperationsService) createInspectionTx(tx *gorm.DB, req InspectionReques
 			t.ConfigRevision = db.Revision
 		default:
 			return nil, fmt.Errorf("巡检类型仅支持 host 或 database")
+		}
+		if manual, ok := req.Commands[identity]; ok {
+			t.ManualJSON = mustJSON(manual)
 		}
 		targets = append(targets, t)
 	}
@@ -225,6 +232,16 @@ func (s *OperationsService) processInspection(parent context.Context, id uint) {
 					unknown++
 				}
 			}
+			for _, c := range result.ReportChecks {
+				switch c.Status {
+				case "WARNING":
+					warnings++
+				case "CRITICAL":
+					critical++
+				case "UNKNOWN":
+					unknown++
+				}
+			}
 		}
 		if t.Status != "COMPLETED" && unknown == previousUnknown {
 			unknown++
@@ -242,10 +259,22 @@ func (s *OperationsService) processInspection(parent context.Context, id uint) {
 		return
 	}
 	reportErr := s.GenerateInspectionReports(ctx, id)
+	// Cross-object requirements (for example, obtaining one current Leader
+	// archive result) can be incomplete even if all SSH jobs finished.
+	var reportUnknown int
+	if err := s.db.Model(&model.InspectionRun{}).Where("id=?", id).Select("COALESCE((report_snapshot_json->'summary'->>'unknown')::integer,0)").Scan(&reportUnknown).Error; err != nil && reportErr == nil {
+		reportErr = err
+	}
+	if reportUnknown > unknown {
+		unknown = reportUnknown
+		if status == "COMPLETED" {
+			status = "PARTIAL"
+		}
+	}
 	if reportErr != nil && status == "COMPLETED" {
 		status = "PARTIAL"
 	}
-	final := map[string]any{"status": status, "finished_at": time.Now()}
+	final := map[string]any{"status": status, "finished_at": time.Now(), "error_count": unknown}
 	if reportErr != nil {
 		final["message"] = reportErr.Error()
 	}
@@ -260,7 +289,11 @@ func (s *OperationsService) finishInspectionTarget(t *model.InspectionTargetRun,
 	s.db.Model(t).Updates(updates)
 }
 func (s *OperationsService) executeInspectionTarget(parent context.Context, t *model.InspectionTargetRun) {
-	ctx, cancel := context.WithTimeout(parent, 180*time.Second)
+	timeout := 180 * time.Second
+	if t.ManualJSON != "" {
+		timeout = 360 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	var server model.Server
 	if err := s.db.First(&server, t.ServerID).Error; err != nil {
@@ -273,6 +306,7 @@ func (s *OperationsService) executeInspectionTarget(parent context.Context, t *m
 	}
 	now := time.Now()
 	s.db.Model(t).Updates(map[string]any{"status": "RUNNING", "stage": "连接执行主机", "started_at": now, "message": "", "heartbeat_at": now})
+
 	conn, err := s.connect(ctx, t.ServerID)
 	if err != nil {
 		state := "FAILED"
@@ -285,6 +319,15 @@ func (s *OperationsService) executeInspectionTarget(parent context.Context, t *m
 	defer conn.Close()
 	if t.RemoteDirectory == "" {
 		cfg := opsprobe.JobConfig{Type: t.Type, Name: t.Name, TimeoutSeconds: 120}
+		if t.ManualJSON != "" {
+			var manual opsprobe.ManualOptions
+			if e := json.Unmarshal([]byte(t.ManualJSON), &manual); e != nil {
+				s.finishInspectionTarget(t, "FAILED", "巡检命令配置无效", nil)
+				return
+			}
+			cfg.Manual = &manual
+			cfg.TimeoutSeconds = 300
+		}
 		_ = json.Unmarshal([]byte(t.ServicesJSON), &cfg.Services)
 		if t.Type == "database" {
 			var row model.OperationsDatabase
@@ -356,15 +399,16 @@ func (s *OperationsService) executeInspectionTarget(parent context.Context, t *m
 				return
 			}
 		}
-		if data, e := conn.ReadFile(path.Join(t.RemoteDirectory, "result.json"), 8<<20); e == nil {
+		if data, e := conn.ReadFile(path.Join(t.RemoteDirectory, "result.json"), 0); e == nil {
 			var result opsprobe.JobResult
 			if err := json.Unmarshal(data, &result); err != nil {
 				s.finishInspectionTarget(t, "UNKNOWN", "远端结果格式错误: "+err.Error(), nil)
 				return
 			}
-			if t.Type == "database" {
+			if t.Type == "database" && t.ManualJSON == "" {
 				s.appendLogInspectionChecks(t.TargetID, &result)
 			}
+			s.enrichInspectionHistory(t, &result)
 			state, message := "COMPLETED", "远端检查完成，结果已回收"
 			if result.Error != "" {
 				state, message = "FAILED", result.Error
@@ -482,6 +526,9 @@ func (s *OperationsService) enqueueDuePlans(ctx context.Context) {
 			parseErr := json.Unmarshal([]byte(p.TargetsJSON), &req.Targets)
 			if parseErr == nil {
 				parseErr = json.Unmarshal([]byte(p.ServicesJSON), &req.Services)
+			}
+			if parseErr == nil && p.CommandsJSON != "" {
+				parseErr = json.Unmarshal([]byte(p.CommandsJSON), &req.Commands)
 			}
 			message := ""
 			var busy int64

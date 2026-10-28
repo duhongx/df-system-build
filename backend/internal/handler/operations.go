@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"path"
@@ -9,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"df-build-server/internal/inspection"
 	"df-build-server/internal/middleware"
 	"df-build-server/internal/model"
+	"df-build-server/internal/opsprobe"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/service"
 	"df-build-server/pkg/crypto"
@@ -47,6 +50,7 @@ func (h *OperationsHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g.POST("/inspection-runs", h.CreateRun)
 	g.GET("/inspection-runs/:id", h.Run)
 	g.GET("/inspection-runs/:id/targets/:targetId", h.Target)
+	g.GET("/inspection-runs/:id/report-data", h.ReportData)
 	g.POST("/inspection-runs/:id/cancel", h.CancelRun)
 	g.POST("/inspection-runs/:id/reconcile", h.ReconcileRun)
 	g.POST("/inspection-runs/:id/reports", h.RegenerateReports)
@@ -316,7 +320,7 @@ func (h *OperationsHandler) History(c *gin.Context) {
 }
 func (h *OperationsHandler) Runs(c *gin.Context) {
 	page, size := opsPage(c)
-	q := repository.DB.Model(&model.InspectionRun{})
+	q := repository.DB.Model(&model.InspectionRun{}).Omit("report_snapshot_json")
 	if c.Query("status") != "" {
 		q = q.Where("status=?", c.Query("status"))
 	}
@@ -347,7 +351,7 @@ func (h *OperationsHandler) CreateRun(c *gin.Context) {
 }
 func (h *OperationsHandler) Run(c *gin.Context) {
 	var run model.InspectionRun
-	if err := repository.DB.First(&run, opsID(c)).Error; err != nil {
+	if err := repository.DB.Omit("report_snapshot_json").First(&run, opsID(c)).Error; err != nil {
 		opsFail(c, err)
 		return
 	}
@@ -357,6 +361,24 @@ func (h *OperationsHandler) Run(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"run": run, "targets": targets})
+}
+func (h *OperationsHandler) ReportData(c *gin.Context) {
+	var run model.InspectionRun
+	if err := repository.DB.Select("id", "report_snapshot_json").First(&run, opsID(c)).Error; err != nil {
+		opsFail(c, err)
+		return
+	}
+	if run.ReportSnapshotJSON == "" {
+		response.OK(c, nil)
+		return
+	}
+	var doc inspection.Report
+	if err := json.Unmarshal([]byte(run.ReportSnapshotJSON), &doc); err != nil {
+		opsFail(c, fmt.Errorf("报告快照读取失败"))
+		return
+	}
+	c.Header("Cache-Control", "private, no-store")
+	response.OK(c, doc)
 }
 func (h *OperationsHandler) Target(c *gin.Context) {
 	var row model.InspectionTargetRun
@@ -437,6 +459,7 @@ func (h *OperationsHandler) Plans(c *gin.Context) {
 }
 func (h *OperationsHandler) SavePlan(c *gin.Context) {
 	var req struct {
+		Commands  map[string]opsprobe.ManualOptions `json:"commands"`
 		Name      string                            `json:"name"`
 		Enabled   bool                              `json:"enabled"`
 		DailyTime string                            `json:"dailyTime"`
@@ -456,7 +479,7 @@ func (h *OperationsHandler) SavePlan(c *gin.Context) {
 		opsFail(c, err)
 		return
 	}
-	if err := h.svc.ValidateInspection(service.InspectionRequest{Name: req.Name, Targets: req.Targets, Services: req.Services}); err != nil {
+	if err := h.svc.ValidateInspection(service.InspectionRequest{Name: req.Name, Targets: req.Targets, Services: req.Services, Commands: req.Commands}); err != nil {
 		opsFail(c, err)
 		return
 	}
@@ -474,6 +497,7 @@ func (h *OperationsHandler) SavePlan(c *gin.Context) {
 	row.Timezone = req.Timezone
 	row.TargetsJSON = service.OperationsJSON(req.Targets)
 	row.ServicesJSON = service.OperationsJSON(req.Services)
+	row.CommandsJSON = service.OperationsJSON(req.Commands)
 	row.NextRunAt = &next
 	row.CreatedBy = middleware.GetCurrentUsername(c)
 	if err := repository.DB.Save(&row).Error; err != nil {

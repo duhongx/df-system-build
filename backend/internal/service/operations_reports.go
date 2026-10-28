@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -12,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"df-build-server/internal/inspection"
 	"df-build-server/internal/model"
 	"df-build-server/internal/opsprobe"
 	"github.com/signintech/gopdf"
@@ -23,17 +25,36 @@ type inspectionReportTarget struct {
 	Result opsprobe.JobResult
 }
 type inspectionReport struct {
+	Snapshot  *inspection.Report
 	Run       model.InspectionRun
 	Targets   []inspectionReportTarget
 	Generated string
 }
 
-var inspectionHTML = template.Must(template.New("report").Funcs(template.FuncMap{"status": inspectionStatusLabel, "time": func(t time.Time) string { return t.In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05") }}).Parse(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{.Run.Name}} - DFOPS 巡检报告</title><style>
-*{box-sizing:border-box}body{font-family:Arial,"Noto Sans CJK SC","Droid Sans Fallback","Microsoft YaHei",sans-serif;color:#17233d;background:#f4f6fa;margin:0;padding:32px}main{max-width:1100px;margin:auto;background:white;padding:36px;border:1px solid #e3e8ef}h1{font-size:27px;margin:12px 0}h2{font-size:20px;margin:28px 0 12px}h3{font-size:15px;margin:0 0 8px}.brand{color:#52657e;letter-spacing:2px;font-size:12px}.meta{color:#52657e;line-height:1.8}.summary{display:flex;gap:12px;margin:22px 0}.summary>div{flex:1;background:#f5f7fb;padding:14px;border:1px solid #e2e8f0}.summary strong{display:block;font-size:23px;margin-top:8px}.target{border-top:2px solid #d8e2ee;padding-top:14px;margin-top:26px}.check{padding:14px 0;border-bottom:1px solid #e2e8f0;break-inside:avoid}.status{display:inline-block;padding:3px 8px;border-radius:4px;font-size:12px;background:#eaf2fd;color:#315a8d}.WARNING{background:#fff5dd;color:#805400}.CRITICAL,.FAILED{background:#ffebeb;color:#a32121}.UNKNOWN,.CANCELED{background:#eef0f3;color:#515e70}.NORMAL,.COMPLETED{background:#e8f6ee;color:#206644}pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;background:#f6f8fb;border:1px solid #e3e8ef;padding:12px;font-size:12px;line-height:1.6}p{line-height:1.7;margin:7px 0}.foot{margin-top:28px;color:#65758b;font-size:12px}@page{size:A4;margin:16mm}@media print{body{background:white;padding:0}main{border:0;padding:0;max-width:none}.summary{display:flex}h2{break-after:avoid}}
-</style></head><body><main><div class="brand">DFOPS · 运维巡检</div><h1>{{.Run.Name}}</h1><div class="meta">任务 #{{.Run.ID}} · {{status .Run.Status}} · 发起人 {{.Run.Operator}}<br>生成时间 {{.Generated}} · 执行器版本 {{range .Targets}}{{if .Result.Version}}{{.Result.Version}} {{end}}{{end}}</div><div class="summary"><div>巡检对象<strong>{{.Run.TotalTargets}}</strong></div><div>告警检查项<strong>{{.Run.WarningCount}}</strong></div><div>严重检查项<strong>{{.Run.CriticalCount}}</strong></div><div>采集异常<strong>{{.Run.ErrorCount}}</strong></div></div><p>本报告保留本次检查快照。CPU 等指标为执行时采样；历史日志统计仅涵盖平台已采集记录。采集失败、权限不足和未配置项目以未知状态列出。</p>{{range .Targets}}<section class="target"><h2>{{.Target.Name}} <span class="status {{.Target.Status}}">{{status .Target.Status}}</span></h2><div class="meta">{{.Target.Type}} · {{.Target.Endpoint}} · 执行主机 {{.Target.ServerEndpoint}}</div>{{if .Target.Message}}<p>{{.Target.Message}}</p>{{end}}{{if .Result.Error}}<pre>{{.Result.Error}}</pre>{{end}}{{range .Result.Checks}}<div class="check"><h3><span class="status {{.Status}}">{{status .Status}}</span> {{.Name}}</h3>{{if .Value}}<p>{{.Value}}</p>{{end}}{{if .Evidence}}<pre>{{.Evidence}}</pre>{{end}}{{if .Error}}<pre>{{.Error}}</pre>{{end}}{{if .Advice}}<p>建议：{{.Advice}}</p>{{end}}</div>{{else}}<p>本目标未取得可用检查结果，请结合执行状态和错误信息核实。</p>{{end}}</section>{{end}}<div class="foot">DFOPS 运维巡检报告 · 任务 #{{.Run.ID}} · HTML 与 PDF 使用同一份已持久化检查结果</div></main></body></html>`))
+//go:embed inspection_report.gohtml
+var inspectionHTMLSource string
+
+var inspectionHTML = template.Must(template.New("report").Funcs(template.FuncMap{
+	"status":     inspectionStatusLabel,
+	"sections":   inspection.Sections,
+	"components": inspection.Components,
+	"time": func(t time.Time) string {
+		if t.IsZero() {
+			return "未记录"
+		}
+		return t.In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05")
+	},
+	"percent": func(v float64) string { return fmt.Sprintf("%.1f%%", v) },
+	"fallback": func(s string) string {
+		if s == "" {
+			return "未填写"
+		}
+		return s
+	},
+}).Parse(inspectionHTMLSource))
 
 func inspectionStatusLabel(s string) string {
-	if v := map[string]string{"NORMAL": "正常", "WARNING": "告警", "CRITICAL": "严重", "UNKNOWN": "未知／待核实", "QUEUED": "等待中", "RUNNING": "执行中", "COMPLETED": "已完成", "PARTIAL": "部分完成", "FAILED": "失败", "CANCELED": "已取消"}[s]; v != "" {
+	if v := map[string]string{"NOT_RUN": "未执行", "RECORDED": "已记录待核对", "NORMAL": "正常", "NOT_APPLICABLE": "不适用", "WARNING": "需关注", "CRITICAL": "严重", "UNKNOWN": "结果不完整", "QUEUED": "等待中", "RUNNING": "执行中", "COMPLETED": "已完成", "PARTIAL": "部分完成", "FAILED": "失败", "CANCELED": "已取消"}[s]; v != "" {
 		return v
 	}
 	return s
@@ -103,6 +124,9 @@ func (s *OperationsService) GenerateInspectionReports(ctx context.Context, id ui
 	}
 	if run.CancelRequested {
 		report.Run.Status = "CANCELED"
+	}
+	if err := s.freezeInspectionReport(ctx, &report); err != nil {
+		return s.reportFailure(id, "HTML", err)
 	}
 	if err := s.db.Model(&run).Updates(map[string]any{"html_status": "GENERATING", "pdf_status": "PENDING", "report_error": "", "message": "生成 HTML 报告"}).Error; err != nil {
 		return err
@@ -238,6 +262,9 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 			return err
 		}
 		lineHeight := size * 1.65
+		if size >= 11 && y+lineHeight*3 > bottom {
+			newPage()
+		}
 		var line strings.Builder
 		lineWidth := 0.0
 		flush := func() error {
@@ -289,49 +316,422 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 		}
 		return flush()
 	}
-	if err := write(r.Run.Name, 20); err != nil {
-		return nil, err
+	// Tables repeat their header after a page break. Very wide SQL evidence is
+	// transposed to field/value rows so text remains readable on A4.
+	var table func(inspection.Table) error
+	table = func(t inspection.Table) error {
+		if page == 0 {
+			newPage()
+		}
+		if y+130 > bottom {
+			newPage()
+		}
+		if t.Title != "" {
+			if err := write(t.Title, 11); err != nil {
+				return err
+			}
+		}
+		if len(t.Columns) == 0 {
+			return nil
+		}
+		if len(t.Columns) > 6 {
+			for i, row := range t.Rows {
+				if i >= 5 {
+					break
+				}
+				converted := inspection.Table{Title: fmt.Sprintf("记录 %d", i+1), Columns: []string{"字段", "实测值"}, Rows: [][]string{}}
+				for j, c := range t.Columns {
+					v := ""
+					if j < len(row) {
+						v = row[j]
+					}
+					converted.Rows = append(converted.Rows, []string{c, shortReportText(v, 180)})
+				}
+				if err := table(converted); err != nil {
+					return err
+				}
+			}
+			if len(t.Rows) > 5 {
+				if err := write(fmt.Sprintf("共 %d 行，PDF 展示前 5 行；完整记录见 HTML。", len(t.Rows)), 9); err != nil {
+					return err
+				}
+			}
+			if t.Note != "" {
+				return write(t.Note, 9)
+			}
+			return nil
+		}
+		n := len(t.Columns)
+		widths := make([]float64, n)
+		for i := range widths {
+			widths[i] = (width - 76) / float64(n)
+		}
+		if n == 2 {
+			widths[0] = (width - 76) * 0.28
+			widths[1] = (width - 76) * 0.72
+		}
+		if n >= 5 && (t.Columns[0] == "设备 / 挂载点" || t.Columns[0] == "主机") {
+			widths[0] = (width - 76) * 0.30
+			for i := 1; i < n; i++ {
+				widths[i] = (width - 76) * 0.70 / float64(n-1)
+			}
+		}
+		if n == 4 {
+			ratios := []float64{0.22, 0.26, 0.26, 0.26}
+			if t.Columns[0] == "级别" {
+				ratios = []float64{0.09, 0.24, 0.32, 0.35}
+			}
+			if t.Columns[0] == "对象" {
+				ratios = []float64{0.25, 0.13, 0.42, 0.20}
+			}
+			if t.Columns[0] == "编号" {
+				ratios = []float64{0.16, 0.40, 0.14, 0.30}
+			}
+			for i, ratio := range ratios {
+				widths[i] = (width - 76) * ratio
+			}
+		}
+		wrap := func(text string, w float64) ([]string, error) {
+			var lines []string
+			line := ""
+			used := 0.0
+			for _, c := range strings.ReplaceAll(text, "\t", " ") {
+				if c == '\r' {
+					continue
+				}
+				if c == '\n' {
+					lines = append(lines, line)
+					line = ""
+					used = 0
+					continue
+				}
+				if unicode.IsControl(c) {
+					continue
+				}
+				if err := pdf.SetFont(fontFor(c), "", 8.5); err != nil {
+					return nil, err
+				}
+				cw, e := pdf.MeasureTextWidth(string(c))
+				if e != nil {
+					return nil, e
+				}
+				if used+cw > w && line != "" {
+					lines = append(lines, line)
+					line = ""
+					used = 0
+				}
+				line += string(c)
+				used += cw
+			}
+			lines = append(lines, line)
+			return lines, nil
+		}
+		drawRow := func(row []string, header bool) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			cells := make([][]string, n)
+			count := 1
+			for i := 0; i < n; i++ {
+				v := ""
+				if i < len(row) {
+					v = shortReportText(row[i], 180)
+				}
+				lines, e := wrap(v, widths[i]-12)
+				if e != nil {
+					return e
+				}
+				cells[i] = lines
+				count = max(count, len(lines))
+			}
+			h := float64(count)*13 + 12
+			if page == 0 {
+				newPage()
+			}
+			if y+h > bottom {
+				return fmt.Errorf("table row needs new page")
+			}
+			x := 38.0
+			for i, lines := range cells {
+				pdf.SetStrokeColor(216, 224, 234)
+				pdf.SetLineWidth(0.5)
+				if header {
+					pdf.SetFillColor(237, 243, 250)
+					pdf.RectFromUpperLeftWithStyle(x, y, widths[i], h, "FD")
+				} else {
+					pdf.RectFromUpperLeftWithStyle(x, y, widths[i], h, "D")
+				}
+				pdf.SetTextColor(35, 52, 73)
+				for j, line := range lines {
+					if e := draw(line, x+6, y+6+float64(j)*13, 8.5); e != nil {
+						return e
+					}
+				}
+				x += widths[i]
+			}
+			y += h
+			return nil
+		}
+		if page == 0 {
+			newPage()
+		}
+		if y+65 > bottom {
+			newPage()
+		}
+		if err := drawRow(t.Columns, true); err != nil {
+			return err
+		}
+		rows := t.Rows
+		if len(rows) == 0 {
+			rows = [][]string{{"本次未返回行，结论参见本项说明。"}}
+		}
+		for i, row := range rows {
+			if i >= 10 {
+				break
+			}
+			if err := drawRow(row, false); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				newPage()
+				if e := drawRow(t.Columns, true); e != nil {
+					return e
+				}
+				if e := drawRow(row, false); e != nil {
+					return e
+				}
+			}
+		}
+		y += 8
+		if len(t.Rows) > 10 {
+			if err := write(fmt.Sprintf("共 %d 行，PDF 展示前 10 行，完整明细见 HTML。", len(t.Rows)), 9); err != nil {
+				return err
+			}
+		}
+		if t.Note != "" {
+			return write(t.Note, 9)
+		}
+		return nil
 	}
-	if err := write(fmt.Sprintf("任务 #%d / %s / 发起人 %s", r.Run.ID, inspectionStatusLabel(r.Run.Status), r.Run.Operator), 10); err != nil {
-		return nil, err
-	}
-	if err := write(fmt.Sprintf("对象 %d   告警 %d   严重 %d   采集异常 %d", r.Run.TotalTargets, r.Run.WarningCount, r.Run.CriticalCount, r.Run.ErrorCount), 11); err != nil {
-		return nil, err
-	}
-	write("CPU 为本次短时间采样；日志统计仅代表已采集记录。未知项目不等同于正常。", 9)
-	for _, target := range r.Targets {
-		y += 16
-		if err := write(target.Target.Name+" / "+inspectionStatusLabel(target.Target.Status), 14); err != nil {
+	doc := r.Document()
+	r.Generated = reportTime(doc.GeneratedAt)
+	for _, line := range []struct {
+		text string
+		size float64
+	}{
+		{doc.Name, 20},
+		{fmt.Sprintf("任务 #%d / 发起人 %s / 报告版本 %s", doc.RunID, doc.Operator, doc.Version), 10},
+		{"采集时间：" + reportTime(doc.StartedAt) + " 至 " + reportTime(doc.FinishedAt), 9},
+		{"结果冻结时间：" + reportTime(doc.GeneratedAt), 9}, {"整体结论", 15}, {doc.Conclusion, 11},
+		{fmt.Sprintf("本次执行 %d 项 / 指导书共 39 项 / 未纳入本次 %d 项", doc.Summary.Planned, doc.Summary.NotRun), 10},
+
+		{"本报告保存对应服务器实际命令与 SQL 输出。“已记录”表示执行成功，不表示自动判定业务正常。", 9},
+	} {
+		if err := write(line.text, line.size); err != nil {
 			return nil, err
 		}
-		write(target.Target.Endpoint+" / 执行主机 "+target.Target.ServerEndpoint, 9)
-		if target.Target.Message != "" {
-			write(target.Target.Message, 9)
+	}
+	if err := table(inspection.Components(doc)); err != nil {
+		return nil, err
+	}
+	if err := write("执行对象", 15); err != nil {
+		return nil, err
+	}
+	inventory := inspection.Table{Columns: []string{"对象", "类型", "地址", "执行服务器", "执行状态"}, Rows: [][]string{}}
+	for _, o := range doc.Objects {
+		inventory.Rows = append(inventory.Rows, []string{o.Name, o.Type, o.Endpoint, o.ExecutorEndpoint, inspectionStatusLabel(o.Status)})
+	}
+	for start := 0; start < len(inventory.Rows); start += 10 {
+		batch := inventory
+		batch.Rows = inventory.Rows[start:min(start+10, len(inventory.Rows))]
+		if err := table(batch); err != nil {
+			return nil, err
 		}
-		for _, check := range target.Result.Checks {
-			y += 7
-			if err := write("["+inspectionStatusLabel(check.Status)+"] "+check.Name, 11); err != nil {
-				return nil, err
-			}
-			for _, text := range []string{check.Value, check.Evidence, check.Error} {
-				if text != "" {
-					if err := write(text, 9); err != nil {
+	}
+	for _, section := range inspection.Sections(doc) {
+		y += 14
+		if y+180 > bottom {
+			newPage()
+		}
+		if err := write(section.Name, 15); err != nil {
+			return nil, err
+		}
+		if err := write(section.Intro, 9); err != nil {
+			return nil, err
+		}
+		if section.ID == "resources" {
+			for _, o := range doc.Objects {
+				if len(o.Tables) == 0 {
+					continue
+				}
+				if y+150 > bottom {
+					newPage()
+				}
+				if err := write(o.Name, 12); err != nil {
+					return nil, err
+				}
+				for _, t := range o.Tables {
+					if err := table(t); err != nil {
 						return nil, err
 					}
 				}
 			}
-			if check.Advice != "" {
-				if err := write("建议："+check.Advice, 9); err != nil {
+		}
+		var absent []string
+		for _, item := range section.Items {
+			hasContent := false
+			for _, e := range item.Evidence {
+				if len(e.Tables) > 0 || e.Value != "" {
+					hasContent = true
+				}
+			}
+			if !hasContent {
+				absent = append(absent, item.Code+" "+item.Name)
+				continue
+			}
+			y += 8
+			if y+95 > bottom {
+				newPage()
+			}
+			if err := write(item.Name+" ["+inspectionStatusLabel(item.Status)+"] / "+item.Code, 11); err != nil {
+				return nil, err
+			}
+			for _, e := range item.Evidence {
+				if e.Value != "" {
+					if err := write(e.Value, 10); err != nil {
+						return nil, err
+					}
+				}
+				if e.Reason != "" {
+					if err := write(e.Reason, 9); err != nil {
+						return nil, err
+					}
+				}
+				if e.Threshold != "" {
+					if err := write("判定口径："+e.Threshold, 9); err != nil {
+						return nil, err
+					}
+				}
+				for _, gap := range e.Gaps {
+					if err := write("证据缺口："+gap, 9); err != nil {
+						return nil, err
+					}
+				}
+				if len(e.Executions) == 0 || e.Executions[0].Kind != "sql" {
+					for _, t := range e.Tables {
+						if err := table(t); err != nil {
+							return nil, err
+						}
+					}
+				}
+				for _, record := range e.Executions {
+					if err := write(fmt.Sprintf("执行记录 / %s / 退出码 %d / %s 至 %s", record.Kind, record.ExitCode, reportTime(record.StartedAt), reportTime(record.FinishedAt)), 9); err != nil {
+						return nil, err
+					}
+					if err := write(record.Command, 8.5); err != nil {
+						return nil, err
+					}
+					if record.Stdout != "" {
+						if err := write("标准输出：\n"+record.Stdout, 8.5); err != nil {
+							return nil, err
+						}
+					}
+
+					if record.Stderr != "" {
+						if err := write("标准错误：\n"+record.Stderr, 8.5); err != nil {
+							return nil, err
+						}
+					}
+					if record.Error != "" {
+						if err := write("执行错误："+record.Error, 9); err != nil {
+							return nil, err
+						}
+					}
+					if record.Truncated {
+						if err := write("输出已截断，不能视为完整结果。", 9); err != nil {
+							return nil, err
+						}
+					}
+				}
+				if e.Advice != "" && e.Status != "NORMAL" {
+					if err := write("处理建议："+e.Advice, 9); err != nil {
+						return nil, err
+					}
+				}
+				if err := write("证据："+e.ID+" / "+e.ObjectName+" / "+e.Source, 8.5); err != nil {
 					return nil, err
 				}
 			}
 		}
-		if len(target.Result.Checks) == 0 {
-			write("未取得可用检查结果，请核实执行状态及错误信息。", 10)
+		if len(absent) > 0 {
+			if err := write("本章未取得专项证据："+strings.Join(absent, "、")+"。具体原因与补充要求见 HTML 逐项证据。", 9); err != nil {
+				return nil, err
+			}
 		}
 	}
+	if err := write("附录 39 项检查结论", 15); err != nil {
+		return nil, err
+	}
+	catalogue := inspection.Table{Columns: []string{"编号", "检查项目", "结论", "证据状态"}, Rows: [][]string{}}
+	for _, item := range doc.Items {
+		detail := "已取得"
+		if !item.Complete {
+			detail = fmt.Sprintf("缺口 %d 处", item.Missing)
+		}
+		if item.Status == "NOT_RUN" {
+			detail = "本次未执行"
+		}
+		if item.Status == "NOT_APPLICABLE" {
+			detail = "已记录不适用原因"
+		}
+		catalogue.Rows = append(catalogue.Rows, []string{item.Code, item.Name, inspectionStatusLabel(item.Status), detail})
+	}
+	for start := 0; start < len(catalogue.Rows); start += 10 {
+		batch := catalogue
+		batch.Rows = catalogue.Rows[start:min(start+10, len(catalogue.Rows))]
+		if err := table(batch); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := write("报告范围与限制", 15); err != nil {
+		return nil, err
+	}
+	for _, line := range doc.Limitations {
+		if err := write(line, 9); err != nil {
+			return nil, err
+		}
+	}
+
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("PDF 字体缺少 %d 个字形，请配置覆盖报告字符的 TrueType 字体", len(missing))
 	}
 	return pdf.GetBytesPdfReturnErr()
+}
+
+func shortReportText(s string, limit int) string {
+	r := []rune(s)
+	if len(r) > limit {
+		return string(r[:limit]) + "…（完整内容见 HTML）"
+	}
+	return s
+}
+func displayReportValue(s string) string {
+	if s == "" {
+		return "未填写"
+	}
+	return s
+}
+func reportTime(t time.Time) string {
+	if t.IsZero() {
+		return "未记录"
+	}
+	return t.In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05")
+}
+
+func displayReportAdvice(s string) string {
+	if s == "" {
+		return "结合对象原始结果与业务用途核实。"
+	}
+	return s
 }

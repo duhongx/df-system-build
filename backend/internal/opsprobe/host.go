@@ -260,6 +260,9 @@ func unescapeMount(s string) string {
 }
 func HostChecks(m *HostMetrics) []Check {
 	checks := []Check{{Code: "host_identity", Name: "系统信息", Status: "NORMAL", Value: m.OS + " / " + m.Kernel, Evidence: m.Hostname}, {Code: "host_cpu", Name: "CPU 本次采样", Status: level(m.CPUUsagePercent, 80, 95), Value: fmt.Sprintf("%.1f%%，I/O 等待 %.1f%%", m.CPUUsagePercent, m.CPUWaitPercent), Evidence: "两次 /proc/stat 计数差值；采样间隔约 1 秒", Advice: "持续偏高时结合进程和历史趋势排查"}, {Code: "host_memory", Name: "可用内存", Status: level(m.MemUsagePercent, 85, 95), Value: fmt.Sprintf("使用 %.1f%%，可用 %.2f GiB", m.MemUsagePercent, float64(m.MemAvailableBytes)/(1<<30)), Advice: "核对进程内存与 Swap 使用"}}
+	if m.Source == "node_exporter" {
+		checks[1].Evidence = "两次 node_exporter HTTP 计数差值；采样间隔约 1 秒"
+	}
 	for _, d := range m.Disks {
 		checks = append(checks, Check{Code: "disk:" + d.Mountpoint, Name: "磁盘 " + d.Mountpoint, Status: level(d.UsedPercent, 80, 90), Value: fmt.Sprintf("使用 %.1f%%，可用 %.2f GiB", d.UsedPercent, float64(d.AvailableBytes)/(1<<30)), Evidence: d.Device, Advice: "核对增长来源并按运维流程清理或扩容"})
 		if d.Inodes > 0 {
