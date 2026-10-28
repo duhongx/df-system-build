@@ -8,12 +8,12 @@ type Section struct {
 
 func Sections(r *Report) []Section {
 	out := []Section{
-		{ID: "architecture", Name: "集群信息", Intro: "记录对应服务器 kubectl get nodes、patronictl list 和 mc admin info 的原始返回。"},
-		{ID: "resources", Name: "主机资源与容量", Intro: "登录对应主机执行 hostname、top、free、df 等命令，记录本次资源与文件系统输出。"},
+		{ID: "architecture", Name: "部署情况", Intro: "按实际部署记录 Kubernetes、原生 PostgreSQL／Patroni 和 MinIO 的关键情况。"},
+		{ID: "resources", Name: "主机资源与容量", Intro: "汇总各主机 CPU、内存及实际文件系统容量，省略重复容器挂载；完整命令输出保存在任务检查详情。"},
 		{ID: "applications", Name: "Kubernetes 与应用检查", Intro: "记录指导书要求的节点、Pod、日志目录、hprof 文件和镜像列表命令输出。"},
 		{ID: "backup", Name: "备份文件检查", Intro: "登录对应备份服务器，记录实际备份目录中的文件、时间和大小。"},
-		{ID: "database", Name: "PostgreSQL 检查", Intro: "记录 Patroni、归档目录及指导书第 20～35 项原 SQL 的实际返回；执行错误单独列出。"},
-		{ID: "storage", Name: "MinIO 检查", Intro: "记录 df -i、已有 mc 别名下的集群信息以及手册规定的本次计数命令输出。"},
+		{ID: "database", Name: "PostgreSQL 检查", Intro: "记录实际部署、复制类型、备份、归档及数据库关键结果；不适用与读取失败分别说明。"},
+		{ID: "storage", Name: "MinIO 检查", Intro: "记录 mc admin info 的节点、磁盘、容量与对象信息；缺少逐日采样时不推算每日新增。"},
 	}
 	for _, item := range r.Items {
 		i := 4

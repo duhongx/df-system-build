@@ -23,7 +23,7 @@ func (s *OperationsService) enrichInspectionHistory(target *model.InspectionTarg
 	var timeline, counter *inspection.Observation
 	for i := range result.ReportChecks {
 		o := &result.ReportChecks[i]
-		if o.Status == "UNKNOWN" {
+		if o.Status == "UNKNOWN" || o.Status == "NOT_APPLICABLE" || o.ConfigurationState == "NOT_CONFIGURED" {
 			continue
 		}
 		if o.Code == "cloudhis-17" {

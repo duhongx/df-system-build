@@ -126,14 +126,29 @@ func run(mode, dir string) error {
 	result := opsprobe.JobResult{Version: opsprobe.Version, Name: cfg.Name, Type: cfg.Type, StartedAt: time.Now(), Checks: []opsprobe.Check{}}
 	result.Hostname, _ = os.Hostname()
 	if cfg.Manual != nil {
+		if cfg.Type == "host" {
+			updates <- [2]string{"采集 Linux 基础资源", "CPU、内存、实际文件系统与网络"}
+			metrics, err := opsprobe.CollectHost(ctx)
+			if err != nil {
+				result.Checks = append(result.Checks, opsprobe.Check{Code: "host_collection", Name: "Linux 基础资源", Status: "UNKNOWN", Error: err.Error()})
+			} else {
+				result.Metrics = metrics
+				result.Checks = append(result.Checks, opsprobe.HostChecks(metrics)...)
+			}
+		}
 		updates <- [2]string{"按指导书执行检查", "记录实际命令／SQL、返回输出、错误与退出码"}
-		checks, e := opsprobe.CollectManual(ctx, *cfg.Manual, cfg.Database, opsprobe.ExecuteManualCommand)
+		checks, e := opsprobe.CollectDeploymentAwareManual(ctx, *cfg.Manual, cfg.Database, cfg.HostDatabases, opsprobe.ExecuteManualCommand)
 		result.ReportChecks = checks
 		if e != nil {
 			result.Error = e.Error()
 		}
 		if cfg.Database != nil {
 			cfg.Database.Password = ""
+		}
+		for _, binding := range cfg.HostDatabases {
+			if binding.Config != nil {
+				binding.Config.Password = ""
+			}
 		}
 	} else if cfg.Type == "host" {
 		updates <- [2]string{"采集主机资源", "CPU、内存、磁盘和网络"}

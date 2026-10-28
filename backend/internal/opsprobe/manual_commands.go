@@ -112,10 +112,11 @@ func (m ManualOptions) Commands(code string) []ManualCommand {
 		patroni += "-c " + shellQuote(m.PatroniConfig) + " "
 	}
 	patroni += "list"
-	minio := []ManualCommand{{Text: "mc config host ls"}, {Text: "mc admin info " + shellQuote(m.MinIOAlias)}}
-	if m.MinIOAlias == "" {
-		minio = []ManualCommand{{Text: "mc config host ls"}, {Missing: "请填写该服务器已有的 MinIO 别名，用于 mc admin info；不会创建或修改 mc 配置。"}}
+	alias := m.MinIOAlias
+	if alias == "" {
+		alias = "prod"
 	}
+	minio := []ManualCommand{{Text: "mc admin info " + shellQuote(alias)}}
 	switch n {
 	case 1, 7:
 		return []ManualCommand{{Text: "kubectl get nodes"}}
@@ -193,6 +194,10 @@ func (m ManualOptions) Commands(code string) []ManualCommand {
 type ManualExecutor func(context.Context, string) inspection.Execution
 
 func CollectManual(ctx context.Context, m ManualOptions, c *DatabaseConfig, execute ManualExecutor) ([]inspection.Observation, error) {
+	return collectManual(ctx, m, c, execute, nil)
+}
+
+func collectManual(ctx context.Context, m ManualOptions, c *DatabaseConfig, execute ManualExecutor, overrides map[string][]inspection.Observation) ([]inspection.Observation, error) {
 	kind := "host"
 	if c != nil {
 		kind = "database"
@@ -214,6 +219,13 @@ func CollectManual(ctx context.Context, m ManualOptions, c *DatabaseConfig, exec
 	for _, code := range m.Codes() {
 		if ctx.Err() != nil {
 			break
+		}
+		if observations, ok := overrides[code]; ok {
+			for _, observation := range observations {
+				observation.Code, observation.Name = code, definitions[code].Name
+				out = append(out, observation)
+			}
+			continue
 		}
 		o := inspection.Observation{Code: code, Name: definitions[code].Name, Status: "RECORDED", Source: "对应服务器实际执行 / HIS 运维巡检操作指导书 V2.0", CollectedAt: time.Now(), Executions: []inspection.Execution{}, Tables: []inspection.Table{}}
 		if c != nil {

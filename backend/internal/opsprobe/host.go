@@ -225,6 +225,7 @@ func CollectHost(ctx context.Context) (*HostMetrics, error) {
 		m.Warnings = append(m.Warnings, "读取挂载点失败: "+e.Error())
 	} else {
 		seen := map[string]bool{}
+		seenSource := map[string]bool{}
 		sc := bufio.NewScanner(strings.NewReader(mounts))
 		for sc.Scan() {
 			f := strings.Fields(sc.Text())
@@ -232,7 +233,7 @@ func CollectHost(ctx context.Context) (*HostMetrics, error) {
 				continue
 			}
 			device, mp, fs := unescapeMount(f[0]), unescapeMount(f[1]), f[2]
-			if seen[mp] || !strings.HasPrefix(device, "/") || fs == "overlay" || fs == "squashfs" || fs == "tmpfs" {
+			if seen[mp] || !inspectionFilesystem(device, fs) || seenSource[fs+"\x00"+device] {
 				continue
 			}
 			seen[mp] = true
@@ -250,10 +251,24 @@ func CollectHost(ctx context.Context) (*HostMetrics, error) {
 				d.InodeUsedPercent = float64(st.Files-min(st.Ffree, st.Files)) / float64(st.Files) * 100
 			}
 			m.Disks = append(m.Disks, d)
+			seenSource[fs+"\x00"+device] = true
 		}
 	}
 	sort.Slice(m.Disks, func(i, j int) bool { return m.Disks[i].Mountpoint < m.Disks[j].Mountpoint })
 	return m, nil
+}
+func inspectionFilesystem(device, fs string) bool {
+	if fs == "overlay" || fs == "squashfs" || fs == "tmpfs" || fs == "devtmpfs" {
+		return false
+	}
+	if strings.HasPrefix(device, "/") {
+		return true
+	}
+	switch fs {
+	case "nfs", "nfs4", "cifs", "ceph", "glusterfs", "fuse.glusterfs":
+		return true
+	}
+	return false
 }
 func unescapeMount(s string) string {
 	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\134`, `\`).Replace(s)

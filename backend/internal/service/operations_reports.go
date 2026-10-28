@@ -31,6 +31,10 @@ type inspectionReport struct {
 	Generated string
 }
 
+func (r inspectionReport) Presentation() *inspection.Report {
+	return inspection.Presentation(r.Document())
+}
+
 //go:embed inspection_report.gohtml
 var inspectionHTMLSource string
 
@@ -352,7 +356,7 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 				}
 			}
 			if len(t.Rows) > 5 {
-				if err := write(fmt.Sprintf("共 %d 行，PDF 展示前 5 行；完整记录见 HTML。", len(t.Rows)), 9); err != nil {
+				if err := write(fmt.Sprintf("共 %d 行，PDF 展示前 5 行；完整记录见任务检查详情。", len(t.Rows)), 9); err != nil {
 					return err
 				}
 			}
@@ -504,7 +508,7 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 		}
 		y += 8
 		if len(t.Rows) > 10 {
-			if err := write(fmt.Sprintf("共 %d 行，PDF 展示前 10 行，完整明细见 HTML。", len(t.Rows)), 9); err != nil {
+			if err := write(fmt.Sprintf("共 %d 行，PDF 展示前 10 行，完整明细见任务检查详情。", len(t.Rows)), 9); err != nil {
 				return err
 			}
 		}
@@ -513,7 +517,7 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 		}
 		return nil
 	}
-	doc := r.Document()
+	doc := r.Presentation()
 	r.Generated = reportTime(doc.GeneratedAt)
 	for _, line := range []struct {
 		text string
@@ -525,7 +529,7 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 		{"结果冻结时间：" + reportTime(doc.GeneratedAt), 9}, {"整体结论", 15}, {doc.Conclusion, 11},
 		{fmt.Sprintf("本次执行 %d 项 / 指导书共 39 项 / 未纳入本次 %d 项", doc.Summary.Planned, doc.Summary.NotRun), 10},
 
-		{"本报告保存对应服务器实际命令与 SQL 输出。“已记录”表示执行成功，不表示自动判定业务正常。", 9},
+		{"正文列出关键检查结果；原始命令与输出保存在任务检查详情。“已记录”表示执行成功，不表示自动判定业务正常。", 9},
 	} {
 		if err := write(line.text, line.size); err != nil {
 			return nil, err
@@ -664,7 +668,7 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 			}
 		}
 		if len(absent) > 0 {
-			if err := write("本章未取得专项证据："+strings.Join(absent, "、")+"。具体原因与补充要求见 HTML 逐项证据。", 9); err != nil {
+			if err := write("本章未取得专项证据："+strings.Join(absent, "、")+"。具体原因见任务检查详情。", 9); err != nil {
 				return nil, err
 			}
 		}
@@ -712,7 +716,7 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 func shortReportText(s string, limit int) string {
 	r := []rune(s)
 	if len(r) > limit {
-		return string(r[:limit]) + "…（完整内容见 HTML）"
+		return string(r[:limit]) + "…（完整内容见任务检查详情）"
 	}
 	return s
 }

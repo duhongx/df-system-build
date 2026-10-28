@@ -114,10 +114,13 @@ func TestOperationsManualOutputAndErrorReachHTMLAndPDF(t *testing.T) {
 	if e := inspectionHTML.Execute(&html, r); e != nil {
 		t.Fatal(e)
 	}
-	for _, needle := range []string{"local-command-output", "local-command-error", "退出码 7", "local process", "printf"} {
+	for _, needle := range []string{"local-command-error", "local process"} {
 		if !bytes.Contains(html.Bytes(), []byte(needle)) {
 			t.Fatalf("execution evidence absent from HTML: %s", needle)
 		}
+	}
+	if bytes.Contains(html.Bytes(), []byte("local-command-output")) || !strings.Contains(r.Snapshot.Objects[0].Observations[0].Executions[0].Stdout, "local-command-output") || r.Snapshot.Objects[0].Observations[0].Executions[0].ExitCode != 7 {
+		t.Fatal("compact report changed or printed full raw evidence")
 	}
 	if os.Getenv("DFOPS_REPORT_FONT") == "" {
 		t.Skip("PDF font required")
@@ -151,7 +154,7 @@ func TestOperationsComponentSummaryUsesGuideResultAndPreservesActualCommand(t *t
 	if err := inspectionHTML.Execute(&html, r); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"组件运行情况汇总", "prod 镜像共 3 个", "repo/prod/api", "printf", "未执行"} {
+	for _, want := range []string{"组件运行情况汇总", "prod 镜像共 3 个", "repo/prod/api", "未执行"} {
 		if !strings.Contains(html.String(), want) {
 			t.Fatal("missing component evidence", want)
 		}
@@ -219,8 +222,8 @@ func TestOperationsManualResultReturnsOverSSHAndGeneratesReport(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if !bytes.Contains(content, []byte("ssh-returned-output")) || !bytes.Contains(content, []byte("ssh-returned-error")) || !bytes.Contains(content, []byte("退出码 7")) {
-		t.Fatal("SSH-returned execution evidence missing from report")
+	if bytes.Contains(content, []byte("ssh-returned-output")) || !bytes.Contains(content, []byte("ssh-returned-error")) || !strings.Contains(run.ReportSnapshotJSON, "ssh-returned-output") {
+		t.Fatal("SSH evidence was lost or raw output leaked into the report body")
 	}
 }
 
@@ -241,7 +244,7 @@ func TestOperationsReportV2RendersStructuredEvidence(t *testing.T) {
 	if e := inspectionHTML.Execute(&html, r); e != nil {
 		t.Fatal(e)
 	}
-	for _, needle := range []string{"39 项检查目录", "执行完成", "cloudhis-39", "pg_stat_activity"} {
+	for _, needle := range []string{"39 项检查目录", "已取得结果", "cloudhis-39", "pg_stat_activity"} {
 		if !bytes.Contains(html.Bytes(), []byte(needle)) {
 			t.Fatalf("missing HTML section %s", needle)
 		}

@@ -325,6 +325,26 @@ func interpretManual(o *inspection.Observation) {
 		o.Tables = append(o.Tables, inspection.Table{Title: "inode 使用情况", Columns: []string{"文件系统", "总量", "已用", "可用", "使用率", "挂载点"}, Rows: rows})
 		manualOutcome(o, fmt.Sprintf("%d 个文件系统，%d 个 inode 超过 80%%", len(rows), len(bad)), "指导书：inode 已用超过 80% 需反馈扩容", bad)
 	case "cloudhis-3", "cloudhis-38":
+		info := inspection.Table{Title: "mc admin info", Columns: []string{"信息", "实际返回"}, Rows: [][]string{}}
+		for _, line := range strings.Split(text, "\n") {
+			s := strings.TrimSpace(line)
+			if strings.HasPrefix(s, "●") || strings.HasPrefix(s, "○") {
+				info.Rows = append(info.Rows, []string{"节点", s})
+				continue
+			}
+			if strings.Contains(s, "Buckets") && strings.Contains(s, "Objects") {
+				info.Rows = append(info.Rows, []string{"容量与对象", s})
+				continue
+			}
+			for _, prefix := range []string{"Uptime:", "Version:", "Network:", "Drives:", "Pool:"} {
+				if strings.HasPrefix(s, prefix) {
+					info.Rows = append(info.Rows, []string{strings.TrimSuffix(prefix, ":"), strings.TrimSpace(strings.TrimPrefix(s, prefix))})
+				}
+			}
+		}
+		if len(info.Rows) > 0 {
+			o.Tables = append(o.Tables, info)
+		}
 		nodes := 0
 		var bad []string
 		for _, l := range strings.Split(text, "\n") {

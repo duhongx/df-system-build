@@ -71,12 +71,21 @@ func (r inspectionReport) Document() *inspection.Report {
 			m := t.Result.Metrics
 			tables := hostReportTables(m)
 			o.Tables = append(o.Tables, tables...)
-			for _, role := range o.Roles {
-				n := map[string]int{"kubernetes": 6, "postgresql": 15, "minio": 36}[role]
-				if n == 0 {
-					continue
+			resourceCodes := []string{}
+			for _, code := range o.CheckCodes {
+				if code == "cloudhis-6" || code == "cloudhis-15" || code == "cloudhis-36" {
+					resourceCodes = append(resourceCodes, code)
 				}
-				obs := inspection.Observation{Code: fmt.Sprintf("cloudhis-%d", n), Status: "NORMAL", Value: fmt.Sprintf("CPU %.1f%%，内存 %.1f%%，%d 个文件系统", m.CPUUsagePercent, m.MemUsagePercent, len(m.Disks)), Source: m.SourceURL, CollectedAt: m.CollectedAt, Tables: tables, Threshold: "CPU 80%/95%、内存 85%/95%、磁盘空间 80%/90% 分别提醒/严重；本次快照。", Advice: "结合持续时间、业务峰值及对象明细核对；本次采样不能代替整月趋势。"}
+			}
+			if len(resourceCodes) == 0 && len(o.CheckCodes) == 0 {
+				for _, role := range o.Roles {
+					if n := map[string]int{"kubernetes": 6, "postgresql": 15, "minio": 36}[role]; n != 0 {
+						resourceCodes = append(resourceCodes, fmt.Sprintf("cloudhis-%d", n))
+					}
+				}
+			}
+			for _, code := range resourceCodes {
+				obs := inspection.Observation{Code: code, Status: "NORMAL", Value: fmt.Sprintf("CPU %.1f%%，内存 %.1f%%，%d 个实际文件系统；资源明细在本机汇总中列出", m.CPUUsagePercent, m.MemUsagePercent, len(m.Disks)), Source: m.SourceURL, CollectedAt: m.CollectedAt, Threshold: "CPU 80%/95%、内存 85%/95%、磁盘空间 80%/90% 分别提醒/严重；本次快照。", Advice: "结合业务负载和持续时间核对，本次为资源快照。"}
 				if obs.Source == "" {
 					obs.Source = "原远端执行器 /proc 与文件系统快照"
 				}
@@ -99,7 +108,18 @@ func (r inspectionReport) Document() *inspection.Report {
 				if len(m.Warnings) > 0 {
 					obs.Gaps = append(obs.Gaps, m.Warnings...)
 				}
-				o.Observations = append(o.Observations, obs)
+				replaced := false
+				for i, prior := range o.Observations {
+					if prior.Code == code {
+						obs.Executions = prior.Executions
+						o.Observations[i] = obs
+						replaced = true
+						break
+					}
+				}
+				if !replaced {
+					o.Observations = append(o.Observations, obs)
+				}
 			}
 		}
 		// Legacy snapshots retain their actual scope; an identity result cannot

@@ -329,6 +329,23 @@ func (s *OperationsService) executeInspectionTarget(parent context.Context, t *m
 			cfg.TimeoutSeconds = 300
 		}
 		_ = json.Unmarshal([]byte(t.ServicesJSON), &cfg.Services)
+		if t.Type == "host" && cfg.Manual != nil {
+			var databases []model.OperationsDatabase
+			if err := s.db.Where("server_id=?", t.ServerID).Order("id").Find(&databases).Error; err != nil {
+				s.finishInspectionTarget(t, "FAILED", "无法读取关联数据库配置", nil)
+				return
+			}
+			for _, database := range databases {
+				binding := opsprobe.InspectionDatabaseBinding{Name: database.Name}
+				connection, err := s.databaseConfig(database)
+				if err != nil {
+					binding.Error = err.Error()
+				} else {
+					binding.Config = &connection
+				}
+				cfg.HostDatabases = append(cfg.HostDatabases, binding)
+			}
+		}
 		if t.Type == "database" {
 			var row model.OperationsDatabase
 			if err := s.db.First(&row, t.TargetID).Error; err != nil {

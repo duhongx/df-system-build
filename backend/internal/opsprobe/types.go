@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const Version = "1.4.0"
+const Version = "1.5.0"
 
 type Disk struct {
 	Device           string  `json:"device"`
@@ -164,12 +164,18 @@ type Check struct {
 	Error    string `json:"error"`
 }
 type JobConfig struct {
-	Manual         *ManualOptions  `json:"manual,omitempty"`
-	Type           string          `json:"type"`
-	Name           string          `json:"name"`
-	Database       *DatabaseConfig `json:"database,omitempty"`
-	Services       []string        `json:"services"`
-	TimeoutSeconds int             `json:"timeoutSeconds"`
+	HostDatabases  []InspectionDatabaseBinding `json:"hostDatabases,omitempty"`
+	Manual         *ManualOptions              `json:"manual,omitempty"`
+	Type           string                      `json:"type"`
+	Name           string                      `json:"name"`
+	Database       *DatabaseConfig             `json:"database,omitempty"`
+	Services       []string                    `json:"services"`
+	TimeoutSeconds int                         `json:"timeoutSeconds"`
+}
+type InspectionDatabaseBinding struct {
+	Name   string          `json:"name"`
+	Config *DatabaseConfig `json:"config,omitempty"`
+	Error  string          `json:"error,omitempty"`
 }
 type JobResult struct {
 	Version      string                   `json:"version"`

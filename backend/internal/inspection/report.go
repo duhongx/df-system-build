@@ -20,20 +20,21 @@ type Table struct {
 }
 
 type Observation struct {
-	Measurements map[string]float64 `json:"measurements,omitempty"`
-	Executions   []Execution        `json:"executions,omitempty"`
-	Code         string             `json:"code"`
-	Name         string             `json:"name"`
-	Status       string             `json:"status"`
-	Value        string             `json:"value"`
-	Threshold    string             `json:"threshold"`
-	Source       string             `json:"source"`
-	CollectedAt  time.Time          `json:"collectedAt"`
-	Reason       string             `json:"reason"`
-	Advice       string             `json:"advice"`
-	Evidence     string             `json:"evidence"`
-	Tables       []Table            `json:"tables"`
-	Gaps         []string           `json:"gaps"`
+	ConfigurationState string             `json:"configurationState,omitempty"`
+	Measurements       map[string]float64 `json:"measurements,omitempty"`
+	Executions         []Execution        `json:"executions,omitempty"`
+	Code               string             `json:"code"`
+	Name               string             `json:"name"`
+	Status             string             `json:"status"`
+	Value              string             `json:"value"`
+	Threshold          string             `json:"threshold"`
+	Source             string             `json:"source"`
+	CollectedAt        time.Time          `json:"collectedAt"`
+	Reason             string             `json:"reason"`
+	Advice             string             `json:"advice"`
+	Evidence           string             `json:"evidence"`
+	Tables             []Table            `json:"tables"`
+	Gaps               []string           `json:"gaps"`
 }
 
 type Object struct {
@@ -324,7 +325,7 @@ func first(a, b string) string {
 	return b
 }
 
-var secretAssignment = regexp.MustCompile(`(?i)(\b(?:password|pgpassword|passwd|secret(?:_key)?|secretkey|access_key|accesskey|api_key|apikey|token|authorization|primary_conninfo)\b["']?\s*(?:[:=]\s*|\s+))('[^']*'|"[^"]*"|[^\s;,&]+)`)
+var secretAssignment = regexp.MustCompile(`(?i)(\b(?:password|pgpassword|passwd|secret(?:_key)?|secretkey|access_key|accesskey|api_key|apikey|token|authorization|primary_conninfo)\b["']?[ \t]*(?:[:=]\s*|[ \t]+))('[^']*'|"[^"]*"|[^\s;,&]+)`)
 var urlCredential = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@]+(?::[^\s/@]*)?@`)
 var bearerCredential = regexp.MustCompile(`(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+`)
 
