@@ -304,9 +304,13 @@ func interpretManual(o *inspection.Observation) {
 	case "cloudhis-37":
 		var rows [][]string
 		var bad []string
+		seen := map[string]bool{}
 		for _, l := range strings.Split(text, "\n") {
 			f := strings.Fields(l)
 			if len(f) < 6 || !strings.HasSuffix(f[4], "%") {
+				continue
+			}
+			if f[0] == "overlay" || f[0] == "tmpfs" || f[0] == "devtmpfs" || f[0] == "shm" || seen[f[0]] {
 				continue
 			}
 			percent, e := strconv.ParseFloat(strings.TrimSuffix(f[4], "%"), 64)
@@ -314,6 +318,7 @@ func interpretManual(o *inspection.Observation) {
 				continue
 			}
 			rows = append(rows, f[:6])
+			seen[f[0]] = true
 			if percent > 80 {
 				bad = append(bad, f[5]+" inode 已用 "+f[4])
 			}

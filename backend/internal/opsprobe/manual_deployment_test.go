@@ -115,3 +115,12 @@ func TestDeploymentFilesystemIncludesPersistentRemoteStorageAndOmitsContainerOve
 		}
 	}
 }
+
+func TestDeploymentInodeSummaryDoesNotRepeatRuntimeMounts(t *testing.T) {
+	text := "Filesystem Inodes IUsed IFree IUse% Mounted on\n/dev/root 100 81 19 81% /\n/dev/root 100 81 19 81% /bind\noverlay 100 81 19 81% /container/rootfs\ntmpfs 100 0 100 0% /run\n192.0.2.1:/data 100 20 80 20% /data\n"
+	o := inspection.Observation{Code: "cloudhis-37", Status: "RECORDED", Executions: []inspection.Execution{{Stdout: text}}}
+	interpretManual(&o)
+	if len(o.Tables) != 1 || len(o.Tables[0].Rows) != 2 || !strings.Contains(o.Value, "1 个 inode") {
+		t.Fatalf("duplicate mount inflated report: %+v", o)
+	}
+}
