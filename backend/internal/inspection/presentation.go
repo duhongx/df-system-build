@@ -108,6 +108,9 @@ func presentationTable(t Table, code string) Table {
 }
 
 func presentationObservation(o Observation, code string) Observation {
+	if pod, ok := podPresentation(o); ok {
+		o = pod
+	}
 	out := o
 	out.Executions = nil
 	out.Evidence = ""
@@ -149,12 +152,16 @@ func presentationObservation(o Observation, code string) Observation {
 // in the frozen snapshot and authenticated task detail, outside the report body.
 func Presentation(source *Report) *Report {
 	out := *source
+	podEvidence := map[string]Observation{}
 	out.Items = append([]Item{}, source.Items...)
 	for i, item := range source.Items {
 		out.Items[i].Reason = presentationText(item.Reason, 600)
 		out.Items[i].Evidence = append([]Evidence{}, item.Evidence...)
 		for j, e := range item.Evidence {
 			out.Items[i].Evidence[j].Observation = presentationObservation(e.Observation, item.Code)
+			if isPodCheck(item.Code) && e.ID != "" {
+				podEvidence[e.ID] = out.Items[i].Evidence[j].Observation
+			}
 		}
 	}
 	out.Objects = append([]Object{}, source.Objects...)
@@ -168,6 +175,9 @@ func Presentation(source *Report) *Report {
 	}
 	out.Findings = append([]Finding{}, source.Findings...)
 	for i, f := range source.Findings {
+		if e, ok := podEvidence[f.EvidenceID]; ok {
+			f.Value, f.Reason, f.Advice = e.Value, e.Reason, e.Advice
+		}
 		out.Findings[i].Value = presentationText(f.Value, 400)
 		out.Findings[i].Reason = presentationText(f.Reason, 600)
 		out.Findings[i].Advice = presentationText(f.Advice, 400)

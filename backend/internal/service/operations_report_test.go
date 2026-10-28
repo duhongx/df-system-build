@@ -273,3 +273,69 @@ func TestOperationsReportV2RendersStructuredEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestOperationsPodReportRendersGroupedRows(t *testing.T) {
+	rows := [][]string{}
+	paragraph := ""
+	for i := 0; i < 11; i++ {
+		name := fmt.Sprintf("calico-kube-controllers-example-%02d", i)
+		rows = append(rows, []string{name, "1/1", "Running", "2", "(9d ago) 189d"})
+		paragraph += name + "：就绪 1/1，状态 Running，重启 2；"
+	}
+	doc := inspection.Build(inspection.Report{Name: "Pod 报告排版验证", Objects: []inspection.Object{{ID: 1, Name: "k8s-example", Status: "COMPLETED", Observations: []inspection.Observation{{Code: "cloudhis-8", Status: "WARNING", Value: "11 个 Pod，11 个需关注", Reason: paragraph, Tables: []inspection.Table{{Title: "Pod 运行情况", Columns: []string{"Pod", "就绪", "状态", "重启次数", "运行时间／补充"}, Rows: rows}}}}}}})
+	if fixture := os.Getenv("DFOPS_POD_REPORT_FIXTURE"); fixture != "" {
+		data, err := os.ReadFile(fixture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var frozen inspection.Report
+		if err := json.Unmarshal(data, &frozen); err != nil {
+			t.Fatal(err)
+		}
+		doc = frozen
+	}
+	r := inspectionReport{Snapshot: &doc, Run: model.InspectionRun{ID: doc.RunID}}
+	before := mustJSON(doc)
+	var html bytes.Buffer
+	if err := inspectionHTML.Execute(&html, r); err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{"当前异常 0 个", "历史重启记录（当前均为 Running 且完全就绪）", "累计重启", "最近重启", "Pod 存续时间", `class="pod-table"`} {
+		if !strings.Contains(html.String(), needle) {
+			t.Fatalf("missing Pod layout element: %s", needle)
+		}
+	}
+	for _, item := range doc.Items {
+		if item.Code != "cloudhis-8" {
+			continue
+		}
+		for _, e := range item.Evidence {
+			prefix := []rune(e.Reason)
+			if len(prefix) >= 80 {
+				if index := strings.Index(html.String(), string(prefix[:80])); index >= 0 {
+					t.Fatalf("the packed Pod paragraph still appears in the report or overview: %s", html.String()[max(0, index-100):index])
+				}
+			}
+		}
+	}
+	if os.Getenv("DFOPS_REPORT_FONT") == "" {
+		t.Skip("PDF font required")
+	}
+	pdf, err := renderInspectionPDF(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mustJSON(doc) != before {
+		t.Fatal("rendering changed the frozen inspection results")
+	}
+	if dir := os.Getenv("DFOPS_OPERATIONS_QA_DIR"); dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		for name, data := range map[string][]byte{"pod-report.html": html.Bytes(), "pod-report.pdf": pdf} {
+			if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}

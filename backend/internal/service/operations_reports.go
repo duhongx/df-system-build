@@ -395,6 +395,12 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 				widths[i] = (width - 76) * ratio
 			}
 		}
+		if n >= 4 && t.Columns[0] == "Pod" {
+			widths[0] = (width - 76) * 0.45
+			for i := 1; i < n; i++ {
+				widths[i] = (width - 76) * 0.55 / float64(n-1)
+			}
+		}
 		wrap := func(text string, w float64) ([]string, error) {
 			var lines []string
 			line := ""
