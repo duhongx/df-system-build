@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const Version = "1.7.0"
+const Version = "1.7.1"
 
 type Disk struct {
 	Device           string  `json:"device"`

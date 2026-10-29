@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -146,28 +145,18 @@ func (s *OperationsService) EnsureInspectionSources(ctx context.Context) error {
 		if err := tx.Exec("SELECT pg_advisory_xact_lock(70291029)").Error; err != nil {
 			return err
 		}
-		var settings []model.Settings
-		if err := tx.Where("key IN ?", []string{"k8s_kubeconfig_path", "k8s_kubeconfig_content"}).Order("key").Find(&settings).Error; err != nil {
+		source, err := environmentKubernetesSource(ctx, tx)
+		if err != nil {
 			return err
 		}
-		configured := false
-		for _, v := range settings {
-			configured = configured || strings.TrimSpace(v.Value) != ""
-		}
-		if !configured {
+		if !source.configured {
 			return tx.Model(&model.ComponentConnection{}).Where("kind='kubernetes' AND source='environment' AND enabled=true").Updates(map[string]any{"enabled": false, "environment_digest": "", "revision": gorm.Expr("revision+1")}).Error
 		}
 		var count int64
 		if err := tx.Model(&model.ComponentConnection{}).Where("kind='kubernetes' AND source='environment'").Count(&count).Error; err != nil {
 			return err
 		}
-		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(func() string {
-			m := map[string]string{}
-			for _, v := range settings {
-				m[v.Key] = v.Value
-			}
-			return mustJSON(m)
-		}())))
+		digest := source.digest
 		if count == 0 {
 			return tx.Create(&model.ComponentConnection{Kind: "kubernetes", Name: "环境 Kubernetes", Source: "environment", EnvironmentDigest: digest, Enabled: true, OptionsJSON: "{}", Revision: 1}).Error
 		}

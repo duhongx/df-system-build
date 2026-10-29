@@ -27,6 +27,14 @@ func TestPostgreSQLAccountPasswordsAndConnections(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
 	setSQLExecutionSettingsToTestDatabase(t)
 	settings := repository.NewSettingsRepo()
+	createdRoles := []string{}
+	t.Cleanup(func() {
+		for _, name := range createdRoles {
+			if err := repository.DB.Exec("DROP OWNED BY " + quoteIdent(name) + " CASCADE; DROP ROLE " + quoteIdent(name)).Error; err != nil {
+				t.Errorf("clean up account fixture: %v", err)
+			}
+		}
+	})
 	common, special := "common p@ss'$", "special p@ss&'"
 	if err := settings.Set("postgresql_password", common); err != nil {
 		t.Fatal(err)
@@ -36,10 +44,12 @@ func TestPostgreSQLAccountPasswordsAndConnections(t *testing.T) {
 		if err := repository.DB.Exec(query).Error; err != nil {
 			t.Fatal(err)
 		}
+		createdRoles = append(createdRoles, name)
 	}
 	if err := repository.DB.Exec("CREATE ROLE df_account_no_login NOLOGIN").Error; err != nil {
 		t.Fatal(err)
 	}
+	createdRoles = append(createdRoles, "df_account_no_login")
 	repo := repository.NewPostgreSQLAccountRepo()
 	if err := repo.SetPassword("df_account_special", special); err != nil {
 		t.Fatal(err)
@@ -81,6 +91,11 @@ func TestPostgreSQLAccountPasswordsAndConnections(t *testing.T) {
 		t.Fatalf("shared login failed: %+v", result)
 	}
 	svc := NewPostgreSQLService()
+	t.Cleanup(func() {
+		if svc.dbPool != nil {
+			_ = svc.dbPool.Close()
+		}
+	})
 	cfg, err := svc.loadReleaseSQLConfig("df_account_special")
 	if err != nil || cfg.Password != common {
 		t.Fatal("shared SQL used independent password", err)

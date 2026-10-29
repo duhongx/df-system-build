@@ -23,7 +23,6 @@ import (
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/service"
-	"df-build-server/internal/testutil"
 	"df-build-server/pkg/logger"
 
 	"github.com/gin-gonic/gin"
@@ -816,17 +815,15 @@ func TestDownloadRemoteDirToLocalCancellationMarksCurrentItemCanceled(t *testing
 	}
 }
 
-func TestListArtifactSourceBatchesScansUploadAndArtifactWorkspaces(t *testing.T) {
-	root, err := batchUploadRootDir()
-	if err != nil {
-		t.Fatalf("batch root: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	_ = os.RemoveAll(root)
-
+func TestListArtifactSourceBatchesScansCompletedImportWorkspaces(t *testing.T) {
+	root := t.TempDir()
 	mustCreateZip(t, filepath.Join(root, "upload", "batch-upload", "his-gateway.jar"))
-	mustCreateZip(t, filepath.Join(root, "download", "测试中版本", "web-main.zip"))
+	mustCreateZip(t, filepath.Join(root, "download", "batch-download", "web-main.zip"))
 	mustCreateZip(t, filepath.Join(root, "artifact", "batch-artifact", "web-cdr.zip"))
+	mustCreateZip(t, filepath.Join(root, "upload", "pending-upload", "partial.zip"))
+	if err := os.WriteFile(filepath.Join(root, "upload", "pending-upload", artifactUploadPendingMarker), []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	batches, err := listArtifactSourceBatches(root)
 	if err != nil {
@@ -841,6 +838,7 @@ func TestListArtifactSourceBatchesScansUploadAndArtifactWorkspaces(t *testing.T)
 	for key, wantPathBase := range map[string]string{
 		"upload:batch-upload":     "batch-upload",
 		"artifact:batch-artifact": "batch-artifact",
+		"download:batch-download": "batch-download",
 	} {
 		batch, ok := byKey[key]
 		if !ok {
@@ -853,8 +851,8 @@ func TestListArtifactSourceBatchesScansUploadAndArtifactWorkspaces(t *testing.T)
 			t.Fatalf("%s target path = %s, want base %s", key, batch.TargetPath, wantPathBase)
 		}
 	}
-	if _, ok := byKey["download:测试中版本"]; ok {
-		t.Fatalf("download workspace should not be exposed as source batch fallback: %#v", batches)
+	if _, ok := byKey["upload:pending-upload"]; ok {
+		t.Fatalf("pending upload should not be exposed as a completed source batch: %#v", batches)
 	}
 }
 
@@ -1734,10 +1732,8 @@ func setupArtifactVersionTestDB(t *testing.T) {
 	if logger.Log == nil {
 		logger.Init("error", "stdout", "")
 	}
-	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
-		t.Fatalf("init db: %v", err)
-	}
-	if err := repository.DB.AutoMigrate(&model.Application{}, &model.ArtifactVersion{}, &model.ArtifactVersionItem{}, &model.ArtifactUpdateClaim{}, &model.ArtifactDeployBatch{}, &model.ArtifactDeployRecord{}, &model.DeploymentRuntimeVersion{}); err != nil {
+	initIsolatedHandlerTestDB(t)
+	if err := repository.DB.AutoMigrate(&model.Application{}, &model.ArtifactVersion{}, &model.ArtifactVersionItem{}, &model.ArtifactUpdateClaim{}, &model.ArtifactDeployBatch{}, &model.ArtifactDeployRecord{}, &model.DeploymentRuntimeVersion{}, &model.Settings{}); err != nil {
 		t.Fatalf("migrate artifact version tables: %v", err)
 	}
 	apps := []model.Application{
@@ -2055,9 +2051,7 @@ func seedDownloadJobForRouteTest(t *testing.T, job downloadJob) {
 
 func TestExecuteRejectsPartialFrontendSelectionBeforeCreatingPipelines(t *testing.T) {
 	logger.Init("error", "stdout", "")
-	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
-		t.Fatal(err)
-	}
+	initIsolatedHandlerTestDB(t)
 	if err := repository.DB.AutoMigrate(&model.Application{}, &model.Pipeline{}, &model.PipelineStage{}, &model.Settings{}); err != nil {
 		t.Fatal(err)
 	}

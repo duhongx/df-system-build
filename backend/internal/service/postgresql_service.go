@@ -3947,13 +3947,22 @@ func (s *PostgreSQLService) StartReleaseSQLStatementExecutionWithAccount(ctx con
 		if runErr != nil {
 			s.markSQLFileExecutionFailed(file.ID, username, runErr)
 		}
-		// A single-statement retry only contains one row. Clear the temporary
-		// file status written by runReleaseSQLFile before summarizing all rows.
-		if err := repository.DB.Model(&model.SQLChangeFile{}).Where("id = ?", file.ID).Update("execute_status", "PENDING").Error; err != nil {
-			log.Printf("单条 SQL 重试后重置文件状态失败: %v", err)
-			return
-		}
-		if _, err := recomputeSQLFileStatus(file.ID, username); err != nil {
+		// The retry covers a subset of the file. Recompute the complete summary
+		// atomically so readers never see the temporary PENDING reset.
+		if err := repository.DB.Transaction(func(tx *gorm.DB) error {
+			current, err := lockSQLFile(tx, file.ID)
+			if err != nil {
+				return err
+			}
+			if current.ExecuteStatus == "RUNNING" || current.ExecuteStatus == "QUEUED" {
+				return nil
+			}
+			if err := tx.Model(&model.SQLChangeFile{}).Where("id=?", file.ID).Update("execute_status", "PENDING").Error; err != nil {
+				return err
+			}
+			_, err = recomputeSQLFileStatusWithDB(tx, file.ID, username)
+			return err
+		}); err != nil {
 			log.Printf("单条 SQL 重试后更新文件状态失败: %v", err)
 		}
 	}()

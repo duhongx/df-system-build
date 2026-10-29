@@ -5,7 +5,6 @@ import (
 
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
-	"df-build-server/internal/testutil"
 	"df-build-server/pkg/logger"
 )
 
@@ -82,9 +81,7 @@ func setupArtifactDeployRecordTestDB(t *testing.T) {
 	if logger.Log == nil {
 		logger.Init("error", "stdout", "")
 	}
-	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
-		t.Fatalf("init db: %v", err)
-	}
+	initIsolatedServiceTestDB(t)
 	if err := repository.DB.AutoMigrate(
 		&model.Application{},
 		&model.Pipeline{},

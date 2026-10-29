@@ -2333,7 +2333,7 @@ func (h *BatchDeployHandler) Execute(c *gin.Context) {
 	}
 
 	if !invalidSharedWeb && len(webArtifacts) > 0 {
-		if err := stages.ValidateFrontendSelection(sourceDir, webArtifacts); err != nil {
+		if err := validateFrontendSelectionFromSource(sourceDir, webArtifacts); err != nil {
 			invalidSharedWeb = true
 			errors = append(errors, err.Error())
 		}
@@ -3945,6 +3945,40 @@ func safePathSegment(value string) string {
 		return ""
 	}
 	return value
+}
+
+func validateFrontendSelectionFromSource(sourceDir string, artifacts []model.FrontendArtifact) error {
+	flat := true
+	for _, artifact := range artifacts {
+		name, err := safeArtifactFileName(artifact.FileName)
+		if err != nil {
+			return err
+		}
+		if name != artifact.FileName {
+			return fmt.Errorf("前端包文件名不能包含目录")
+		}
+		info, err := os.Stat(filepath.Join(sourceDir, artifact.FileName))
+		if err != nil || !info.Mode().IsRegular() {
+			flat = false
+		}
+	}
+	if flat {
+		return stages.ValidateFrontendSelection(sourceDir, artifacts)
+	}
+	// A downloaded directory may retain nested paths. Resolve the same inputs
+	// used by single-file validation, then validate the complete update group
+	// with the display filenames that will be copied into its workspace.
+	tmp, err := os.MkdirTemp("", "df-frontend-selection-inputs-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	for _, artifact := range artifacts {
+		if err := copyArtifactFromSource(sourceDir, artifact.FileName, filepath.Join(tmp, artifact.FileName)); err != nil {
+			return err
+		}
+	}
+	return stages.ValidateFrontendSelection(tmp, artifacts)
 }
 
 func validateExecuteArtifact(sourceDir, fileName string, app model.Application) error {

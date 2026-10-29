@@ -26,7 +26,7 @@ func TestSQLImportInheritedFileStatuses(t *testing.T) {
 		}
 		return file, rows
 	}
-	check := func(t *testing.T, file *model.SQLChangeFile, status string) {
+	check := func(t *testing.T, file *model.SQLChangeFile, status string, hasHistory bool) {
 		t.Helper()
 		stored, _, err := s.GetSQLFile(file.ID)
 		if err != nil || file.ExecuteStatus != status || stored.ExecuteStatus != status {
@@ -39,9 +39,23 @@ func TestSQLImportInheritedFileStatuses(t *testing.T) {
 		found := false
 		for _, row := range done {
 			found = found || row.ID == file.ID
+			if row.ID == file.ID && status == "PENDING" && hasHistory && (row.PendingStatements == 0 || row.ResultStatus != "PARTIAL_SUCCESS") {
+				t.Fatal("historical results hid the remaining SQL", row.ID, row.ResultStatus, row.PendingStatements)
+			}
 		}
-		if found != (status == "SUCCESS" || status == "SKIPPED") {
-			t.Fatal("file is in the wrong list", file.ID, status)
+		if found != hasHistory {
+			t.Fatal("file execution history is in the wrong list", file.ID, status)
+		}
+		todo, _, err := s.ListSQLFilesByStatus(1, 100, "todo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending := false
+		for _, row := range todo {
+			pending = pending || row.ID == file.ID
+		}
+		if pending == hasHistory {
+			t.Fatal("history and unexecuted-file lists overlap", file.ID, status)
 		}
 	}
 
@@ -64,7 +78,7 @@ func TestSQLImportInheritedFileStatuses(t *testing.T) {
 				t.Fatal(imported, err)
 			}
 			last = &imported[0]
-			check(t, last, "SUCCESS")
+			check(t, last, "SUCCESS", true)
 			if last.ExecuteUser != original.ExecuteUser || last.ExecuteTime == nil || !last.ExecuteTime.Equal(*originalRows[0].ExecuteTime) || !strings.Contains(last.ExecuteMessage, "沿用历史结果") {
 				t.Fatal("reimport fabricated execution identity or time", last)
 			}
@@ -91,7 +105,7 @@ func TestSQLImportInheritedFileStatuses(t *testing.T) {
 			t.Fatal(err)
 		}
 		next, rows := upload(t, file.FileName, file.FileContent)
-		check(t, next, "SKIPPED")
+		check(t, next, "SKIPPED", true)
 		if next.ExecuteUser != "skip-operator" || next.ExecuteTime == nil || rows[0].SkipKind != "MANUAL" || rows[1].SkipKind != "MANUAL" {
 			t.Fatal("lost manual skip provenance", next, rows)
 		}
@@ -104,7 +118,7 @@ func TestSQLImportInheritedFileStatuses(t *testing.T) {
 			t.Fatal(result, rows, err)
 		}
 		next, rows := upload(t, file.FileName, file.FileContent)
-		check(t, next, "SUCCESS")
+		check(t, next, "SUCCESS", true)
 		if rows[0].SkipKind != "AUTO" || rows[1].ExecuteStatus != "SUCCESS" {
 			t.Fatal("mixed results changed", rows)
 		}
@@ -112,7 +126,7 @@ func TestSQLImportInheritedFileStatuses(t *testing.T) {
 
 	t.Run("new_sql_stays_pending_and_only_new_sql_executes", func(t *testing.T) {
 		file, rows := upload(t, "IMPORT__1__sql_release.sql", "UPDATE import_counter SET value=value+1;UPDATE import_counter SET value=value+10;")
-		check(t, file, "PENDING")
+		check(t, file, "PENDING", true)
 		if rows[0].ExecuteStatus != "SUCCESS" || rows[1].ExecuteStatus != "PENDING" || file.ExecuteTime != nil || file.ExecuteUser != "" {
 			t.Fatal("partial inheritance was reported as a new execution", file, rows)
 		}
@@ -131,7 +145,7 @@ func TestSQLImportInheritedFileStatuses(t *testing.T) {
 			t.Fatal(result, err)
 		}
 		next, rows := upload(t, file.FileName, file.FileContent)
-		check(t, next, "PENDING")
+		check(t, next, "PENDING", true)
 		if rows[0].ExecuteStatus != "SUCCESS" || rows[1].ExecuteStatus != "PENDING" {
 			t.Fatal("failed SQL was incorrectly inherited as complete", rows)
 		}
@@ -147,7 +161,7 @@ func TestSQLImportInheritedFileStatuses(t *testing.T) {
 		}
 		defer s.settingsRepo.Set("postgresql_database", original)
 		file, rows := upload(t, "IMPORT__1__sql_release.sql", "UPDATE import_counter SET value=value+1;UPDATE import_counter SET value=value+10;")
-		check(t, file, "PENDING")
+		check(t, file, "PENDING", false)
 		for _, row := range rows {
 			if row.ExecuteStatus != "PENDING" {
 				t.Fatal("reused another database's result", rows)
@@ -172,7 +186,7 @@ func TestSQLImportInheritedFileStatuses(t *testing.T) {
 		if err != nil || stored.ExecuteStatus != "SKIPPED" || stored.ExecuteUser != "skip-operator" {
 			t.Fatal("old completed import not repaired", stored, err)
 		}
-		check(t, partial, "PENDING")
+		check(t, partial, "PENDING", true)
 		repository.DB.Model(&model.SQLStatementRecord{}).Count(&recordsAfter)
 		if recordsBefore != recordsAfter {
 			t.Fatal("repair modified execution audit", recordsBefore, recordsAfter)

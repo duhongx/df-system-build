@@ -108,7 +108,7 @@ func TestInspectionDatabaseReadonlyEvidenceAndPermissionIsolation(t *testing.T) 
 	defer admin.Close(context.Background())
 	role := fmt.Sprintf("inspection_limited_%d", time.Now().UnixNano())
 	ident := pgx.Identifier{role}.Sanitize()
-	if _, e := admin.Exec(ctx, "CREATE ROLE "+ident+" LOGIN"); e != nil {
+	if _, e := admin.Exec(ctx, "CREATE ROLE "+ident+" LOGIN PASSWORD 'inspection-fixture-password'"); e != nil {
 		t.Fatal(e)
 	}
 	defer func() {
@@ -117,7 +117,7 @@ func TestInspectionDatabaseReadonlyEvidenceAndPermissionIsolation(t *testing.T) 
 		}
 	}()
 	cfg.Username = role
-	cfg.Password = ""
+	cfg.Password = "inspection-fixture-password"
 	limited := InspectionDatabase(ctx, cfg)
 	if byCode(limited, "cloudhis-20").Status != "RECORDED" {
 		t.Fatal("unrelated identity evidence discarded")

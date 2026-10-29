@@ -108,6 +108,7 @@ func TestValidateViewDependencyAlterSQLRejectsUnsafeSQL(t *testing.T) {
 
 func TestCreateSQLViewDependencyTaskPersistsValidatedTask(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
+	setSQLExecutionSettingsToTestDatabase(t)
 	svc := NewPostgreSQLService()
 
 	task, err := svc.CreateSQLViewDependencyTask(SQLViewDependencyTaskRequest{
@@ -137,6 +138,7 @@ func TestCreateSQLViewDependencyTaskPersistsValidatedTask(t *testing.T) {
 
 func TestCreateSQLViewDependencyTaskPersistsMultipleChanges(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
+	setSQLExecutionSettingsToTestDatabase(t)
 	svc := NewPostgreSQLService()
 
 	task, err := svc.CreateSQLViewDependencyTask(SQLViewDependencyTaskRequest{
@@ -166,6 +168,7 @@ ALTER TABLE his.visit ALTER COLUMN code TYPE varchar(64);
 
 func TestGetSQLViewDependencyStepsOrdersByStepOrder(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
+	setSQLExecutionSettingsToTestDatabase(t)
 	svc := NewPostgreSQLService()
 
 	task, err := svc.CreateSQLViewDependencyTask(SQLViewDependencyTaskRequest{
@@ -198,6 +201,7 @@ func TestGetSQLViewDependencyStepsOrdersByStepOrder(t *testing.T) {
 
 func TestCreateSQLViewDependencyTaskAcceptsTransactionExecutionMode(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
+	setSQLExecutionSettingsToTestDatabase(t)
 	svc := NewPostgreSQLService()
 
 	task, err := svc.CreateSQLViewDependencyTask(SQLViewDependencyTaskRequest{
@@ -217,6 +221,7 @@ func TestCreateSQLViewDependencyTaskAcceptsTransactionExecutionMode(t *testing.T
 
 func TestExportSQLViewDependencyPlanRequiresAnalyzedItems(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
+	setSQLExecutionSettingsToTestDatabase(t)
 	svc := NewPostgreSQLService()
 
 	task, err := svc.CreateSQLViewDependencyTask(SQLViewDependencyTaskRequest{

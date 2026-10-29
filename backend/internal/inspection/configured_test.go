@@ -27,3 +27,12 @@ func TestConfiguredReportContainsOnlyActualScopeAndCompactsNormalResults(t *test
 		}
 	}
 }
+
+func TestConfiguredReportOmitsEmptyHostChapter(t *testing.T) {
+	r := Build(Report{Mode: "configured", Objects: []Object{{ID: 1, Type: "elasticsearch", Status: "COMPLETED", Observations: []Observation{{Code: "elasticsearch-health", Status: "NORMAL", Value: "green"}}}}})
+	for _, section := range Sections(&r) {
+		if section.ID == "resources" {
+			t.Fatal("a component-only report included an empty Linux host chapter")
+		}
+	}
+}

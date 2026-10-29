@@ -66,7 +66,7 @@ func TestBatchContinuesOtherTargetsAfterFailure(t *testing.T) {
 				if app.AppType == "java" {
 					file = app.AppName + ".jar"
 				}
-				mustCreateZipWithFiles(t, filepath.Join(dir, file), map[string]string{"index.html": "test", "META-INF/MANIFEST.MF": "Manifest-Version: 1.0\n"})
+				mustCreateZipWithFiles(t, filepath.Join(dir, file), map[string]string{"index.html": `<script src="app.js"></script>`, "app.js": "test", "META-INF/MANIFEST.MF": "Manifest-Version: 1.0\n"})
 				if i == tc.badIndex {
 					badFile = file
 				}

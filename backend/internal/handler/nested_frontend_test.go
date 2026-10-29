@@ -11,8 +11,18 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestNestedFrontendSelectionRejectsUnsafeDisplayNames(t *testing.T) {
+	for _, name := range []string{"../outside.zip", "nested/child.zip", `nested\child.zip`} {
+		err := validateFrontendSelectionFromSource(t.TempDir(), []model.FrontendArtifact{{FileName: "missing.zip"}, {FileName: name}})
+		if err == nil || !strings.Contains(err.Error(), "不能包含目录") {
+			t.Fatalf("unsafe display name %q was accepted: %v", name, err)
+		}
+	}
+}
 
 func TestNestedFrontendArtifactsExecuteAsOneTarget(t *testing.T) {
 	setupArtifactVersionTestDB(t)
@@ -23,7 +33,7 @@ func TestNestedFrontendArtifactsExecuteAsOneTarget(t *testing.T) {
 	scheduler.DefaultScheduler = &scheduler.BuildScheduler{}
 	t.Cleanup(func() { scheduler.DefaultScheduler = original })
 	t.Chdir(t.TempDir())
-	apps := []model.Application{{AppName: "web-main", AppType: "vue", VueRole: "main", GitRepo: "test"}, {AppName: "web-alpha", AppType: "vue", VueRole: "sub", AppCode: "04", GitRepo: "test"}}
+	apps := []model.Application{{AppName: "web-main", AppType: "vue", VueRole: "main", GitRepo: "test"}, {AppName: "web-alpha", AppType: "vue", VueRole: "sub", AppCode: "10", GitRepo: "test"}}
 	if err := repository.DB.Create(&apps).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -35,13 +45,13 @@ func TestNestedFrontendArtifactsExecuteAsOneTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustCreateZipWithFiles(t, filepath.Join(dir, "web/web-main.zip"), map[string]string{"index.html": "main"})
-	mustCreateZipWithFiles(t, filepath.Join(dir, "children/04.zip"), map[string]string{"index.html": "child"})
+	mustCreateZipWithFiles(t, filepath.Join(dir, "web/web-main.zip"), map[string]string{"index.html": `<script src="app.js"></script>`, "app.js": "main"})
+	mustCreateZipWithFiles(t, filepath.Join(dir, "children/10.zip"), map[string]string{"index.html": `<script src="app.js"></script>`, "app.js": "child"})
 	version := filepath.Base(dir)
 	if _, _, err := persistArtifactVersionFromDir(artifactVersionInput{VersionNo: version, SourceType: "download", TargetPath: dir}); err != nil {
 		t.Fatal(err)
 	}
-	body, _ := json.Marshal(map[string]any{"sourceDir": dir, "batchId": version, "namespace": "default", "items": []map[string]any{{"fileName": "web-main.zip", "appId": apps[0].ID}, {"fileName": "04.zip", "appId": apps[1].ID}}})
+	body, _ := json.Marshal(map[string]any{"sourceDir": dir, "batchId": version, "namespace": "default", "items": []map[string]any{{"fileName": "web-main.zip", "appId": apps[0].ID}, {"fileName": "10.zip", "appId": apps[1].ID}}})
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest("POST", "/execute", bytes.NewReader(body))

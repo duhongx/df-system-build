@@ -8,12 +8,12 @@ import (
 
 	"df-build-server/internal/componentprobe"
 	"df-build-server/internal/inspection"
-	platformk8s "df-build-server/internal/k8s"
 	"df-build-server/internal/model"
 	"df-build-server/internal/opsprobe"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"strings"
 )
@@ -24,16 +24,26 @@ func (s *OperationsService) collectKubernetes(ctx context.Context, row model.Com
 
 func (s *OperationsService) collectKubernetesInto(ctx context.Context, row model.ComponentConnection, secret string, result *opsprobe.JobResult) []inspection.Observation {
 	var client kubernetes.Interface
+	var cfg *rest.Config
 	var err error
 	if row.Source == "environment" {
-		client, err = platformk8s.GetClient()
-	} else {
-		cfg, e := clientcmd.RESTConfigFromKubeConfig([]byte(secret))
-		err = e
-		if err == nil {
-			cfg.Timeout = 15 * time.Second
-			client, err = kubernetes.NewForConfig(cfg)
+		var source inspectionKubeconfig
+		source, err = environmentKubernetesSource(ctx, s.db)
+		if err == nil && (!source.configured || source.digest != row.EnvironmentDigest) {
+			return []inspection.Observation{componentprobe.Failed("cloudhis-1", "Kubernetes 连接", fmt.Errorf("环境 Kubernetes 连接已变化，请刷新来源并重新发起检查"))}
 		}
+		if err == nil && source.loadErr != nil {
+			return []inspection.Observation{componentprobe.Failed("cloudhis-1", "Kubernetes 连接", fmt.Errorf("无法读取环境 kubeconfig 文件，请核对路径和读取权限"))}
+		}
+		if err == nil {
+			cfg, err = source.clientConfig()
+		}
+	} else {
+		cfg, err = clientcmd.RESTConfigFromKubeConfig([]byte(secret))
+	}
+	if err == nil {
+		cfg.Timeout = 15 * time.Second
+		client, err = kubernetes.NewForConfig(cfg)
 	}
 	if err != nil {
 		return []inspection.Observation{componentprobe.Failed("cloudhis-1", "Kubernetes 连接", fmt.Errorf("加载集群连接失败，请核对 kubeconfig"))}

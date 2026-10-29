@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,15 +13,14 @@ import (
 	"df-build-server/internal/testutil"
 	"df-build-server/pkg/logger"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func setupSQLChangeServiceTestDB(t *testing.T) {
 	t.Helper()
 	logger.Init("error", "stdout", "")
-	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
-		t.Fatalf("init db: %v", err)
-	}
+	initIsolatedServiceTestDB(t)
 	if err := repository.AutoMigrate(); err != nil {
 		t.Fatalf("migrate db: %v", err)
 	}
@@ -28,51 +28,24 @@ func setupSQLChangeServiceTestDB(t *testing.T) {
 
 func setSQLExecutionSettingsToTestDatabase(t *testing.T) {
 	t.Helper()
-	settings := repository.NewSettingsRepo()
+	dsn, ok := testutil.PostgresDSNFromEnv()
+	if !ok {
+		t.Skip("PostgreSQL integration test configuration is required")
+	}
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal("invalid PostgreSQL integration configuration")
+	}
 	values := map[string]string{
-		"postgresql_host":           os.Getenv("TEST_DB_HOST"),
-		"postgresql_port":           os.Getenv("TEST_DB_PORT"),
-		"postgresql_database":       os.Getenv("TEST_DB_NAME"),
-		"postgresql_user":           os.Getenv("TEST_DB_USER"),
-		"postgresql_password":       os.Getenv("TEST_DB_PASSWORD"),
-		"postgresql_admin_password": os.Getenv("TEST_DB_PASSWORD"),
-	}
-	if values["postgresql_port"] == "" {
-		values["postgresql_port"] = "5432"
-	}
-	if values["postgresql_host"] == "" || values["postgresql_database"] == "" || values["postgresql_user"] == "" {
-		for key, value := range parseTestPostgresDSN(os.Getenv("TEST_DATABASE_DSN")) {
-			switch key {
-			case "host":
-				values["postgresql_host"] = value
-			case "port":
-				values["postgresql_port"] = value
-			case "dbname":
-				values["postgresql_database"] = value
-			case "user":
-				values["postgresql_user"] = value
-			case "password":
-				values["postgresql_password"] = value
-				values["postgresql_admin_password"] = value
-			}
-		}
+		"postgresql_host": cfg.Host, "postgresql_port": strconv.Itoa(int(cfg.Port)),
+		"postgresql_database": cfg.Database, "postgresql_user": cfg.User,
+		"postgresql_password": cfg.Password, "postgresql_admin_password": cfg.Password,
 	}
 	for key, value := range values {
-		if err := settings.Set(key, value); err != nil {
+		if err := repository.NewSettingsRepo().Set(key, value); err != nil {
 			t.Fatalf("set %s: %v", key, err)
 		}
 	}
-}
-
-func parseTestPostgresDSN(dsn string) map[string]string {
-	values := map[string]string{}
-	for _, part := range strings.Fields(dsn) {
-		key, value, ok := strings.Cut(part, "=")
-		if ok {
-			values[key] = value
-		}
-	}
-	return values
 }
 
 func TestSplitSQLStatementsHandlesSemicolonsInStringsAndComments(t *testing.T) {
@@ -394,11 +367,16 @@ func TestParseSQLFileMetaDoesNotTreatDescriptionAsSchema(t *testing.T) {
 	}
 }
 
-func TestParseSQLRejectsDescriptionInPlaceOfSchema(t *testing.T) {
+func TestParseSQLRequiresExplicitSchemaForDescriptionFile(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
-	_, _, err := NewPostgreSQLService().ParseSQL(ParseSQLRequest{FileName: "V1__18__有需要再执行.sql", Content: "ALTER TABLE his.patient ADD COLUMN note text"})
-	if err == nil || !strings.Contains(err.Error(), "文件名格式") {
-		t.Fatalf("expected explicit filename validation, got %v", err)
+	setSQLExecutionSettingsToTestDatabase(t)
+	svc := NewPostgreSQLService()
+	file, rows, err := svc.ParseSQL(ParseSQLRequest{FileName: "V1__18__有需要再执行.sql", Content: "ALTER TABLE his.patient ADD COLUMN note text"})
+	if err != nil || file.SchemaName != "" || file.SchemaConfigured || file.ImportMessage == "" || len(rows) != 1 || rows[0].ExecuteStatus != "PENDING" {
+		t.Fatalf("upload must retain the SQL without guessing an execution schema: %v", err)
+	}
+	if _, _, err := svc.ExecuteSQLFile(context.Background(), file.ID, "tester"); err == nil {
+		t.Fatal("file without a configured schema executed")
 	}
 }
 
@@ -831,9 +809,9 @@ func TestParseSQLBatchCreatesOrderedFiles(t *testing.T) {
 
 func TestParseSQLBatchRejectsInvalidFileName(t *testing.T) {
 	setupSQLChangeServiceTestDB(t)
-	_, _, err := NewPostgreSQLService().ParseSQLBatch(ParseSQLBatchRequest{Files: []ParseSQLBatchFile{{FileName: "V1__1__说明.sql", Content: "SELECT 1"}}})
+	_, _, err := NewPostgreSQLService().ParseSQLBatch(ParseSQLBatchRequest{Files: []ParseSQLBatchFile{{FileName: "../outside.sql", Content: "SELECT 1"}}})
 	if err == nil {
-		t.Fatal("batch import accepted a filename without schema")
+		t.Fatal("batch import accepted a path instead of a filename")
 	}
 }
 
@@ -905,14 +883,14 @@ func TestExecuteSQLBatchPersistsFileLevelErrors(t *testing.T) {
 	if err := repository.DB.First(&got, file.ID).Error; err != nil {
 		t.Fatalf("reload file: %v", err)
 	}
-	if got.ExecuteStatus != "FAILED" || !strings.Contains(got.ExecuteMessage, "postgresql_host") {
+	if got.ExecuteStatus != "FAILED" || !strings.Contains(got.ExecuteMessage, "配置 PostgreSQL 数据库连接") {
 		t.Fatalf("expected file-level error to be persisted, got %+v", got)
 	}
 	var gotNext model.SQLChangeFile
 	if err := repository.DB.First(&gotNext, nextFile.ID).Error; err != nil {
 		t.Fatalf("reload next file: %v", err)
 	}
-	if gotNext.ExecuteStatus != "FAILED" || !strings.Contains(gotNext.ExecuteMessage, "postgresql_host") {
+	if gotNext.ExecuteStatus != "FAILED" || !strings.Contains(gotNext.ExecuteMessage, "配置 PostgreSQL 数据库连接") {
 		t.Fatalf("expected batch execution to continue and persist next file-level error, got %+v", gotNext)
 	}
 }

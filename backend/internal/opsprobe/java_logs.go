@@ -27,12 +27,9 @@ func javaInspectionDirectory(args []string, cwd, stdout string) []string {
 		}
 	}
 	for _, a := range args {
-		for _, prefix := range []string{"-Dlogging.file.path=", "--logging.file.path=", "-XX:HeapDumpPath="} {
+		for _, prefix := range []string{"-Dlogging.file.path=", "--logging.file.path="} {
 			if strings.HasPrefix(a, prefix) {
 				v := strings.TrimPrefix(a, prefix)
-				if strings.HasSuffix(v, ".hprof") {
-					v = filepath.Dir(v)
-				}
 				add(v)
 			}
 		}
@@ -58,12 +55,43 @@ func javaInspectionDirectory(args []string, cwd, stdout string) []string {
 	return dirs
 }
 
+func javaHeapInspectionDirectories(args []string, cwd string) []string {
+	dir := cwd // HotSpot's default HeapDumpPath is the process working directory.
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-XX:HeapDumpPath=") {
+			dir = strings.TrimPrefix(arg, "-XX:HeapDumpPath=")
+			if strings.HasSuffix(strings.ToLower(dir), ".hprof") {
+				dir = filepath.Dir(dir)
+			}
+			if !filepath.IsAbs(dir) {
+				dir = filepath.Join(cwd, dir)
+			}
+			break
+		}
+	}
+	if !filepath.IsAbs(dir) || strings.ContainsAny(dir, "\x00\r\n") {
+		return nil
+	}
+	return []string{filepath.Clean(dir)}
+}
+
+func inspectionFileIdentity(info os.FileInfo, fallback string) string {
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return fmt.Sprintf("%d:%d", stat.Dev, stat.Ino)
+	}
+	return fallback
+}
+
 func inspectJavaLogs(ctx context.Context) []inspection.Observation {
+	return inspectJavaLogsFrom(ctx, "/proc")
+}
+
+func inspectJavaLogsFrom(ctx context.Context, procRoot string) []inspection.Observation {
 	logs := inspection.Observation{Code: "cloudhis-11", Name: "Java 服务日志大小", Status: "RECORDED", CollectedAt: time.Now(), Source: "实际 Java 进程参数、工作目录、标准输出及文件元数据"}
 	heap := inspection.Observation{Code: "cloudhis-12", Name: "Java 内存溢出线索", Status: "RECORDED", CollectedAt: time.Now(), Source: logs.Source}
 	logTable := inspection.Table{Columns: []string{"进程", "日志目录", "文件数", "大小 GiB"}}
 	heapTable := inspection.Table{Columns: []string{"进程", "hprof 文件", "修改时间", "大小 MiB"}}
-	entries, err := os.ReadDir("/proc")
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		logs.Status, heap.Status = "UNKNOWN", "UNKNOWN"
 		logs.Reason = err.Error()
@@ -71,7 +99,11 @@ func inspectJavaLogs(ctx context.Context) []inspection.Observation {
 		return []inspection.Observation{logs, heap}
 	}
 	apps, console := 0, 0
-	seen := map[string]bool{}
+	seen := map[struct {
+		identity string
+		isLog    bool
+	}]bool{}
+	heapFiles := map[string]bool{}
 	for _, e := range entries {
 		if ctx.Err() != nil {
 			logs.Gaps = append(logs.Gaps, "检查已中断")
@@ -81,7 +113,7 @@ func inspectJavaLogs(ctx context.Context) []inspection.Observation {
 		if _, err := strconv.Atoi(e.Name()); err != nil {
 			continue
 		}
-		base := filepath.Join("/proc", e.Name())
+		base := filepath.Join(procRoot, e.Name())
 		data, err := os.ReadFile(filepath.Join(base, "cmdline"))
 		if err != nil {
 			continue
@@ -98,29 +130,44 @@ func inspectJavaLogs(ctx context.Context) []inspection.Observation {
 		cwd, _ := os.Readlink(filepath.Join(base, "cwd"))
 		stdout, _ := os.Readlink(filepath.Join(base, "fd/1"))
 		dirs := javaInspectionDirectory(args, cwd, stdout)
+		logDirs := map[string]bool{}
+		for _, dir := range dirs {
+			logDirs[dir] = true
+		}
+		for _, dir := range javaHeapInspectionDirectories(args, cwd) {
+			if !logDirs[dir] {
+				dirs = append(dirs, dir)
+			}
+		}
 		found := false
 		for _, dir := range dirs {
+			isLog := logDirs[dir]
 			actual := filepath.Join(base, "root", dir)
 			st, err := os.Stat(actual)
 			if os.IsNotExist(err) {
 				continue
 			}
 			if err != nil {
-				logs.Gaps = append(logs.Gaps, fmt.Sprintf("进程 %s 的目录 %s 无法读取", e.Name(), dir))
+				if isLog {
+					logs.Gaps = append(logs.Gaps, fmt.Sprintf("进程 %s 的目录 %s 无法读取", e.Name(), dir))
+				}
+				heap.Gaps = append(heap.Gaps, fmt.Sprintf("进程 %s 的目录 %s 无法读取", e.Name(), dir))
 				continue
 			}
 			if !st.IsDir() {
 				continue
 			}
-			found = true
-			identity := actual
-			if stat, ok := st.Sys().(*syscall.Stat_t); ok {
-				identity = fmt.Sprintf("%d:%d", stat.Dev, stat.Ino)
-			}
-			if seen[identity] {
+			found = found || isLog
+			// A previous process may have used this directory only for heap
+			// dumps. That scan must not suppress a later process's log totals.
+			key := struct {
+				identity string
+				isLog    bool
+			}{inspectionFileIdentity(st, actual), isLog}
+			if seen[key] {
 				continue
 			}
-			seen[identity] = true
+			seen[key] = true
 			var count int
 			var bytes int64
 			walkErr := filepath.WalkDir(actual, func(name string, item os.DirEntry, err error) error {
@@ -147,15 +194,23 @@ func inspectJavaLogs(ctx context.Context) []inspection.Observation {
 				}
 				bytes += info.Size()
 				if strings.HasSuffix(strings.ToLower(name), ".hprof") {
-					heapTable.Rows = append(heapTable.Rows, []string{e.Name(), filepath.Join(dir, rel), info.ModTime().Format(time.RFC3339), fmt.Sprintf("%.1f", float64(info.Size())/(1<<20))})
+					identity := inspectionFileIdentity(info, name)
+					if !heapFiles[identity] {
+						heapFiles[identity] = true
+						heapTable.Rows = append(heapTable.Rows, []string{e.Name(), filepath.Join(dir, rel), info.ModTime().Format(time.RFC3339), fmt.Sprintf("%.1f", float64(info.Size())/(1<<20))})
+					}
 				}
 				return nil
 			})
 			if walkErr != nil {
-				logs.Gaps = append(logs.Gaps, fmt.Sprintf("目录 %s 检查不完整：%v", dir, walkErr))
+				if isLog {
+					logs.Gaps = append(logs.Gaps, fmt.Sprintf("目录 %s 检查不完整：%v", dir, walkErr))
+				}
 				heap.Gaps = append(heap.Gaps, "hprof 范围未完整读取："+dir)
 			}
-			logTable.Rows = append(logTable.Rows, []string{e.Name(), dir, fmt.Sprint(count), fmt.Sprintf("%.2f", float64(bytes)/(1<<30))})
+			if isLog {
+				logTable.Rows = append(logTable.Rows, []string{e.Name(), dir, fmt.Sprint(count), fmt.Sprintf("%.2f", float64(bytes)/(1<<30))})
+			}
 		}
 		if !found {
 			console++

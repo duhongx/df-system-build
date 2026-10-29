@@ -8,16 +8,13 @@ import (
 
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
-	"df-build-server/internal/testutil"
 	"df-build-server/pkg/logger"
 	"github.com/gin-gonic/gin"
 )
 
 func TestSQLUploadHTTPAcceptsArbitraryNamesAndEmptyContent(t *testing.T) {
 	logger.Init("error", "stdout", "")
-	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
-		t.Fatal(err)
-	}
+	initIsolatedHandlerTestDB(t)
 	if err := repository.AutoMigrate(); err != nil {
 		t.Fatal(err)
 	}

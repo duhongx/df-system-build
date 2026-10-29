@@ -5,8 +5,10 @@ import (
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fTargetDatabase(t *testing.T, file *model.SQLChangeFile) string {
@@ -277,15 +279,16 @@ func TestReleaseSQLOverwriteDoesNotReuseDifferentDatabase(t *testing.T) {
 	if err != nil || first.ExecuteStatus != "SUCCESS" {
 		t.Fatalf("first: %v %+v", err, first)
 	}
-	cfg, err := s.loadReleaseSQLConfig("sql_release")
+	cfg, _, err := s.loadSQLExecutionConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.DB.Exec("CREATE DATABASE review_target_other").Error; err != nil {
+	other := fmt.Sprintf("dfops_other_%d", time.Now().UnixNano())
+	if err := repository.DB.Exec("CREATE DATABASE " + quoteIdent(other)).Error; err != nil {
 		t.Fatal(err)
 	}
-	cfg.Database = "review_target_other"
-	cfg.User = "df_build"
+	defer repository.DB.Exec("DROP DATABASE " + quoteIdent(other) + " WITH (FORCE)")
+	cfg.Database = other
 	target, err := openReleaseSQLDatabase(cfg)
 	if err != nil {
 		t.Fatal(err)

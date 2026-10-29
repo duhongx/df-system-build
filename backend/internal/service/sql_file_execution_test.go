@@ -21,7 +21,20 @@ func releaseSQLTestService(t *testing.T) *PostgreSQLService {
 	if err := repository.DB.Exec(`DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='sql_release') THEN CREATE ROLE sql_release LOGIN; END IF; END $$; CREATE SCHEMA sql_release AUTHORIZATION sql_release;`).Error; err != nil {
 		t.Fatal(err)
 	}
-	return NewPostgreSQLService()
+	s := NewPostgreSQLService()
+	t.Cleanup(func() {
+		if s.dbPool != nil {
+			_ = s.dbPool.Close()
+		}
+	})
+	password, err := s.settingsRepo.Read("postgresql_password", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DB.Exec("ALTER ROLE sql_release PASSWORD '" + escapeSQLString(password) + "'").Error; err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 func saveReleaseTestFile(t *testing.T, s *PostgreSQLService, content string) (*model.SQLChangeFile, []model.SQLChangeStatement) {
 	t.Helper()

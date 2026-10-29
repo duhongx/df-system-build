@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"df-build-server/internal/repository"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	"gorm.io/gorm"
 )
 
 // Regressions for the six defects reproduced during the SQL execution review.
@@ -25,11 +27,7 @@ func sqlReviewFixExec(t *testing.T, text string) {
 
 func sqlReviewFixService(t *testing.T) *PostgreSQLService {
 	t.Helper()
-	s := isolatedSQLContinuationService(t)
-	if err := s.settingsRepo.Set("postgresql_admin_password", "local-integration-test"); err != nil {
-		t.Fatal(err)
-	}
-	return s
+	return isolatedSQLContinuationService(t)
 }
 
 func TestSQLReviewFixSQLOverwriteContextInheritance(t *testing.T) {
@@ -131,7 +129,13 @@ func TestSQLReviewFixManualViewTaskTargetSwitch(t *testing.T) {
 
 func TestSQLReviewFixViewPermissionLoss(t *testing.T) {
 	s := sqlReviewFixService(t)
-	sqlReviewFixExec(t, `CREATE ROLE dfops_review_reader;
+	reader := fmt.Sprintf("dfops_review_reader_%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		if err := repository.DB.Exec("DROP OWNED BY " + quoteIdent(reader) + " CASCADE; DROP ROLE " + quoteIdent(reader)).Error; err != nil {
+			t.Errorf("clean up view permission fixture: %v", err)
+		}
+	})
+	sqlReviewFixExec(t, strings.ReplaceAll(`CREATE ROLE dfops_review_reader;
 CREATE TABLE sql_release.review_acl(x varchar(10));
 CREATE VIEW sql_release.review_public_view AS SELECT x FROM sql_release.review_acl;
 CREATE VIEW sql_release.review_column_view AS SELECT x FROM sql_release.review_acl;
@@ -139,11 +143,11 @@ GRANT USAGE ON SCHEMA sql_release TO dfops_review_reader;
 GRANT SELECT ON sql_release.review_public_view TO PUBLIC;
 GRANT SELECT(x) ON sql_release.review_column_view TO dfops_review_reader WITH GRANT OPTION;
 CREATE MATERIALIZED VIEW sql_release.review_acl_mv AS SELECT x FROM sql_release.review_acl;
-GRANT SELECT ON sql_release.review_acl_mv TO dfops_review_reader;`)
+GRANT SELECT ON sql_release.review_acl_mv TO dfops_review_reader;`, "dfops_review_reader", quoteIdent(reader)))
 	check := func() (bool, bool) {
 		t.Helper()
 		var publicGrant, columnGrant bool
-		row := repository.DB.Raw("SELECT has_table_privilege('dfops_review_reader','sql_release.review_public_view','SELECT'), has_column_privilege('dfops_review_reader','sql_release.review_column_view','x','SELECT')").Row()
+		row := repository.DB.Raw("SELECT has_table_privilege(?,'sql_release.review_public_view','SELECT'), has_column_privilege(?,'sql_release.review_column_view','x','SELECT')", reader, reader).Row()
 		if err := row.Scan(&publicGrant, &columnGrant); err != nil {
 			t.Fatal(err)
 		}
@@ -168,7 +172,7 @@ GRANT SELECT ON sql_release.review_acl_mv TO dfops_review_reader;`)
 		t.Fatalf("unexpected permission state public=%t column=%t", p, c)
 	}
 	var columnGrantable, materializedGrant bool
-	if err := repository.DB.Raw(`SELECT EXISTS(SELECT FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attrelid='sql_release.review_column_view'::regclass AND a.attname='x' AND x.grantee='dfops_review_reader'::regrole AND x.is_grantable), has_table_privilege('dfops_review_reader','sql_release.review_acl_mv','SELECT')`).Row().Scan(&columnGrantable, &materializedGrant); err != nil || !columnGrantable || !materializedGrant {
+	if err := repository.DB.Raw(`SELECT EXISTS(SELECT FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) x WHERE a.attrelid='sql_release.review_column_view'::regclass AND a.attname='x' AND x.grantee=?::regrole AND x.is_grantable), has_table_privilege(?,'sql_release.review_acl_mv','SELECT')`, reader, reader).Row().Scan(&columnGrantable, &materializedGrant); err != nil || !columnGrantable || !materializedGrant {
 		t.Fatalf("grant option/materialized grants missing: %t %t %v", columnGrantable, materializedGrant, err)
 	}
 	t.Logf("table and column privileges preserved: public=%t column=%t", p, c)
@@ -202,7 +206,10 @@ func TestSQLReviewFixOrdinarySQLErrorLosesDetail(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if retried.ExecuteStatus != "RUNNING" {
+		s.cancelReg.mu.Lock()
+		_, running := s.cancelReg.cancels[file.ID]
+		s.cancelReg.mu.Unlock()
+		if !running {
 			if retried.ExecuteStatus != "FAILED" {
 				t.Fatalf("retry status=%s", retried.ExecuteStatus)
 			}
@@ -227,6 +234,60 @@ func TestSQLReviewFixOrdinarySQLErrorLosesDetail(t *testing.T) {
 	}
 
 	t.Log("file, statement and attempt preserve DETAIL, HINT and CONTEXT")
+}
+
+func TestSQLRetrySummaryDoesNotExposeAnUnexecutedIntermediateState(t *testing.T) {
+	s := sqlReviewFixService(t)
+	file, rows := saveReleaseTestFile(t, s, "SELECT 1/0;")
+	if first, _, err := s.ExecuteSQLFile(context.Background(), file.ID, "first"); err != nil || first.ExecuteStatus != "FAILED" {
+		t.Fatal("initial failure was not recorded", err)
+	}
+	paused, release := make(chan struct{}), make(chan struct{})
+	var pauseOnce, releaseOnce sync.Once
+	name := "test:retry-summary-visibility"
+	if err := repository.DB.Callback().Update().After("gorm:commit_or_rollback_transaction").Register(name, func(tx *gorm.DB) {
+		values, ok := tx.Statement.Dest.(map[string]any)
+		if tx.Statement.Table == "sql_change_files" && ok && values["execute_status"] == "PENDING" {
+			pauseOnce.Do(func() { close(paused) })
+			<-release
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }); repository.DB.Callback().Update().Remove(name) })
+	if _, _, err := s.StartReleaseSQLStatementExecution(context.Background(), rows[0].ID, "retry", SQLExecuteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry did not reach its final summary")
+	}
+	observed, _, err := s.GetSQLFile(file.ID)
+	releaseOnce.Do(func() { close(release) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.ExecuteStatus == "PENDING" {
+		t.Error("readers observed the uncommitted summary reset")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.cancelReg.mu.Lock()
+		_, running := s.cancelReg.cancels[file.ID]
+		s.cancelReg.mu.Unlock()
+		if !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("retry summary did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	final, _, err := s.GetSQLFile(file.ID)
+	if err != nil || final.ExecuteStatus != "FAILED" || !strings.Contains(final.ExecuteMessage, "division by zero") {
+		t.Fatal("final retry result was lost", err)
+	}
 }
 
 func TestSQLReviewFixMaterializedViewPartialRestore(t *testing.T) {
@@ -304,6 +365,7 @@ func TestSQLReviewFixBulkPrecheckSharedDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	parsed.Password = cfg.Password
 	delay := &reviewLockLatency{}
 	parsed.Tracer = delay
 	traced := stdlib.OpenDB(*parsed)

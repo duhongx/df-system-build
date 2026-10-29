@@ -11,9 +11,18 @@ import (
 func setupRepositoryTestDB(t *testing.T) {
 	t.Helper()
 	logger.Init("error", "stdout", "")
-	if err := InitDB(testutil.PostgresConfig(t)); err != nil {
+	previous := DB
+	if err := InitDB(testutil.IsolatedPostgresConfig(t)); err != nil {
 		t.Fatalf("init db: %v", err)
 	}
+	current := DB
+	t.Cleanup(func() {
+		pool, err := current.DB()
+		if err == nil {
+			_ = pool.Close()
+		}
+		DB = previous
+	})
 	if err := AutoMigrate(); err != nil {
 		t.Fatalf("migrate db: %v", err)
 	}

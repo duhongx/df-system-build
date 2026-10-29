@@ -98,7 +98,7 @@ func configuredSections(r *Report) []Section {
 		if len(summaries[i].Rows) > 0 {
 			g.Items = append([]Item{{Definition: Definition{Code: "summary-" + g.ID, Name: "检查结果"}, Status: "RECORDED", Evidence: []Evidence{{Observation: Observation{Tables: []Table{summaries[i]}}}}}}, g.Items...)
 		}
-		if len(g.Items) > 0 || g.ID == "resources" {
+		if len(g.Items) > 0 || (g.ID == "resources" && len(ResourceTables(r)) > 0) {
 			out = append(out, g)
 		}
 	}

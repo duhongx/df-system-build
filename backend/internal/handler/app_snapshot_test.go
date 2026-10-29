@@ -36,7 +36,7 @@ func TestExecuteUsesValidatedApplicationSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustCreateZipWithFiles(t, filepath.Join(dir, "web-main.zip"), map[string]string{"index.html": "main"})
+	mustCreateZipWithFiles(t, filepath.Join(dir, "web-main.zip"), map[string]string{"index.html": `<script src="app.js"></script>`, "app.js": "main"})
 	mustCreateZipWithFiles(t, filepath.Join(dir, "service.jar"), map[string]string{"META-INF/MANIFEST.MF": "Manifest-Version: 1.0\n"})
 	version := filepath.Base(dir)
 	if _, _, err := persistArtifactVersionFromDir(artifactVersionInput{VersionNo: version, SourceType: "upload", TargetPath: dir}); err != nil {
@@ -47,7 +47,9 @@ func TestExecuteUsesValidatedApplicationSnapshot(t *testing.T) {
 	if err := repository.DB.Callback().Query().Before("gorm:query").Register(cb, func(tx *gorm.DB) {
 		if tx.Statement.Table == "applications" {
 			queries++
-			if queries == 3 {
+			// Two selected applications plus one live registry check for embedded
+			// frontend regions. Creating targets must use that validated snapshot.
+			if queries == 4 {
 				tx.AddError(errors.New("application query unavailable"))
 			}
 		}
@@ -71,7 +73,7 @@ func TestExecuteUsesValidatedApplicationSnapshot(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
 		t.Fatal(err)
 	}
-	if reply.Code != 0 || len(reply.Data.Pipelines) != 2 || len(reply.Data.Errors) != 0 || queries != 2 {
+	if reply.Code != 0 || len(reply.Data.Pipelines) != 2 || len(reply.Data.Errors) != 0 || queries != 3 {
 		t.Fatalf("unexpected application queries=%d response=%s", queries, w.Body.String())
 	}
 	var records int64

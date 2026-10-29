@@ -158,3 +158,27 @@ func TestMinIOMembersComeFromAdminInfoNotTheMCExecutor(t *testing.T) {
 		t.Fatal("executor was inferred without members")
 	}
 }
+
+func TestRegisteredNetworkComponentsDoNotRaiseDuplicateMissingSourceOnTheirHost(t *testing.T) {
+	db := operationsTestDB(t)
+	svc := NewOperationsService(db, t.TempDir())
+	run := model.InspectionRun{Name: "linked components", Status: "RUNNING"}
+	db.Create(&run)
+	for _, kind := range []string{"redis", "rabbitmq", "elasticsearch"} {
+		r := opsprobe.JobResult{Type: kind, ExpectedChecks: inspection.RequiredCodes(kind)}
+		r.ReportChecks = inspection.EnsureResults(r.ExpectedChecks, nil, "已登记连接但账号无读取权限")
+		if err := db.Create(&model.InspectionTargetRun{RunID: run.ID, ServerID: 12345, Type: "component", Status: "COMPLETED", ResultJSON: mustJSON(r)}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct {
+		host uint
+		want int
+	}{{12345, 3}, {12346, 0}} {
+		var opt opsprobe.ManualOptions
+		svc.applyCollectedHostCoverage(run.ID, test.host, &opt)
+		if len(opt.ConfiguredComponents) != test.want {
+			t.Fatalf("registered results duplicated as missing sources on host %d: %v", test.host, opt.ConfiguredComponents)
+		}
+	}
+}

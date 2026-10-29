@@ -2,81 +2,41 @@ package service
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"df-build-server/internal/model"
 	"df-build-server/internal/repository"
-	"df-build-server/internal/testutil"
-	"df-build-server/pkg/config"
-	"df-build-server/pkg/logger"
-	"github.com/jackc/pgx/v5"
 )
 
 // These execution regressions need real PostgreSQL transactions. Use a new
 // disposable database per test so they never reuse application data.
 func isolatedSQLContinuationService(t *testing.T) *PostgreSQLService {
 	t.Helper()
-	dsn, ok := testutil.PostgresDSNFromEnv()
-	if !ok {
-		t.Skip("set TEST_DATABASE_DSN or TEST_DB_* for PostgreSQL execution regressions")
-	}
-	parsed, err := pgx.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := fmt.Sprintf("dfops_continuation_%d", time.Now().UnixNano())
-	if _, err := admin.Exec("CREATE DATABASE " + quoteIdent(database)); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	previousDB := repository.DB
-	t.Cleanup(func() {
-		if repository.DB != nil && repository.DB != previousDB {
-			if db, err := repository.DB.DB(); err == nil {
-				db.Close()
-			}
-		}
-		repository.DB = previousDB
-		if _, err := admin.Exec("DROP DATABASE " + quoteIdent(database) + " WITH (FORCE)"); err != nil {
-			t.Errorf("drop isolated database: %v", err)
-		}
-		admin.Close()
-	})
-	logger.Init("error", "stdout", "")
-	if err := repository.InitDB(&config.DatabaseConfig{
-		Host: parsed.Host, Port: int(parsed.Port), Name: database, User: parsed.User,
-		Password: parsed.Password, MaxOpenConns: 5, MaxIdleConns: 2,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := repository.AutoMigrate(); err != nil {
-		t.Fatal(err)
-	}
-	for key, value := range map[string]string{
-		"postgresql_host": parsed.Host, "postgresql_port": strconv.Itoa(int(parsed.Port)),
-		"postgresql_database": database, "postgresql_user": parsed.User,
-		"postgresql_password": "isolated-test-password", "postgresql_password_mode": "shared",
-	} {
-		if err := repository.NewSettingsRepo().Set(key, value); err != nil {
-			t.Fatal(err)
-		}
-	}
+	setupSQLChangeServiceTestDB(t)
+	setSQLExecutionSettingsToTestDatabase(t)
 	if err := repository.DB.Exec(`DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='sql_release') THEN CREATE ROLE sql_release LOGIN; END IF; END $$;
 CREATE SCHEMA sql_release AUTHORIZATION sql_release;
 CREATE TABLE sql_release.progress(step integer);
 ALTER TABLE sql_release.progress OWNER TO sql_release;`).Error; err != nil {
 		t.Fatal(err)
 	}
-	return NewPostgreSQLService()
+	service := NewPostgreSQLService()
+	t.Cleanup(func() {
+		if service.dbPool != nil {
+			_ = service.dbPool.Close()
+		}
+	})
+	password, err := service.settingsRepo.Read("postgresql_password", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DB.Exec("ALTER ROLE sql_release PASSWORD '" + escapeSQLString(password) + "'").Error; err != nil {
+		t.Fatal(err)
+	}
+	return service
 }
 
 func TestReleaseSQLContinuationAdvancesPendingThenNextFile(t *testing.T) {

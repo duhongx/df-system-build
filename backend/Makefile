@@ -1,4 +1,4 @@
-.PHONY: build run test clean dev
+.PHONY: build run test test-local clean dev
 
 # Build the binary
 build:
@@ -15,6 +15,10 @@ dev:
 # Run tests
 test:
 	go test ./... -v
+
+# Full local checks with an isolated, password-authenticated TLS PostgreSQL.
+test-local:
+	python3 ../scripts/check_local.py
 
 # Run property tests
 test-property:

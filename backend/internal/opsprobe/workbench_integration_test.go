@@ -121,7 +121,7 @@ func TestDiagnosticRestrictedRoleReturnsCapabilityWarning(t *testing.T) {
 	defer admin.Close(ctx)
 	role := fmt.Sprintf("workbench_restricted_%d", admin.PgConn().PID())
 	q := pgx.Identifier{role}.Sanitize()
-	if _, err = admin.Exec(ctx, "CREATE ROLE "+q+" LOGIN"); err != nil {
+	if _, err = admin.Exec(ctx, "CREATE ROLE "+q+" LOGIN PASSWORD 'inspection-fixture-password'"); err != nil {
 		t.Fatal(err)
 	}
 	defer admin.Exec(ctx, "DROP ROLE "+q)
@@ -129,7 +129,7 @@ func TestDiagnosticRestrictedRoleReturnsCapabilityWarning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := Diagnose(ctx, DatabaseConfig{Host: cfg.Host, Port: int(cfg.Port), Database: cfg.Database, Username: role, SSLMode: "disable"})
+	data, err := Diagnose(ctx, DatabaseConfig{Host: cfg.Host, Port: int(cfg.Port), Database: cfg.Database, Username: role, Password: "inspection-fixture-password", SSLMode: "disable"})
 	if err != nil {
 		t.Fatal(err)
 	}

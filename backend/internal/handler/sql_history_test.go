@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/service"
-	"df-build-server/internal/testutil"
 	"df-build-server/pkg/logger"
 	"encoding/json"
 	"github.com/gin-gonic/gin"
@@ -59,9 +58,7 @@ func TestSQLHistoryHTTPQueryAndExplicitSkip(t *testing.T) {
 func setupPostgreSQLHistoryTest(t *testing.T) {
 	t.Helper()
 	logger.Init("error", "stdout", "")
-	if err := repository.InitDB(testutil.PostgresConfig(t)); err != nil {
-		t.Fatal(err)
-	}
+	initIsolatedHandlerTestDB(t)
 	if err := repository.AutoMigrate(); err != nil {
 		t.Fatal(err)
 	}
