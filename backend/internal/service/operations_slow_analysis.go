@@ -69,6 +69,9 @@ func (s *OperationsService) AnalyzeSlowLogs(ctx context.Context, id uint, filter
 			return nil, fmt.Errorf("结束时间无效")
 		}
 	}
+	if cutoff := time.Now().Add(-48 * time.Hour); from.Before(cutoff) {
+		from = cutoff
+	}
 	if !from.Before(to) {
 		return nil, fmt.Errorf("结束时间必须晚于开始时间")
 	}

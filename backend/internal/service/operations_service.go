@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -21,19 +20,20 @@ import (
 )
 
 type OperationsService struct {
-	db          *gorm.DB
-	workspace   string
-	owner       string
-	mu          sync.Mutex
-	collecting  map[uint]bool
-	syncing     map[uint]bool
-	active      map[uint]bool
-	diagnosing  map[uint]bool
-	diagnostics map[uint]diagnosticCache
-	hostSlots   chan struct{}
-	logSlots    chan struct{}
-	runSlots    chan struct{}
-	reportSlots chan struct{}
+	db                  *gorm.DB
+	workspace           string
+	owner               string
+	mu                  sync.Mutex
+	collecting          map[uint]bool
+	syncing             map[uint]bool
+	active              map[uint]bool
+	diagnosing          map[uint]bool
+	diagnostics         map[uint]diagnosticCache
+	componentCollecting map[string]bool
+	hostSlots           chan struct{}
+	logSlots            chan struct{}
+	runSlots            chan struct{}
+	reportSlots         chan struct{}
 }
 type diagnosticCache struct {
 	at       time.Time
@@ -44,9 +44,11 @@ type diagnosticCache struct {
 
 func NewOperationsService(db *gorm.DB, workspace string) *OperationsService {
 	base, _ := filepath.Abs(filepath.Join(workspace, "operations"))
-	return &OperationsService{db: db, workspace: base, owner: fmt.Sprintf("worker-%d", time.Now().UnixNano()), collecting: map[uint]bool{}, syncing: map[uint]bool{}, active: map[uint]bool{}, diagnosing: map[uint]bool{}, diagnostics: map[uint]diagnosticCache{}, hostSlots: make(chan struct{}, 2), logSlots: make(chan struct{}, 1), runSlots: make(chan struct{}, 2), reportSlots: make(chan struct{}, 2)}
+	return &OperationsService{db: db, workspace: base, owner: fmt.Sprintf("worker-%d", time.Now().UnixNano()), collecting: map[uint]bool{}, syncing: map[uint]bool{}, active: map[uint]bool{}, diagnosing: map[uint]bool{}, diagnostics: map[uint]diagnosticCache{}, componentCollecting: map[string]bool{}, hostSlots: make(chan struct{}, 2), logSlots: make(chan struct{}, 1), runSlots: make(chan struct{}, 2), reportSlots: make(chan struct{}, 2)}
 }
 func (s *OperationsService) Start(ctx context.Context) {
+	s.cleanupOperations(ctx)
+	s.db.Model(&model.ServiceOperation{}).Where("status IN ?", []string{"QUEUED", "RUNNING"}).Updates(map[string]any{"status": "UNKNOWN", "message": "平台重启，操作结果待核实；请先刷新服务状态", "finished_at": time.Now()})
 	go func() {
 		tick := time.NewTicker(3 * time.Second)
 		defer tick.Stop()
@@ -72,14 +74,19 @@ func (s *OperationsService) Start(ctx context.Context) {
 	}()
 }
 func (s *OperationsService) cleanupOperations(ctx context.Context) {
-	s.db.WithContext(ctx).Where("collected_at < ?", time.Now().AddDate(0, 0, -30)).Delete(&model.HostMetricSample{})
-	s.db.WithContext(ctx).Where("created_at < ?", time.Now().AddDate(0, 0, -30)).Delete(&model.DatabaseLogEvent{})
+	s.db.WithContext(ctx).Where("collected_at < ?", time.Now().Add(-48*time.Hour)).Delete(&model.CollectionSample{})
+	s.db.WithContext(ctx).Where("collected_at < ?", time.Now().Add(-48*time.Hour)).Delete(&model.HostMetricSample{})
+	s.db.WithContext(ctx).Where("event_time < ? OR created_at < ?", time.Now().Add(-48*time.Hour), time.Now().Add(-48*time.Hour)).Delete(&model.DatabaseLogEvent{})
 }
 func (s *OperationsService) connect(ctx context.Context, id uint) (*opsremote.Conn, error) {
 	var server model.Server
 	if err := s.db.WithContext(ctx).First(&server, id).Error; err != nil {
 		return nil, fmt.Errorf("关联主机不存在: %w", err)
 	}
+	return s.connectServer(ctx, server)
+}
+func (s *OperationsService) connectServer(ctx context.Context, server model.Server) (*opsremote.Conn, error) {
+	id := server.ID
 	config := model.HostMonitorConfig{ServerID: id, IntervalSeconds: 60}
 	if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&config).Error; err != nil {
 		return nil, err
@@ -110,6 +117,17 @@ func (s *OperationsService) connect(ctx context.Context, id uint) (*opsremote.Co
 	return c, nil
 }
 func (s *OperationsService) databaseConfig(row model.OperationsDatabase) (opsprobe.DatabaseConfig, error) {
+	if row.Source == "environment" {
+		c, err := NewPostgreSQLService().loadConfig()
+		if err != nil {
+			return opsprobe.DatabaseConfig{}, err
+		}
+		if c.Host == "" || c.Database == "" || c.Password == "" || environmentDatabaseDigest(c) != row.EnvironmentDigest {
+			return opsprobe.DatabaseConfig{}, fmt.Errorf("环境连接已变化，请刷新连接列表后重试")
+		}
+		return opsprobe.DatabaseConfig{Host: row.Host, Port: row.Port, Database: row.Database, Username: row.Username, Password: c.Password, SSLMode: row.SSLMode}, nil
+	}
+
 	password, err := crypto.Decrypt(row.PasswordEncrypted)
 	if err != nil {
 		return opsprobe.DatabaseConfig{}, fmt.Errorf("解密数据库巡检凭据失败")
@@ -204,32 +222,7 @@ func serverEndpoint(server model.Server) string {
 	return server.Username + "@" + net.JoinHostPort(server.Host, strconv.Itoa(server.Port))
 }
 func (s *OperationsService) ImportCurrentDatabase(name string) (*model.OperationsDatabase, error) {
-	cfg, err := NewPostgreSQLService().loadConfig()
-	if err != nil {
-		return nil, err
-	}
-	if cfg.Host == "" || cfg.Database == "" || cfg.Password == "" {
-		return nil, fmt.Errorf("当前 PostgreSQL 连接不完整，请先在环境配置中设置")
-	}
-	var existing model.OperationsDatabase
-	err = s.db.Where("host=? AND port=? AND database=? AND username=?", cfg.Host, cfg.Port, cfg.Database, cfg.User).First(&existing).Error
-	if err == nil {
-		return &existing, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
-	encrypted, err := crypto.Encrypt(cfg.Password)
-	if err != nil {
-		return nil, err
-	}
-	port, _ := strconv.Atoi(cfg.Port)
-	var server model.Server
-	s.db.Where("host=?", cfg.Host).Order("id").First(&server)
-	if name == "" {
-		name = cfg.Host + " / " + cfg.Database
-	}
-	row := model.OperationsDatabase{Name: name, Host: cfg.Host, Port: port, Database: cfg.Database, Username: cfg.User, PasswordEncrypted: encrypted, SSLMode: "require", ServerID: server.ID, LogFormat: "csv", LogTimezone: "Asia/Shanghai", SlowThresholdMs: 5000, LookbackHours: 24, Revision: 1}
-	return &row, s.db.Create(&row).Error
+	return s.SyncEnvironmentDatabase(context.Background(), true, name)
 }
+
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }

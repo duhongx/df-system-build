@@ -173,7 +173,7 @@ onMounted(loadServers)
             <el-tag :type="statusType(row.status)" size="small">{{ row.status === 'online' ? '在线' : row.status === 'offline' ? '离线' : '未知' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="360" fixed="right">
+        <el-table-column label="操作" width="420" fixed="right">
           <template #default="{ row }">
             <div class="action-btns">
               <el-button type="primary" link size="small" @click="handleTerminal(row)">
@@ -182,6 +182,7 @@ onMounted(loadServers)
               <el-button type="primary" link size="small" @click="handleFiles(row)">
                 <el-icon style="margin-right: 2px;"><Folder /></el-icon>文件
               </el-button>
+              <el-button type="primary" link size="small" @click="router.push(`/servers/${row.id}/services`)">服务管理</el-button>
               <el-button type="primary" link size="small" @click="handleMonitor(row)">
                 <el-icon style="margin-right: 2px;"><DataLine /></el-icon>监控
               </el-button>

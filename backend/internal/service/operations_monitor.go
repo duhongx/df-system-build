@@ -29,7 +29,7 @@ func (s *OperationsService) HostMonitor(id uint) (model.HostMonitorConfig, *opsp
 	}
 	var sample model.HostMetricSample
 	var metrics *opsprobe.HostMetrics
-	if err := s.db.Where("server_id=?", id).Order("collected_at DESC").First(&sample).Error; err == nil {
+	if err := s.db.Where("server_id=? AND collected_at>=?", id, time.Now().Add(-48*time.Hour)).Order("collected_at DESC").First(&sample).Error; err == nil {
 		var m opsprobe.HostMetrics
 		if err := json.Unmarshal([]byte(sample.MetricsJSON), &m); err != nil {
 			return cfg, nil, err
@@ -126,8 +126,8 @@ func (s *OperationsService) scheduleHosts(ctx context.Context) {
 	}
 }
 func (s *OperationsService) HostHistory(ctx context.Context, id uint, hours int) ([]opsprobe.HostMetrics, int, error) {
-	if hours < 1 || hours > 720 {
-		return nil, 0, fmt.Errorf("历史范围应为 1～720 小时")
+	if hours < 1 || hours > 48 {
+		return nil, 0, fmt.Errorf("历史范围应为 1～48 小时")
 	}
 	step := max(30, (hours*3600+599)/600)
 	step = ((step + 29) / 30) * 30

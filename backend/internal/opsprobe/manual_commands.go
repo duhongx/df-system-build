@@ -18,6 +18,8 @@ import (
 var manualSQL embed.FS
 
 type ManualOptions struct {
+	Auto                    bool     `json:"auto,omitempty"`
+	ConfiguredComponents    []string `json:"configuredComponents,omitempty"`
 	Profiles                []string `json:"profiles"`
 	Namespace               string   `json:"namespace"`
 	LogDirectory            string   `json:"logDirectory"`
@@ -33,6 +35,7 @@ type ManualOptions struct {
 }
 
 var manualProfiles = map[string][]int{
+	"nacos":              {13},
 	"kubernetes":         {1, 7, 8, 9, 10, 13},
 	"k8s_host":           {6},
 	"deploy":             {14},
@@ -65,7 +68,7 @@ func (m ManualOptions) Codes() []string {
 }
 
 func (m ManualOptions) Validate(kind string) error {
-	if len(m.Profiles) == 0 || len(m.Profiles) > len(manualProfiles) {
+	if (len(m.Profiles) == 0 && !m.Auto) || len(m.Profiles) > len(manualProfiles) {
 		return fmt.Errorf("请选择对应服务器的巡检范围")
 	}
 	seen := map[string]bool{}

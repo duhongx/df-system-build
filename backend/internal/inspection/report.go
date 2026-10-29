@@ -20,6 +20,7 @@ type Table struct {
 }
 
 type Observation struct {
+	Origin             *Origin            `json:"origin,omitempty"`
 	ConfigurationState string             `json:"configurationState,omitempty"`
 	Measurements       map[string]float64 `json:"measurements,omitempty"`
 	Executions         []Execution        `json:"executions,omitempty"`
@@ -35,6 +36,13 @@ type Observation struct {
 	Evidence           string             `json:"evidence"`
 	Tables             []Table            `json:"tables"`
 	Gaps               []string           `json:"gaps"`
+}
+
+type Origin struct {
+	Type     string `json:"type"`
+	ID       uint   `json:"id"`
+	Name     string `json:"name"`
+	Endpoint string `json:"endpoint"`
 }
 
 type Object struct {
@@ -100,6 +108,7 @@ type Summary struct {
 }
 
 type Report struct {
+	Mode        string    `json:"mode,omitempty"`
 	Version     string    `json:"version"`
 	RunID       uint      `json:"runId"`
 	Name        string    `json:"name"`
@@ -117,8 +126,15 @@ type Report struct {
 
 func Build(r Report) Report {
 	r.Version = Version
+	if r.Mode == "configured" {
+		r.Version = "3.1"
+	}
 	r.Items, r.Findings = []Item{}, []Finding{}
-	r.Summary = Summary{Total: len(Catalogue())}
+	definitions := Catalogue()
+	if r.Mode == "configured" {
+		definitions = configuredDefinitions(r.Objects)
+	}
+	r.Summary = Summary{Total: len(definitions)}
 	r.Limitations = []string{"依据 HIS 运维巡检操作指导书 V2.0，记录实际执行的命令或 SQL、执行时间及返回结果。", "“已记录”表示执行成功并保存输出，不等于自动认定业务正常；指导书要求记录输出的项目交由运维人员核对。", "命令失败、权限不足、缺少工具、输出截断及未执行项保留具体原因，不补造结果。"}
 	for i := range r.Objects {
 		o := &r.Objects[i]
@@ -133,7 +149,7 @@ func Build(r Report) Report {
 			sanitizeTable(&o.Tables[j])
 		}
 	}
-	for _, def := range Catalogue() {
+	for _, def := range definitions {
 		item := Item{Definition: def, Status: "RECORDED", Complete: true, Evidence: []Evidence{}}
 		for _, o := range r.Objects {
 			if !matches(def, o) {
@@ -177,12 +193,16 @@ func Build(r Report) Report {
 					}
 				}
 				e := Evidence{ID: fmt.Sprintf("e-%s-%d-%d", def.Code, o.ID, len(item.Evidence)+1), ObjectID: o.ID, ObjectName: o.Name, Endpoint: o.Endpoint, Observation: obs}
+				if obs.Origin != nil {
+					e.ObjectName = first(obs.Origin.Name, obs.Origin.Endpoint)
+					e.Endpoint = obs.Origin.Endpoint
+				}
 				item.Evidence = append(item.Evidence, e)
 				if priority(obs.Status) > priority(item.Status) || (item.Status == "RECORDED" && obs.Status == "NORMAL") {
 					item.Status = obs.Status
 				}
 				if obs.Status != "NORMAL" && obs.Status != "RECORDED" && obs.Status != "NOT_APPLICABLE" || len(obs.Gaps) > 0 {
-					r.Findings = append(r.Findings, Finding{ID: e.ID, Code: def.Code, Name: def.Name, Status: obs.Status, ObjectID: o.ID, ObjectName: o.Name, Value: obs.Value, Reason: strings.TrimSpace(obs.Reason + " " + strings.Join(obs.Gaps, "；")), Advice: first(obs.Advice, def.Advice), Owner: def.Owner, EvidenceID: e.ID})
+					r.Findings = append(r.Findings, Finding{ID: e.ID, Code: def.Code, Name: def.Name, Status: obs.Status, ObjectID: o.ID, ObjectName: e.ObjectName, Value: obs.Value, Reason: strings.TrimSpace(obs.Reason + " " + strings.Join(obs.Gaps, "；")), Advice: first(obs.Advice, def.Advice), Owner: def.Owner, EvidenceID: e.ID})
 				}
 			}
 		}
@@ -198,7 +218,7 @@ func Build(r Report) Report {
 			}
 			if allNA {
 				item.Status = "NOT_APPLICABLE"
-				if def.Code == "cloudhis-19" {
+				if def.Code == "cloudhis-19" && r.Mode != "configured" {
 					item.Status, item.Complete, item.Missing = "UNKNOWN", false, 1
 					item.Reason = "本次选中的主机均未取得当前 Leader 的归档检查结果"
 					r.Findings = append(r.Findings, Finding{Code: def.Code, Name: def.Name, Status: "UNKNOWN", Reason: item.Reason})
@@ -267,7 +287,53 @@ func Build(r Report) Report {
 		r.Conclusion += " 检查证据尚不完整，不能据此认定整个环境运行正常。"
 	}
 	r.Name, r.Operator = Redact(r.Name), Redact(r.Operator)
+	if r.Mode == "configured" {
+		r.Limitations = []string{"本报告按已登记的服务器及组件连接现场采集；未登记的远程组件不包含在本次范围。", "正常项目保留结论和关键数据，异常与采集缺口单独列明；命令及完整结果保存在本报告冻结证据中。", "临时采集结果保存 48 小时；本报告及其冻结结果独立存档，重新排版不重新采集。"}
+		r.Conclusion = fmt.Sprintf("本次检查 %d 个对象、%d 项内容，已取得 %d 项结果；正常 %d 项，需关注 %d 项，严重 %d 项，已记录 %d 项，未取得完整结果 %d 项。", len(r.Objects), r.Summary.Planned, r.Summary.Completed, r.Summary.Normal, r.Summary.Warning, r.Summary.Critical, r.Summary.Recorded, r.Summary.Unknown)
+	}
 	return r
+}
+
+func configuredDefinitions(objects []Object) []Definition {
+	known := map[string]Definition{}
+	for _, d := range Catalogue() {
+		known[d.Code] = d
+	}
+	seen := map[string]bool{}
+	var out []Definition
+	for _, o := range objects {
+		for _, obs := range o.Observations {
+			if _, ok := known[obs.Code]; !ok {
+				d := CheckDefinition(obs.Code)
+				d.Name = first(obs.Name, d.Name)
+				known[obs.Code] = d
+			}
+		}
+	}
+	for _, o := range objects {
+		for _, code := range o.CheckCodes {
+			if !seen[code] {
+				d, ok := known[code]
+				if !ok {
+					d = CheckDefinition(code)
+				}
+				out = append(out, d)
+				seen[code] = true
+			}
+		}
+		for _, obs := range o.Observations {
+			if seen[obs.Code] {
+				continue
+			}
+			seen[obs.Code] = true
+			d, ok := known[obs.Code]
+			if !ok {
+				d = Definition{Code: obs.Code, Name: obs.Name, Section: o.Type, Owner: "运维人员", Advice: "结合实际结果核实。"}
+			}
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func impactFor(code string) string {
@@ -333,6 +399,12 @@ func Redact(s string) string {
 	return secretAssignment.ReplaceAllString(urlCredential.ReplaceAllString(bearerCredential.ReplaceAllString(s, "${1}[REDACTED]"), "${1}[REDACTED]@"), "${1}[REDACTED]")
 }
 func sanitize(o *Observation) {
+	if o.Origin != nil {
+		copy := *o.Origin
+		copy.Name = Redact(copy.Name)
+		copy.Endpoint = Redact(copy.Endpoint)
+		o.Origin = &copy
+	}
 	for i := range o.Executions {
 		e := &o.Executions[i]
 		e.Command, e.Stdout, e.Stderr, e.Error = Redact(e.Command), Redact(e.Stdout), Redact(e.Stderr), Redact(e.Error)
@@ -345,6 +417,10 @@ func sanitize(o *Observation) {
 		sanitizeTable(&o.Tables[i])
 	}
 }
+
+// SanitizeObservation is also used before temporary collection results are
+// persisted or returned, independently of the formal report freeze.
+func SanitizeObservation(o *Observation) { sanitize(o) }
 func sanitizeTable(t *Table) {
 	t.Title, t.Note = Redact(t.Title), Redact(t.Note)
 	for i := range t.Columns {

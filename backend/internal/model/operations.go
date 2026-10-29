@@ -21,6 +21,11 @@ type HostMetricSample struct {
 	MetricsJSON string    `gorm:"type:jsonb;not null" json:"-"`
 }
 type OperationsDatabase struct {
+	Source            string     `gorm:"size:24" json:"source"`
+	EnvironmentDigest string     `gorm:"size:64" json:"-"`
+	BackupServerID    uint       `json:"backupServerId"`
+	BackupDirectory   string     `gorm:"type:text" json:"backupDirectory"`
+	ArchiveDirectory  string     `gorm:"type:text" json:"archiveDirectory"`
 	ID                uint       `gorm:"primaryKey" json:"id"`
 	Name              string     `gorm:"size:128;not null" json:"name"`
 	Host              string     `gorm:"size:255;not null" json:"host"`
@@ -100,6 +105,7 @@ type InspectionPlan struct {
 	UpdatedAt    time.Time  `json:"updatedAt"`
 }
 type InspectionRun struct {
+	CollectionMode     string     `gorm:"size:24" json:"collectionMode"`
 	ReportSnapshotJSON string     `gorm:"type:jsonb;default:null" json:"-"`
 	LeaseOwner         string     `gorm:"size:64" json:"-"`
 	LeaseUntil         *time.Time `gorm:"index" json:"-"`
@@ -126,6 +132,7 @@ type InspectionRun struct {
 	UpdatedAt          time.Time  `json:"updatedAt"`
 }
 type InspectionTargetRun struct {
+	ExpectedJSON    string     `gorm:"type:jsonb;default:null" json:"expectedJSON"`
 	ManualJSON      string     `gorm:"type:jsonb;default:null" json:"manualJSON"`
 	ServerEndpoint  string     `gorm:"size:512" json:"serverEndpoint"`
 	ServicesJSON    string     `gorm:"type:jsonb;not null;default:'[]'" json:"servicesJSON"`

@@ -19,7 +19,7 @@ const databaseExpanded = ref(false)
 const isPostgreSQL = computed(() => route.path.startsWith('/postgresql'))
 const isCollapsed = computed(() => isPostgreSQL.value ? !databaseExpanded.value : platformCollapsed.value)
 const pageSection = computed(() => {
-  if (/^\/(servers|kubernetes|inspections)/.test(route.path)) return '运维管理'
+  if (/^\/(servers|kubernetes|inspections|monitoring)/.test(route.path)) return '运维管理'
   if (route.path.startsWith('/postgresql')) return '数据库管理'
   if (route.path.startsWith('/settings')) return '平台配置'
   if (route.path.startsWith('/deployment')) return '基础设施'
@@ -27,6 +27,7 @@ const pageSection = computed(() => {
 })
 
 const activeMenu = computed(() => {
+  if (/^\/(monitoring|inspections)(\/|$)/.test(route.path)) return '/monitoring'
   if (route.path.startsWith('/artifacts/versions/')) return '/artifacts/versions'
   return route.path
 })
@@ -267,7 +268,7 @@ async function handleSaveProfile() {
           <template #title>服务器管理</template>
         </el-menu-item>
 
-        <el-menu-item index="/inspections"><el-icon><Document /></el-icon><template #title>巡检中心</template></el-menu-item>
+        <el-menu-item index="/monitoring"><el-icon><Document /></el-icon><template #title>监控中心</template></el-menu-item>
         <el-sub-menu index="k8s-center">
           <template #title>
             <el-icon><Cloudy /></el-icon>
@@ -308,7 +309,7 @@ async function handleSaveProfile() {
             <span>PostgreSQL 管理</span>
           </template>
           <el-menu-item index="/postgresql/workbench">数据库工作台</el-menu-item>
-          <el-menu-item index="/postgresql/instances">发布连接</el-menu-item>
+
           <el-menu-item index="/postgresql/sql-execution">SQL 变更发布</el-menu-item>
           <el-menu-item index="/postgresql/view-dependency-change">视图依赖变更</el-menu-item>
         </el-sub-menu>

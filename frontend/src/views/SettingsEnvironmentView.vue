@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, type TableInstance } from 'element-plus'
 import request from '../api/request'
+import ComponentConnections from '../components/ComponentConnections.vue'
 import { useSettingsStore } from '../stores/settings'
 import { listPostgreSQLPasswordOverrides, discoverPostgreSQLAccounts, setPostgreSQLAccountPassword, savePostgreSQLAccountPasswords, clearPostgreSQLAccountPassword, testPostgreSQLAccount, testPostgreSQLConnections, type PostgreSQLBusinessAccount, type PostgreSQLAccountTestResult, type PostgreSQLConnectionTestReport } from '../api/settings'
 
@@ -670,6 +671,7 @@ onMounted(() => {
     </el-dialog>
 
     <!-- Save Button -->
+    <div id="inspection-components"><ComponentConnections /></div>
     <div class="save-bar">
       <el-button type="primary" :loading="saving" :disabled="!!testingType || !!pgAccountBusy" @click="saveSettings">保存</el-button>
     </div>

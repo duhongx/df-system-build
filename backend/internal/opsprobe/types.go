@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const Version = "1.5.0"
+const Version = "1.7.0"
 
 type Disk struct {
 	Device           string  `json:"device"`
@@ -178,15 +178,27 @@ type InspectionDatabaseBinding struct {
 	Error  string          `json:"error,omitempty"`
 }
 type JobResult struct {
-	Version      string                   `json:"version"`
-	Name         string                   `json:"name"`
-	Type         string                   `json:"type"`
-	Hostname     string                   `json:"hostname"`
-	StartedAt    time.Time                `json:"startedAt"`
-	FinishedAt   time.Time                `json:"finishedAt"`
-	Checks       []Check                  `json:"checks"`
-	Metrics      *HostMetrics             `json:"metrics,omitempty"`
-	Database     *Diagnostic              `json:"database,omitempty"`
-	ReportChecks []inspection.Observation `json:"reportChecks,omitempty"`
-	Error        string                   `json:"error"`
+	Coverage        *inspection.Summary      `json:"coverage,omitempty"`
+	MemberGroups    [][]string               `json:"memberGroups,omitempty"`
+	ExpectedChecks  []string                 `json:"expectedChecks,omitempty"`
+	MemberAddresses []string                 `json:"memberAddresses,omitempty"`
+	RelatedHosts    []RelatedHostResult      `json:"relatedHosts,omitempty"`
+	Version         string                   `json:"version"`
+	Name            string                   `json:"name"`
+	Type            string                   `json:"type"`
+	Hostname        string                   `json:"hostname"`
+	StartedAt       time.Time                `json:"startedAt"`
+	FinishedAt      time.Time                `json:"finishedAt"`
+	Checks          []Check                  `json:"checks"`
+	Metrics         *HostMetrics             `json:"metrics,omitempty"`
+	Database        *Diagnostic              `json:"database,omitempty"`
+	ReportChecks    []inspection.Observation `json:"reportChecks,omitempty"`
+	Error           string                   `json:"error"`
+}
+
+type RelatedHostResult struct {
+	ServerID uint       `json:"serverId"`
+	Name     string     `json:"name"`
+	Endpoint string     `json:"endpoint"`
+	Result   *JobResult `json:"result"`
 }

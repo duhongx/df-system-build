@@ -9,7 +9,6 @@ const links = [
     label: "视图依赖变更",
     icon: "Connection",
   },
-  { path: "/postgresql/instances", label: "发布连接", icon: "Setting" },
 ];
 </script>
 <template>

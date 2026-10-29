@@ -31,6 +31,22 @@ func NewOperationsHandler(svc *service.OperationsService) *OperationsHandler {
 func (h *OperationsHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g := r.Group("/operations")
 	g.Use(middleware.AuthRequired())
+	g.GET("/hosts/:id/services", h.ManagedServices)
+	g.POST("/hosts/:id/services", h.SaveManagedService)
+	g.PUT("/hosts/:id/services/:serviceId", h.SaveManagedService)
+	g.DELETE("/hosts/:id/services/:serviceId", h.DeleteManagedService)
+	g.GET("/hosts/:id/services/:serviceId/status", h.ManagedServiceStatus)
+	g.GET("/hosts/:id/services/:serviceId/logs", h.ManagedServiceLogs)
+	g.GET("/hosts/:id/services/:serviceId/operations", h.ServiceOperation)
+	g.POST("/hosts/:id/services/:serviceId/operations", h.ServiceOperation)
+	g.GET("/components", h.Components)
+	g.POST("/components", h.SaveComponent)
+	g.PUT("/components/:id", h.SaveComponent)
+	g.DELETE("/components/:id", h.DeleteComponent)
+	g.POST("/components/:id/collect", h.CollectComponent)
+	g.GET("/collections/:kind/:id", h.LatestCollection)
+	g.POST("/databases/:id/inspection", h.CollectDatabaseInspection)
+	g.POST("/configured-inspections", h.CreateConfiguredRun)
 	g.GET("/database-workspace", h.Workspace)
 	g.PUT("/database-workspace", h.Workspace)
 	g.GET("/saved-queries", h.SavedQueries)
@@ -73,6 +89,7 @@ func (h *OperationsHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g.GET("/inspection-runs/:id/report/:format", h.Report)
 	g.DELETE("/inspection-runs/:id", h.DeleteRun)
 	g.GET("/inspection-plans", h.Plans)
+	g.PATCH("/inspection-plans/:id/enabled", h.SetPlanEnabled)
 	g.POST("/inspection-plans", h.SavePlan)
 	g.PUT("/inspection-plans/:id", h.SavePlan)
 	g.DELETE("/inspection-plans/:id", h.DeletePlan)
@@ -91,6 +108,10 @@ func opsPage(c *gin.Context) (int, int) {
 	return page, size
 }
 func (h *OperationsHandler) Databases(c *gin.Context) {
+	if _, err := h.svc.SyncEnvironmentDatabase(c.Request.Context(), false, ""); err != nil {
+		opsFail(c, err)
+		return
+	}
 	var rows []model.OperationsDatabase
 	if err := repository.DB.Order("id").Find(&rows).Error; err != nil {
 		opsFail(c, err)
@@ -103,6 +124,8 @@ type databaseReq struct {
 	Name, Host, Database, Username, Password, SSLMode string
 	Port                                              int
 	ServerID                                          uint
+	BackupServerID                                    uint
+	BackupDirectory, ArchiveDirectory                 string
 	LogEnabled                                        bool
 	LogDirectory, LogFormat, LogTimezone, LogPrefix   string
 	SlowThresholdMs, LookbackHours                    int
@@ -151,7 +174,7 @@ func (h *OperationsHandler) SaveDatabase(c *gin.Context) {
 		opsFail(c, fmt.Errorf("SSL 模式无效"))
 		return
 	}
-	if req.SlowThresholdMs < 1 || req.SlowThresholdMs > 3600000 || req.LookbackHours < 1 || req.LookbackHours > 720 {
+	if req.SlowThresholdMs < 1 || req.SlowThresholdMs > 3600000 || req.LookbackHours < 1 || req.LookbackHours > 48 {
 		opsFail(c, fmt.Errorf("慢 SQL 阈值或首次导入范围超出限制"))
 		return
 	}
@@ -167,6 +190,12 @@ func (h *OperationsHandler) SaveDatabase(c *gin.Context) {
 		opsFail(c, fmt.Errorf("启用日志接入需要关联主机和绝对日志目录"))
 		return
 	}
+	for _, v := range []string{req.BackupDirectory, req.ArchiveDirectory} {
+		if v != "" && (!path.IsAbs(v) || strings.ContainsAny(v, "\x00\r\n")) {
+			opsFail(c, fmt.Errorf("备份和归档目录须为绝对路径"))
+			return
+		}
+	}
 	var row model.OperationsDatabase
 	id := opsID(c)
 	err := repository.DB.Transaction(func(tx *gorm.DB) error {
@@ -178,12 +207,18 @@ func (h *OperationsHandler) SaveDatabase(c *gin.Context) {
 				return fmt.Errorf("配置已被修改，请刷新后重试")
 			}
 		}
-		if req.ServerID > 0 {
+		for _, hostID := range []uint{req.ServerID, req.BackupServerID} {
+			if hostID == 0 {
+				continue
+			}
 			var count int64
-			tx.Model(&model.Server{}).Where("id=?", req.ServerID).Count(&count)
+			tx.Model(&model.Server{}).Where("id=?", hostID).Count(&count)
 			if count == 0 {
 				return fmt.Errorf("关联主机不存在")
 			}
+		}
+		if row.Source == "environment" && (req.Host != row.Host || req.Port != row.Port || req.Database != row.Database || req.Username != row.Username || req.Password != "") {
+			return fmt.Errorf("此连接引用环境配置，请在环境配置中修改地址、账号或密码")
 		}
 		if req.Password != "" {
 			encrypted, err := crypto.Encrypt(req.Password)
@@ -192,11 +227,12 @@ func (h *OperationsHandler) SaveDatabase(c *gin.Context) {
 			}
 			row.PasswordEncrypted = encrypted
 		}
-		if row.PasswordEncrypted == "" {
+		if row.PasswordEncrypted == "" && row.Source != "environment" {
 			return fmt.Errorf("请填写数据库密码")
 		}
 		row.Name, row.Host, row.Port, row.Database, row.Username, row.SSLMode = req.Name, req.Host, req.Port, req.Database, req.Username, req.SSLMode
 		row.ServerID = req.ServerID
+		row.BackupServerID, row.BackupDirectory, row.ArchiveDirectory = req.BackupServerID, req.BackupDirectory, req.ArchiveDirectory
 		row.LogEnabled = req.LogEnabled
 		row.LogDirectory = req.LogDirectory
 		row.LogFormat = req.LogFormat
@@ -275,7 +311,7 @@ func (h *OperationsHandler) Events(c *gin.Context) {
 }
 func (h *OperationsHandler) Event(c *gin.Context) {
 	var row model.DatabaseLogEvent
-	if err := repository.DB.Where("id=? AND database_id=?", c.Param("eventId"), opsID(c)).First(&row).Error; err != nil {
+	if err := repository.DB.Where("id=? AND database_id=? AND event_time>=? AND created_at>=?", c.Param("eventId"), opsID(c), time.Now().Add(-48*time.Hour), time.Now().Add(-48*time.Hour)).First(&row).Error; err != nil {
 		opsFail(c, err)
 		return
 	}

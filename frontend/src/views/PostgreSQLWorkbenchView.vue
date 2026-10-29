@@ -679,7 +679,7 @@ async function importConnection() {
   const row = await importOpsDatabase();
   await loadConnections();
   selectConnection(row);
-  ElMessage.success("已登记当前发布连接，日志接入默认关闭");
+  ElMessage.success("已导入环境配置中的 PostgreSQL 连接，日志接入默认关闭");
 }
 let stopResize: (() => void) | undefined;
 function resize(event: PointerEvent) {
@@ -767,7 +767,7 @@ onBeforeUnmount(() => {
     <aside v-if="navigationOpen" class="object-navigator">
       <div class="navigator-heading">
         <strong>数据库连接</strong
-        ><el-tooltip content="导入已配置的发布连接"
+        ><el-tooltip content="导入环境配置中的 PostgreSQL 连接"
           ><el-button
             text
             size="small"

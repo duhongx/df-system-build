@@ -42,6 +42,9 @@ var inspectionHTML = template.Must(template.New("report").Funcs(template.FuncMap
 	"status":     inspectionStatusLabel,
 	"sections":   inspection.Sections,
 	"components": inspection.Components,
+	"resources":  inspection.ResourceTables,
+	"isSummary":  func(s string) bool { return strings.HasPrefix(s, "summary-") },
+	"attention":  inspection.Attention,
 	"time": func(t time.Time) string {
 		if t.IsZero() {
 			return "未记录"
@@ -370,11 +373,16 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 		for i := range widths {
 			widths[i] = (width - 76) / float64(n)
 		}
+		if n == 3 && t.Title == "关键检查结果" {
+			widths[0] = (width - 76) * 0.25
+			widths[1] = (width - 76) * 0.20
+			widths[2] = (width - 76) * 0.55
+		}
 		if n == 2 {
 			widths[0] = (width - 76) * 0.28
 			widths[1] = (width - 76) * 0.72
 		}
-		if n >= 5 && (t.Columns[0] == "设备 / 挂载点" || t.Columns[0] == "主机") {
+		if n >= 5 && (t.Columns[0] == "设备 / 挂载点") {
 			widths[0] = (width - 76) * 0.30
 			for i := 1; i < n; i++ {
 				widths[i] = (width - 76) * 0.70 / float64(n-1)
@@ -533,7 +541,7 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 		{fmt.Sprintf("任务 #%d / 发起人 %s / 报告版本 %s", doc.RunID, doc.Operator, doc.Version), 10},
 		{"采集时间：" + reportTime(doc.StartedAt) + " 至 " + reportTime(doc.FinishedAt), 9},
 		{"结果冻结时间：" + reportTime(doc.GeneratedAt), 9}, {"整体结论", 15}, {doc.Conclusion, 11},
-		{fmt.Sprintf("本次执行 %d 项 / 指导书共 39 项 / 未纳入本次 %d 项", doc.Summary.Planned, doc.Summary.NotRun), 10},
+		{fmt.Sprintf("本次执行 %d 项 / 本次范围以执行对象与检查内容为准", doc.Summary.Planned), 10},
 
 		{"正文列出关键检查结果；原始命令与输出保存在任务检查详情。“已记录”表示执行成功，不表示自动判定业务正常。", 9},
 	} {
@@ -543,6 +551,11 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 	}
 	if err := table(inspection.Components(doc)); err != nil {
 		return nil, err
+	}
+	if doc.Mode == "configured" {
+		if err := table(inspection.Attention(doc)); err != nil {
+			return nil, err
+		}
 	}
 	if err := write("执行对象", 15); err != nil {
 		return nil, err
@@ -570,25 +583,43 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 			return nil, err
 		}
 		if section.ID == "resources" {
-			for _, o := range doc.Objects {
-				if len(o.Tables) == 0 {
-					continue
-				}
-				if y+150 > bottom {
-					newPage()
-				}
-				if err := write(o.Name, 12); err != nil {
-					return nil, err
-				}
-				for _, t := range o.Tables {
+			if doc.Mode == "configured" {
+				for _, t := range inspection.ResourceTables(doc) {
 					if err := table(t); err != nil {
 						return nil, err
+					}
+				}
+			} else {
+				for _, o := range doc.Objects {
+					if len(o.Tables) == 0 {
+						continue
+					}
+					if y+150 > bottom {
+						newPage()
+					}
+					if err := write(o.Name, 12); err != nil {
+						return nil, err
+					}
+					for _, t := range o.Tables {
+						if err := table(t); err != nil {
+							return nil, err
+						}
 					}
 				}
 			}
 		}
 		var absent []string
 		for _, item := range section.Items {
+			if strings.HasPrefix(item.Code, "summary-") {
+				for _, e := range item.Evidence {
+					for _, t := range e.Tables {
+						if err := table(t); err != nil {
+							return nil, err
+						}
+					}
+				}
+				continue
+			}
 			hasContent := false
 			for _, e := range item.Evidence {
 				if len(e.Tables) > 0 || e.Value != "" {
@@ -603,7 +634,11 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 			if y+95 > bottom {
 				newPage()
 			}
-			if err := write(item.Name+" ["+inspectionStatusLabel(item.Status)+"] / "+item.Code, 11); err != nil {
+			heading := item.Name + " [" + inspectionStatusLabel(item.Status) + "]"
+			if doc.Mode != "configured" {
+				heading += " / " + item.Code
+			}
+			if err := write(heading, 11); err != nil {
 				return nil, err
 			}
 			for _, e := range item.Evidence {
@@ -679,31 +714,33 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 			}
 		}
 	}
-	if err := write("附录 39 项检查结论", 15); err != nil {
-		return nil, err
-	}
-	catalogue := inspection.Table{Columns: []string{"编号", "检查项目", "结论", "证据状态"}, Rows: [][]string{}}
-	for _, item := range doc.Items {
-		detail := "已取得"
-		if !item.Complete {
-			detail = fmt.Sprintf("缺口 %d 处", item.Missing)
-		}
-		if item.Status == "NOT_RUN" {
-			detail = "本次未执行"
-		}
-		if item.Status == "NOT_APPLICABLE" {
-			detail = "已记录不适用原因"
-		}
-		catalogue.Rows = append(catalogue.Rows, []string{item.Code, item.Name, inspectionStatusLabel(item.Status), detail})
-	}
-	for start := 0; start < len(catalogue.Rows); start += 10 {
-		batch := catalogue
-		batch.Rows = catalogue.Rows[start:min(start+10, len(catalogue.Rows))]
-		if err := table(batch); err != nil {
+	if doc.Mode != "configured" {
+		if err := write("附录 39 项检查结论", 15); err != nil {
 			return nil, err
 		}
-	}
+		catalogue := inspection.Table{Columns: []string{"编号", "检查项目", "结论", "证据状态"}, Rows: [][]string{}}
+		for _, item := range doc.Items {
+			detail := "已取得"
+			if !item.Complete {
+				detail = fmt.Sprintf("缺口 %d 处", item.Missing)
+			}
+			if item.Status == "NOT_RUN" {
+				detail = "本次未执行"
+			}
+			if item.Status == "NOT_APPLICABLE" {
+				detail = "已记录不适用原因"
+			}
+			catalogue.Rows = append(catalogue.Rows, []string{item.Code, item.Name, inspectionStatusLabel(item.Status), detail})
+		}
+		for start := 0; start < len(catalogue.Rows); start += 10 {
+			batch := catalogue
+			batch.Rows = catalogue.Rows[start:min(start+10, len(catalogue.Rows))]
+			if err := table(batch); err != nil {
+				return nil, err
+			}
+		}
 
+	}
 	if err := write("报告范围与限制", 15); err != nil {
 		return nil, err
 	}

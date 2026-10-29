@@ -421,3 +421,23 @@ func humanSize(s string) (float64, bool) {
 	}
 	return v * math.Pow(1024, float64(power)), true
 }
+
+// InspectMinIOText interprets exactly the same mc output as host inspection.
+func InspectMinIOText(text string) inspection.Observation {
+	o := inspection.Observation{Code: "cloudhis-38", Name: "MinIO 集群运行", Status: "RECORDED", CollectedAt: time.Now(), Executions: []inspection.Execution{{Stdout: text}}}
+	interpretManual(&o)
+	for _, table := range o.Tables {
+		for _, row := range table.Rows {
+			if len(row) > 1 && (row[0] == "容量与对象" || row[0] == "Version") {
+				o.Value += "；" + row[1]
+			}
+		}
+	}
+	return o
+}
+
+func InspectMinIOArchitectureText(text string) inspection.Observation {
+	o := inspection.Observation{Code: "cloudhis-3", Name: "MinIO 部署情况", Status: "RECORDED", CollectedAt: time.Now(), Executions: []inspection.Execution{{Stdout: text}}}
+	interpretManual(&o)
+	return o
+}

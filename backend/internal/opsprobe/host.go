@@ -273,18 +273,32 @@ func inspectionFilesystem(device, fs string) bool {
 func unescapeMount(s string) string {
 	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\134`, `\`).Replace(s)
 }
+func ReportableMountpoint(mount string) bool {
+	for _, base := range []string{"/var/lib/kubelet", "/var/lib/docker", "/var/lib/containerd", "/run/containerd", "/run/docker", "/run/k3s"} {
+		if mount == base || strings.HasPrefix(mount, base+"/") {
+			return false
+		}
+	}
+	return true
+}
+
 func HostChecks(m *HostMetrics) []Check {
 	checks := []Check{{Code: "host_identity", Name: "系统信息", Status: "NORMAL", Value: m.OS + " / " + m.Kernel, Evidence: m.Hostname}, {Code: "host_cpu", Name: "CPU 本次采样", Status: level(m.CPUUsagePercent, 80, 95), Value: fmt.Sprintf("%.1f%%，I/O 等待 %.1f%%", m.CPUUsagePercent, m.CPUWaitPercent), Evidence: "两次 /proc/stat 计数差值；采样间隔约 1 秒", Advice: "持续偏高时结合进程和历史趋势排查"}, {Code: "host_memory", Name: "可用内存", Status: level(m.MemUsagePercent, 85, 95), Value: fmt.Sprintf("使用 %.1f%%，可用 %.2f GiB", m.MemUsagePercent, float64(m.MemAvailableBytes)/(1<<30)), Advice: "核对进程内存与 Swap 使用"}}
 	if m.Source == "node_exporter" {
 		checks[1].Evidence = "两次 node_exporter HTTP 计数差值；采样间隔约 1 秒"
 	}
+	count := 0
 	for _, d := range m.Disks {
+		if !ReportableMountpoint(d.Mountpoint) {
+			continue
+		}
+		count++
 		checks = append(checks, Check{Code: "disk:" + d.Mountpoint, Name: "磁盘 " + d.Mountpoint, Status: level(d.UsedPercent, 80, 90), Value: fmt.Sprintf("使用 %.1f%%，可用 %.2f GiB", d.UsedPercent, float64(d.AvailableBytes)/(1<<30)), Evidence: d.Device, Advice: "核对增长来源并按运维流程清理或扩容"})
 		if d.Inodes > 0 {
 			checks = append(checks, Check{Code: "inode:" + d.Mountpoint, Name: "inode " + d.Mountpoint, Status: level(d.InodeUsedPercent, 80, 90), Value: fmt.Sprintf("使用 %.1f%%", d.InodeUsedPercent)})
 		}
 	}
-	if len(m.Disks) == 0 {
+	if count == 0 {
 		checks = append(checks, Check{Code: "host_disks", Name: "磁盘信息", Status: "UNKNOWN", Error: "未取得可用的磁盘挂载点"})
 	}
 	for _, w := range m.Warnings {

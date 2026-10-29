@@ -115,11 +115,22 @@ func CollectDeploymentAwareManual(ctx context.Context, m ManualOptions, c *Datab
 	if c != nil {
 		return CollectManual(ctx, m, c, execute)
 	}
+	var discovered []inspection.Observation
+	if m.Auto {
+		m, discovered = discoverInspection(ctx, m, bindings, execute)
+	}
 	if err := m.Validate("host"); err != nil {
 		return nil, err
 	}
 	processes, processErr := localInspectionProcesses(ctx)
 	overrides := map[string][]inspection.Observation{}
+	if m.Auto {
+		for _, o := range discovered {
+			if o.Code == "cloudhis-11" || o.Code == "cloudhis-12" {
+				overrides[o.Code] = []inspection.Observation{o}
+			}
+		}
+	}
 	patroni := m.PatroniConfig != ""
 	for _, name := range []string{"/etc/patroni.yml", "/etc/patroni.yaml", "/etc/patroni/patroni.yml", "/etc/patroni/config.yml"} {
 		if st, err := os.Stat(name); err == nil && !st.IsDir() {
@@ -142,6 +153,9 @@ func CollectDeploymentAwareManual(ctx context.Context, m ManualOptions, c *Datab
 			facts, record, err := inspectNativePostgreSQL(ctx, binding)
 			observations := nativePostgreSQLObservations(binding.Name, facts, record, err)
 			for code, observation := range observations {
+				if m.Auto && code == "cloudhis-19" {
+					observation = nativeArchiveFiles(ctx, m, facts, err)
+				}
 				overrides[code] = append(overrides[code], observation)
 			}
 		}
@@ -150,6 +164,15 @@ func CollectDeploymentAwareManual(ctx context.Context, m ManualOptions, c *Datab
 		if observation, found := inspectLocalNacos(processes, m.NacosLogDirectory); found {
 			overrides["cloudhis-13"] = []inspection.Observation{observation}
 		}
+	}
+	if m.PostgresBackupDirectory != "" && wantsCode(m, "cloudhis-4") {
+		o := inspectFileInventory(ctx, m.PostgresBackupDirectory, "cloudhis-4", "PostgreSQL 备份文件", 0)
+		tasks, complete := inspectCronTasks("backup")
+		o.Tables = append(o.Tables, inspection.Table{Title: "本机备份计划", Columns: []string{"配置文件", "执行时间"}, Rows: tasks})
+		if complete && len(tasks) == 0 {
+			o.Reason = "未在本机常规 cron 中发现备份任务，不据此否定外部调度"
+		}
+		overrides["cloudhis-4"] = []inspection.Observation{o}
 	}
 	if m.PostgresBackupDirectory == "" && wantsCode(m, "cloudhis-4") {
 		overrides["cloudhis-4"] = []inspection.Observation{inspectBackupConfiguration(ctx, execute)}
@@ -168,7 +191,20 @@ func CollectDeploymentAwareManual(ctx context.Context, m ManualOptions, c *Datab
 		o.Tables = []inspection.Table{{Title: "逐日采样任务", Columns: []string{"配置位置", "调度时间"}, Rows: tasks}}
 		overrides["cloudhis-39"] = []inspection.Observation{o}
 	}
-	return collectManual(ctx, m, nil, execute, overrides)
+	checks, err := collectManual(ctx, m, nil, execute, overrides)
+	for _, o := range discovered {
+		if !wantsCode(m, o.Code) {
+			checks = append(checks, o)
+		}
+	}
+	if m.Auto {
+		reason := ""
+		if ctx.Err() != nil {
+			reason = "检查未完整结束：" + ctx.Err().Error()
+		}
+		checks = inspection.EnsureResults(m.Codes(), checks, reason)
+	}
+	return checks, err
 }
 
 func wantsCode(m ManualOptions, codes ...string) bool {
@@ -190,6 +226,7 @@ type nativePostgreSQLFacts struct {
 	PhysicalPeers     int        `json:"physicalPeers"`
 	LogicalPeers      int        `json:"logicalPeers"`
 	PhysicalSlots     int        `json:"physicalSlots"`
+	ArchiveCommand    string     `json:"archiveCommand"`
 	ArchiveMode       string     `json:"archiveMode"`
 	ArchiveConfigured bool       `json:"archiveConfigured"`
 	Archived          int64      `json:"archived"`
@@ -204,7 +241,7 @@ const nativePostgreSQLSQL = `SELECT current_setting('server_version'),pg_is_in_r
  (SELECT count(*) FROM pg_stat_replication r JOIN pg_replication_slots s ON s.active_pid=r.pid WHERE s.slot_type='logical'),
  (SELECT count(*) FROM pg_replication_slots WHERE slot_type='physical'),
  current_setting('archive_mode'),length(trim(current_setting('archive_command')))>0,
- archived_count,failed_count,last_archived_time,last_failed_time FROM pg_stat_archiver`
+ archived_count,failed_count,last_archived_time,last_failed_time,current_setting('archive_command') FROM pg_stat_archiver`
 
 func inspectNativePostgreSQL(parent context.Context, binding InspectionDatabaseBinding) (nativePostgreSQLFacts, inspection.Execution, error) {
 	f := nativePostgreSQLFacts{}
@@ -223,7 +260,7 @@ func inspectNativePostgreSQL(parent context.Context, binding InspectionDatabaseB
 		if openErr != nil {
 			err = openErr
 		} else {
-			err = conn.QueryRow(ctx, nativePostgreSQLSQL).Scan(&f.Version, &f.Recovery, &f.StatsVisible, &f.PhysicalPeers, &f.LogicalPeers, &f.PhysicalSlots, &f.ArchiveMode, &f.ArchiveConfigured, &f.Archived, &f.Failed, &f.LastArchived, &f.LastFailed)
+			err = conn.QueryRow(ctx, nativePostgreSQLSQL).Scan(&f.Version, &f.Recovery, &f.StatsVisible, &f.PhysicalPeers, &f.LogicalPeers, &f.PhysicalSlots, &f.ArchiveMode, &f.ArchiveConfigured, &f.Archived, &f.Failed, &f.LastArchived, &f.LastFailed, &f.ArchiveCommand)
 			conn.Close(context.WithoutCancel(ctx))
 		}
 		if err != nil {

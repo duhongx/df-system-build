@@ -34,7 +34,7 @@ import (
 func operationsTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := testutil.OpenGormPostgres(t)
-	if err := db.AutoMigrate(&model.Server{}, &model.HostMonitorConfig{}, &model.HostMetricSample{}, &model.OperationsDatabase{}, &model.DatabaseQueryRecord{}, &model.DatabaseWorkspace{}, &model.DatabaseSavedQuery{}, &model.DatabaseLogCursor{}, &model.DatabaseLogEvent{}, &model.InspectionPlan{}, &model.InspectionRun{}, &model.InspectionTargetRun{}); err != nil {
+	if err := db.AutoMigrate(&model.Server{}, &model.HostMonitorConfig{}, &model.HostMetricSample{}, &model.OperationsDatabase{}, &model.DatabaseQueryRecord{}, &model.DatabaseWorkspace{}, &model.DatabaseSavedQuery{}, &model.DatabaseLogCursor{}, &model.DatabaseLogEvent{}, &model.InspectionPlan{}, &model.InspectionRun{}, &model.InspectionTargetRun{}, &model.ComponentConnection{}, &model.CollectionSample{}, &model.ManagedService{}, &model.ServiceOperation{}, &model.Settings{}, &model.User{}); err != nil {
 		t.Fatal(err)
 	}
 	return db

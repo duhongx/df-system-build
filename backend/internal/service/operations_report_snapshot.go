@@ -33,6 +33,7 @@ func (r inspectionReport) Document() *inspection.Report {
 		return r.Snapshot
 	}
 	doc := inspection.Report{RunID: r.Run.ID, Name: r.Run.Name, Operator: r.Run.Operator, GeneratedAt: time.Now(), Objects: []inspection.Object{}}
+	doc.Mode = r.Run.CollectionMode
 
 	if r.Run.StartedAt != nil {
 		doc.StartedAt = *r.Run.StartedAt
@@ -85,7 +86,13 @@ func (r inspectionReport) Document() *inspection.Report {
 				}
 			}
 			for _, code := range resourceCodes {
-				obs := inspection.Observation{Code: code, Status: "NORMAL", Value: fmt.Sprintf("CPU %.1f%%，内存 %.1f%%，%d 个实际文件系统；资源明细在本机汇总中列出", m.CPUUsagePercent, m.MemUsagePercent, len(m.Disks)), Source: m.SourceURL, CollectedAt: m.CollectedAt, Threshold: "CPU 80%/95%、内存 85%/95%、磁盘空间 80%/90% 分别提醒/严重；本次快照。", Advice: "结合业务负载和持续时间核对，本次为资源快照。"}
+				count := 0
+				for _, disk := range m.Disks {
+					if opsprobe.ReportableMountpoint(disk.Mountpoint) {
+						count++
+					}
+				}
+				obs := inspection.Observation{Code: code, Status: "NORMAL", Value: fmt.Sprintf("CPU %.1f%%，内存 %.1f%%，%d 个实际文件系统；资源明细在本机汇总中列出", m.CPUUsagePercent, m.MemUsagePercent, count), Source: m.SourceURL, CollectedAt: m.CollectedAt, Threshold: "CPU 80%/95%、内存 85%/95%、磁盘空间 80%/90% 分别提醒/严重；本次快照。", Advice: "结合业务负载和持续时间核对，本次为资源快照。"}
 				if obs.Source == "" {
 					obs.Source = "原远端执行器 /proc 与文件系统快照"
 				}
@@ -102,7 +109,7 @@ func (r inspectionReport) Document() *inspection.Report {
 						obs.Status = "WARNING"
 					}
 				}
-				if m.MemTotalBytes == 0 || m.CPUCores == 0 || len(m.Disks) == 0 {
+				if m.MemTotalBytes == 0 || m.CPUCores == 0 || count == 0 {
 					obs.Gaps = append(obs.Gaps, "CPU、内存或文件系统必需数据不完整。")
 				}
 				if len(m.Warnings) > 0 {
@@ -136,10 +143,43 @@ func (r inspectionReport) Document() *inspection.Report {
 		if t.Result.FinishedAt.After(doc.FinishedAt) {
 			doc.FinishedAt = t.Result.FinishedAt
 		}
+		if doc.Mode == "configured" {
+			if t.Result.Type != "" {
+				o.Type = t.Result.Type
+			}
+			var expected []string
+			_ = json.Unmarshal([]byte(t.Target.ExpectedJSON), &expected)
+			result := t.Result
+			if len(expected) > 0 {
+				result.ExpectedChecks = expected
+			}
+			configuredObject(&o, result)
+			o.Supplement = nil
+			if len(o.Tables) > 2 {
+				o.Tables = o.Tables[:2]
+			}
+		}
 		doc.Objects = append(doc.Objects, o)
 	}
 	if doc.FinishedAt.IsZero() {
 		doc.FinishedAt = doc.GeneratedAt
+	}
+	if doc.Mode == "configured" {
+		seen := map[uint]bool{}
+		for _, t := range r.Targets {
+			if t.Target.Type == "host" {
+				seen[t.Target.ServerID] = true
+			}
+		}
+		for _, t := range r.Targets {
+			for _, h := range t.Result.RelatedHosts {
+				if seen[h.ServerID] || h.Result == nil || h.Result.Metrics == nil {
+					continue
+				}
+				seen[h.ServerID] = true
+				doc.Objects = append(doc.Objects, inspection.Object{ID: 1000000000 + h.ServerID, Name: h.Name, Type: "host", Endpoint: h.Endpoint, ExecutorEndpoint: h.Endpoint, Status: "COMPLETED", Message: "组件关联主机资源", Tables: hostReportTables(h.Result.Metrics)})
+			}
+		}
 	}
 	for i := range doc.Objects {
 		for j := range doc.Objects[i].Observations {
@@ -196,6 +236,9 @@ func hostReportTables(m *opsprobe.HostMetrics) []inspection.Table {
 	}
 	disks := inspection.Table{Title: "文件系统容量与 inode", Columns: []string{"设备 / 挂载点", "总量 GiB", "可用 GiB", "使用率", "inode 使用"}, Rows: [][]string{}}
 	for _, d := range m.Disks {
+		if !opsprobe.ReportableMountpoint(d.Mountpoint) {
+			continue
+		}
 		inode := "未提供"
 		if d.Inodes > 0 {
 			inode = fmt.Sprintf("%.1f%%", d.InodeUsedPercent)

@@ -125,6 +125,12 @@ async function remove() {
       class="connection-form"
       @submit.prevent="save"
     >
+      <el-alert
+        v-if="draft.source === 'environment'"
+        title="此连接引用环境配置。地址、账号和密码请在环境配置维护；主机及巡检目录可在这里补充。"
+        type="info"
+        :closable="false"
+      />
       <el-form-item label="连接名称" required
         ><el-input
           v-model="draft.name"
@@ -134,14 +140,21 @@ async function remove() {
         <el-form-item label="数据库地址" required
           ><el-input
             v-model="draft.host"
+            :disabled="draft.source === 'environment'"
             placeholder="IP 或域名" /></el-form-item
         ><el-form-item label="端口"
-          ><el-input-number v-model="draft.port" :min="1" :max="65535"
+          ><el-input-number
+            v-model="draft.port"
+            :disabled="draft.source === 'environment'"
+            :min="1"
+            :max="65535"
         /></el-form-item>
       </div>
       <div class="form-columns">
         <el-form-item label="数据库" required
-          ><el-input v-model="draft.database" /></el-form-item
+          ><el-input
+            v-model="draft.database"
+            :disabled="draft.source === 'environment'" /></el-form-item
         ><el-form-item label="SSL 模式"
           ><el-select v-model="draft.sslMode"
             ><el-option
@@ -155,10 +168,12 @@ async function remove() {
         <el-form-item label="账号" required
           ><el-input
             v-model="draft.username"
+            :disabled="draft.source === 'environment'"
             autocomplete="off" /></el-form-item
         ><el-form-item label="密码"
           ><el-input
             v-model="draft.password"
+            :disabled="draft.source === 'environment'"
             type="password"
             show-password
             autocomplete="new-password"
@@ -169,6 +184,33 @@ async function remove() {
         每个连接对应一个明确的数据库。SQL 查询、对象浏览与诊断均使用此连接；SQL
         变更发布使用发布任务自己的目标配置。
       </p>
+      <el-collapse v-model="advanced"
+        ><el-collapse-item
+          name="inspection"
+          title="巡检主机与目录（可自动定位时留空）"
+          ><el-form-item label="实例所在主机"
+            ><el-select v-model="draft.serverId" clearable
+              ><el-option
+                v-for="h in servers"
+                :key="h.id"
+                :value="h.id"
+                :label="`${h.remark || h.host} · ${h.host}`" /></el-select></el-form-item
+          ><el-form-item label="备份所在主机"
+            ><el-select v-model="draft.backupServerId" clearable
+              ><el-option
+                v-for="h in servers"
+                :key="h.id"
+                :value="h.id"
+                :label="`${h.remark || h.host} · ${h.host}`" /></el-select></el-form-item
+          ><el-form-item label="已有备份目录"
+            ><el-input
+              v-model="draft.backupDirectory"
+              placeholder="可选，填写备份主机上的绝对目录" /></el-form-item
+          ><el-form-item label="本机归档目录"
+            ><el-input
+              v-model="draft.archiveDirectory"
+              placeholder="优先从实际 archive_command 定位；特殊脚本可在此补充" /></el-form-item></el-collapse-item
+      ></el-collapse>
       <el-collapse v-model="advanced"
         ><el-collapse-item name="logs" title="慢 SQL 与锁事件的日志接入">
           <div class="log-heading">
@@ -213,7 +255,7 @@ async function remove() {
               ><el-input-number
                 v-model="draft.lookbackHours"
                 :min="1"
-                :max="720"
+                :max="48"
             /></el-form-item>
           </div>
           <el-form-item
@@ -223,7 +265,7 @@ async function remove() {
           /></el-form-item>
           <p class="connection-hint">
             沿用数据库已有日志配置，平台不修改 PostgreSQL 参数。日志约每 30
-            秒同步、保留 30 天；修改首次回溯不会重置已有读取位置。
+            秒同步、保留 48 小时；修改首次回溯不会重置已有读取位置。
           </p>
           <el-alert
             v-if="capability"

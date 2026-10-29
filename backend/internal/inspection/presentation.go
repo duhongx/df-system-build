@@ -83,6 +83,9 @@ func presentationTable(t Table, code string) Table {
 		sort.SliceStable(rows, func(i, j int) bool { return rank(rows[i]) > rank(rows[j]) })
 	}
 	limit := 10
+	if code == "cloudhis-14" {
+		limit = 5
+	}
 	if len(rows) < limit {
 		limit = len(rows)
 	}
@@ -92,6 +95,10 @@ func presentationTable(t Table, code string) Table {
 			value := ""
 			if i < len(row) {
 				value = row[i]
+			}
+			if code == "cloudhis-14" && i < len(t.Columns) && strings.Contains(t.Columns[i], "镜像仓库") {
+				parts := strings.Split(value, "/")
+				value = parts[len(parts)-1]
 			}
 			values = append(values, presentationText(value, 180))
 		}
@@ -116,6 +123,9 @@ func presentationObservation(o Observation, code string) Observation {
 	out.Evidence = ""
 	out.Value = presentationText(o.Value, 400)
 	out.Reason = presentationText(o.Reason, 600)
+	if code == "cloudhis-14" && o.Status == "WARNING" {
+		out.Reason = "镜像留存数量超过指导书建议，需结合回滚需要与磁盘占用核对。"
+	}
 	out.Advice = presentationText(o.Advice, 400)
 	for _, e := range o.Executions {
 		if e.ExitCode != 0 || e.Error != "" || e.Truncated {
@@ -158,7 +168,23 @@ func Presentation(source *Report) *Report {
 		out.Items[i].Reason = presentationText(item.Reason, 600)
 		out.Items[i].Evidence = append([]Evidence{}, item.Evidence...)
 		for j, e := range item.Evidence {
+			if source.Mode == "configured" && (e.Status == "NORMAL" || e.Status == "RECORDED") {
+				e.Value = keyResult(e.Observation)
+			}
 			out.Items[i].Evidence[j].Observation = presentationObservation(e.Observation, item.Code)
+			if source.Mode == "configured" && (item.Code == "cloudhis-3" || item.Code == "cloudhis-38") {
+				for k, t := range out.Items[i].Evidence[j].Tables {
+					var rows [][]string
+					for _, row := range t.Rows {
+						if len(row) > 0 && (row[0] == "节点" || row[0] == "Version" || row[0] == "Drives" || row[0] == "容量与对象") {
+							rows = append(rows, row)
+						}
+					}
+					if t.Title == "mc admin info" {
+						out.Items[i].Evidence[j].Tables[k].Rows = rows
+					}
+				}
+			}
 			if isPodCheck(item.Code) && e.ID != "" {
 				podEvidence[e.ID] = out.Items[i].Evidence[j].Observation
 			}

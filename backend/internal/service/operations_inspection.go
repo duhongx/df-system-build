@@ -179,7 +179,7 @@ func (s *OperationsService) processInspection(parent context.Context, id uint) {
 	}()
 	defer s.db.Model(&model.InspectionRun{}).Where("id=? AND lease_owner=?", id, s.owner).Update("lease_until", time.Now())
 	var targets []model.InspectionTargetRun
-	if err := s.db.Where("run_id=?", id).Order("id").Find(&targets).Error; err != nil {
+	if err := s.db.Where("run_id=?", id).Order("CASE type WHEN 'component' THEN 0 WHEN 'database' THEN 1 ELSE 2 END,id").Find(&targets).Error; err != nil {
 		return
 	}
 	for i := range targets {
@@ -284,11 +284,23 @@ func (s *OperationsService) finishInspectionTarget(t *model.InspectionTargetRun,
 	now := time.Now()
 	updates := map[string]any{"status": status, "message": message, "stage": "检查结束", "finished_at": now, "heartbeat_at": now}
 	if result != nil {
+		if t.Type == "host" {
+			_ = s.rememberCollection("host", t.TargetID, t.ConfigRevision, result)
+		}
 		updates["result_json"] = mustJSON(result)
 	}
 	s.db.Model(t).Updates(updates)
 }
 func (s *OperationsService) executeInspectionTarget(parent context.Context, t *model.InspectionTargetRun) {
+	var run model.InspectionRun
+	if err := s.db.Select("id,collection_mode").First(&run, t.RunID).Error; err != nil {
+		s.finishInspectionTarget(t, "FAILED", "读取巡检任务失败", nil)
+		return
+	}
+	if run.CollectionMode == "configured" && t.Type != "host" {
+		s.executeConfiguredTarget(parent, t)
+		return
+	}
 	timeout := 180 * time.Second
 	if t.ManualJSON != "" {
 		timeout = 360 * time.Second
@@ -326,6 +338,9 @@ func (s *OperationsService) executeInspectionTarget(parent context.Context, t *m
 				return
 			}
 			cfg.Manual = &manual
+			if manual.Auto && run.CollectionMode == "configured" {
+				s.applyCollectedHostCoverage(t.RunID, t.ServerID, &manual)
+			}
 			cfg.TimeoutSeconds = 300
 		}
 		_ = json.Unmarshal([]byte(t.ServicesJSON), &cfg.Services)

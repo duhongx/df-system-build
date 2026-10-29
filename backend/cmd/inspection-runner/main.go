@@ -192,6 +192,9 @@ func run(mode, dir string) error {
 		result.Error = "检查已取消或达到超时限制: " + ctx.Err().Error()
 	}
 	result.FinishedAt = time.Now()
+	if cfg.Manual != nil && cfg.Manual.Auto {
+		opsprobe.FinalizeInspection(&result, cfg.Type)
+	}
 	close(stop)
 	<-finished
 	if err := writeJSON(resultPath, result); err != nil {

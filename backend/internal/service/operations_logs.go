@@ -191,7 +191,7 @@ func (s *OperationsService) syncDatabaseLogs(ctx context.Context, row model.Oper
 				}
 			}
 			for _, event := range batch.Events {
-				if row.LogStartAt != nil && event.Time.Before(*row.LogStartAt) {
+				if event.Time.Before(time.Now().Add(-48*time.Hour)) || (row.LogStartAt != nil && event.Time.Before(*row.LogStartAt)) {
 					continue
 				}
 				entry := model.DatabaseLogEvent{DatabaseID: row.ID, SourceKey: fmt.Sprintf("%d:%d:%d", cursor.ID, cursor.Generation, startOffset+event.Offset), Type: event.Type, EventTime: event.Time, DurationMs: event.DurationMs, Phase: event.Phase, DBName: event.DBName, Username: event.Username, PID: event.PID, Client: event.Client, Application: event.Application, SQLState: event.SQLState, SQL: event.SQL, Message: event.Message, Detail: event.Detail, Hint: event.Hint, Context: event.Context, Raw: event.Raw, SourcePath: name, SourceOffset: startOffset + event.Offset, Fingerprint: event.Fingerprint}
@@ -231,7 +231,7 @@ func (s *OperationsService) ListEvents(ctx context.Context, id uint, page, size 
 	if size < 1 || size > 100 {
 		size = 30
 	}
-	q := s.db.WithContext(ctx).Model(&model.DatabaseLogEvent{}).Where("database_id=?", id)
+	q := s.db.WithContext(ctx).Model(&model.DatabaseLogEvent{}).Where("database_id=? AND event_time>=? AND created_at>=?", id, time.Now().Add(-48*time.Hour), time.Now().Add(-48*time.Hour))
 	if filter.Type != "" {
 		q = q.Where("type=?", filter.Type)
 	}
