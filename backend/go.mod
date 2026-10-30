@@ -3,6 +3,7 @@ module df-build-server
 go 1.25.0
 
 require (
+	github.com/docker/distribution v2.8.2+incompatible
 	github.com/docker/docker v24.0.9+incompatible
 	github.com/gin-contrib/cors v1.7.7
 	github.com/gin-gonic/gin v1.12.0
@@ -10,10 +11,11 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.6.0
+	github.com/minio/minio-go/v7 v7.0.90
 	github.com/pganalyze/pg_query_go/v6 v6.2.2
-	github.com/prometheus/common v0.66.1
-	github.com/prometheus/client_model v0.6.2
 	github.com/pkg/sftp v1.13.7
+	github.com/prometheus/client_model v0.6.2
+	github.com/prometheus/common v0.66.1
 	github.com/signintech/gopdf v0.38.3
 	github.com/spf13/viper v1.21.0
 	go.uber.org/zap v1.28.0
@@ -21,6 +23,7 @@ require (
 	golang.org/x/image v0.24.0
 	golang.org/x/net v0.53.0
 	golang.org/x/sys v0.44.0
+	golang.org/x/text v0.37.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/postgres v1.6.0
@@ -47,7 +50,6 @@ require (
 	github.com/containerd/containerd v1.7.31 // indirect
 	github.com/cyphar/filepath-securejoin v0.5.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/docker/distribution v2.8.2+incompatible // indirect
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.10.1 // indirect
@@ -92,6 +94,7 @@ require (
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/moby/patternmatcher v0.6.1 // indirect
 	github.com/moby/spdystream v0.5.1 // indirect
 	github.com/moby/sys/sequential v0.6.0 // indirect
@@ -132,7 +135,6 @@ require (
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect

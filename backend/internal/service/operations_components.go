@@ -53,11 +53,19 @@ func validateComponent(req ComponentRequest) error {
 	switch req.Kind {
 	case "kubernetes":
 	case "minio":
-		if req.ServerID == 0 {
-			return fmt.Errorf("MinIO 请关联运行 mc 的已纳管主机")
+		if req.Endpoint == "" && req.ServerID == 0 {
+			return fmt.Errorf("请填写 MinIO API 地址，例如 http://192.168.199.102:9000")
 		}
-		if req.Options.Alias != "" && !regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`).MatchString(req.Options.Alias) {
+		if req.Endpoint == "" && req.Options.Alias != "" && !regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`).MatchString(req.Options.Alias) {
 			return fmt.Errorf("mc 别名不合法")
+		}
+		if req.Endpoint != "" {
+			if _, err := componentprobe.MinIOEndpoint(req.Endpoint); err != nil {
+				return err
+			}
+		}
+		if req.ServerID == 0 && (req.Options.DailyFile != "" || req.Options.BackupDirectory != "") {
+			return fmt.Errorf("读取 MinIO 主机上的每日记录或备份目录时才需关联主机；仅 API 监控请留空这些路径")
 		}
 	case "redis", "rabbitmq", "elasticsearch":
 	default:
@@ -85,6 +93,17 @@ func validateComponent(req ComponentRequest) error {
 }
 
 func (s *OperationsService) SaveComponent(ctx context.Context, req ComponentRequest) (*model.ComponentConnection, error) {
+	if req.Kind == "minio" {
+		req.Endpoint = strings.TrimSpace(req.Endpoint)
+		req.Username = strings.TrimSpace(req.Username)
+		if req.Endpoint != "" {
+			endpoint, err := componentprobe.MinIOEndpoint(req.Endpoint)
+			if err != nil {
+				return nil, err
+			}
+			req.Endpoint = endpoint
+		}
+	}
 	if err := validateComponent(req); err != nil {
 		return nil, err
 	}
@@ -102,6 +121,9 @@ func (s *OperationsService) SaveComponent(ctx context.Context, req ComponentRequ
 				return fmt.Errorf("不能修改已有组件的类型")
 			}
 			row.Revision++
+		}
+		if req.Kind == "minio" && req.Endpoint == "" && (row.ID == 0 || row.Endpoint != "") {
+			return fmt.Errorf("请填写 MinIO API 地址；新增连接不再依赖主机 mc 别名")
 		}
 		if req.ServerID > 0 {
 			var host model.Server
@@ -122,7 +144,7 @@ func (s *OperationsService) SaveComponent(ctx context.Context, req ComponentRequ
 			return fmt.Errorf("请填写此集群的 kubeconfig；环境集群直接复用环境配置")
 		}
 		if req.Kind == "minio" && req.Endpoint != "" && (row.SecretEncrypted == "" || req.Username == "") {
-			return fmt.Errorf("使用独立 MinIO 地址时请填写 Access Key 和 Secret Key；也可留空地址复用主机已有 mc 别名")
+			return fmt.Errorf("请填写 MinIO API 的 Access Key 和 Secret Key，无需关联主机或配置 mc 别名")
 		}
 		if req.Kind == "kubernetes" {
 			req.Endpoint = ""
@@ -282,6 +304,13 @@ func (s *OperationsService) collectMinIO(ctx context.Context, row model.Componen
 }
 
 func (s *OperationsService) collectMinIOPhase(ctx context.Context, row model.ComponentConnection, secret string, supplemental bool) []inspection.Observation {
+	if row.Endpoint != "" {
+		out := componentprobe.Collect(ctx, componentprobe.Config{Kind: "minio", Endpoint: row.Endpoint, Username: row.Username, Secret: secret})
+		if supplemental {
+			out = append(out, s.collectMinIOSupplements(ctx, row)...)
+		}
+		return out
+	}
 	fail := func(err error) []inspection.Observation {
 		return []inspection.Observation{componentprobe.Failed("cloudhis-38", "MinIO 集群运行", err)}
 	}
@@ -298,29 +327,7 @@ func (s *OperationsService) collectMinIOPhase(ctx context.Context, row model.Com
 	if alias == "" {
 		alias = "prod"
 	}
-	prefix := "mc "
-	if row.Endpoint != "" {
-		home, err := conn.SFTP.Getwd()
-		if err != nil {
-			return fail(err)
-		}
-		dir := path.Join(home, ".dfops", fmt.Sprintf("mc-inspection-%d", time.Now().UnixNano()))
-		if err := conn.SFTP.MkdirAll(dir); err != nil {
-			return fail(err)
-		}
-		if err := conn.SFTP.Chmod(dir, 0700); err != nil {
-			return fail(err)
-		}
-		defer conn.SFTP.RemoveDirectory(dir)
-		defer conn.SFTP.Remove(path.Join(dir, "config.json"))
-		alias = "inspection"
-		config := map[string]any{"version": "10", "aliases": map[string]any{alias: map[string]string{"url": row.Endpoint, "accessKey": row.Username, "secretKey": secret, "api": "S3v4", "path": "auto"}}}
-		if err := conn.JSONFile(path.Join(dir, "config.json"), config); err != nil {
-			return fail(fmt.Errorf("写入临时 mc 配置失败"))
-		}
-		prefix += "--config-dir " + opsremote.Quote(dir) + " "
-	}
-	cmd := prefix + "admin info " + opsremote.Quote(alias)
+	cmd := "mc admin info " + opsremote.Quote(alias)
 	start := time.Now()
 	data, err := conn.Run(ctx, cmd, 2<<20)
 	if err != nil {
@@ -334,8 +341,31 @@ func (s *OperationsService) collectMinIOPhase(ctx context.Context, row model.Com
 	if !supplemental {
 		return out
 	}
+	return append(out, s.collectMinIOSupplements(ctx, row)...)
+}
+
+// API monitoring never depends on SSH. Host files are an optional, low-frequency
+// supplement, kept separate so their failures cannot discard valid API results.
+func (s *OperationsService) collectMinIOSupplements(ctx context.Context, row model.ComponentConnection) []inspection.Observation {
+	var opt ComponentOptions
+	if json.Unmarshal([]byte(row.OptionsJSON), &opt) != nil {
+		return []inspection.Observation{componentprobe.Failed("cloudhis-39", "MinIO 每日记录", fmt.Errorf("MinIO 采集选项无效"))}
+	}
+	var conn *opsremote.Conn
+	var connectErr error
+	if opt.DailyFile != "" || opt.BackupDirectory != "" {
+		conn, connectErr = s.connect(ctx, row.ServerID)
+		if connectErr == nil {
+			defer conn.Close()
+		}
+	}
+	var out []inspection.Observation
 	if opt.DailyFile != "" {
-		data, err := conn.ReadFile(opt.DailyFile, 1<<20)
+		var data []byte
+		err := connectErr
+		if err == nil {
+			data, err = conn.ReadFile(opt.DailyFile, 1<<20)
+		}
 		if err != nil {
 			out = append(out, componentprobe.Failed("cloudhis-39", "MinIO 每日记录", err))
 		} else {
@@ -348,7 +378,11 @@ func (s *OperationsService) collectMinIOPhase(ctx context.Context, row model.Com
 		out = append(out, v)
 	}
 	if opt.BackupDirectory != "" {
-		out = append(out, remoteBackupInventory(ctx, conn, opt.BackupDirectory))
+		if connectErr != nil {
+			out = append(out, componentprobe.Failed("cloudhis-5", "MinIO 备份", connectErr))
+		} else {
+			out = append(out, remoteBackupInventory(ctx, conn, opt.BackupDirectory))
+		}
 	} else {
 		out = append(out, componentprobe.Observation("cloudhis-5", "MinIO 备份", "未配置备份目录，当前没有可核对的备份文件证据", "RECORDED"))
 	}

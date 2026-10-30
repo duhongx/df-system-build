@@ -20,6 +20,7 @@ type Table struct {
 }
 
 type Observation struct {
+	Attributes         map[string]string  `json:"attributes,omitempty"`
 	Origin             *Origin            `json:"origin,omitempty"`
 	ConfigurationState string             `json:"configurationState,omitempty"`
 	Measurements       map[string]float64 `json:"measurements,omitempty"`
@@ -399,6 +400,9 @@ func Redact(s string) string {
 	return secretAssignment.ReplaceAllString(urlCredential.ReplaceAllString(bearerCredential.ReplaceAllString(s, "${1}[REDACTED]"), "${1}[REDACTED]@"), "${1}[REDACTED]")
 }
 func sanitize(o *Observation) {
+	for key, value := range o.Attributes {
+		o.Attributes[key] = Redact(value)
+	}
 	if o.Origin != nil {
 		copy := *o.Origin
 		copy.Name = Redact(copy.Name)

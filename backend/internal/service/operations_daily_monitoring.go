@@ -411,7 +411,7 @@ func monitoringLane(state model.MonitoringState, t monitoringTarget) MonitoringL
 	return v
 }
 
-func (s *OperationsService) monitoringView(ctx context.Context, t monitoringTarget, detail bool) (MonitoringView, error) {
+func (s *OperationsService) monitoringCurrentView(ctx context.Context, t monitoringTarget) (MonitoringView, error) {
 	v := MonitoringView{TargetType: t.Type, ID: t.ID, Kind: t.Kind, Name: t.Name, Endpoint: t.Endpoint, Enabled: t.Enabled, Status: "PENDING", Indicators: map[string]float64{}, Lanes: []MonitoringLane{}}
 	if t.Type == "host" {
 		cfg, m, err := s.HostMonitor(t.ID)
@@ -494,6 +494,14 @@ func (s *OperationsService) monitoringView(ctx context.Context, t monitoringTarg
 	if !t.Enabled {
 		v.Status = "DISABLED"
 	}
+	return v, nil
+}
+
+func (s *OperationsService) monitoringView(ctx context.Context, t monitoringTarget, detail bool) (MonitoringView, error) {
+	v, err := s.monitoringCurrentView(ctx, t)
+	if err != nil {
+		return v, err
+	}
 	if detail {
 		v.Lanes = append(v.Lanes, v.MonitoringLane)
 		for _, lane := range targetLanes(t) {
@@ -539,6 +547,35 @@ func (s *OperationsService) MonitoringDetail(ctx context.Context, kind string, i
 		return MonitoringView{}, err
 	}
 	return s.monitoringView(ctx, t, true)
+}
+
+// MonitoringDashboard returns current display data only. Report evidence remains
+// in the original snapshots; page polling never reads host/deep SQL lanes or
+// transfers SQL texts, command executions, raw sessions, and host inventories.
+func (s *OperationsService) MonitoringDashboard(ctx context.Context, kind string, id uint) (MonitoringView, error) {
+	t, err := s.findMonitoringTarget(ctx, kind, id)
+	if err != nil {
+		return MonitoringView{}, err
+	}
+	v, err := s.monitoringCurrentView(ctx, t)
+	if err != nil || v.Result == nil {
+		return v, err
+	}
+	r := v.Result
+	out := &opsprobe.JobResult{Type: r.Type, Name: r.Name, Version: r.Version, StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, Indicators: r.Indicators}
+	for _, check := range r.ReportChecks {
+		display := inspection.Observation{Code: check.Code, Name: check.Name, Status: check.Status, Value: check.Value, Reason: check.Reason, CollectedAt: check.CollectedAt, Attributes: check.Attributes, Measurements: check.Measurements}
+		if check.Status == "WARNING" || check.Status == "CRITICAL" {
+			for _, table := range check.Tables {
+				if table.Title == "当前异常 Pod" {
+					display.Tables = append(display.Tables, table)
+				}
+			}
+		}
+		out.ReportChecks = append(out.ReportChecks, display)
+	}
+	v.Result = out
+	return v, nil
 }
 func (s *OperationsService) MonitoringHistory(ctx context.Context, kind string, id uint, hours int) ([]MonitoringPoint, int, error) {
 	if hours < 1 || hours > 48 {

@@ -70,6 +70,8 @@ func getJSON(ctx context.Context, c Config, suffix string, out any) error {
 
 func Collect(ctx context.Context, c Config) []inspection.Observation {
 	switch c.Kind {
+	case "minio":
+		return minio(ctx, c)
 	case "elasticsearch":
 		return elastic(ctx, c)
 	case "rabbitmq":
@@ -105,6 +107,7 @@ func elastic(ctx context.Context, c Config) []inspection.Observation {
 	}
 	o := Observation("elasticsearch-health", "Elasticsearch 集群状态", fmt.Sprintf("集群 %s，状态 %s，节点 %d（数据节点 %d），活跃分片 %d，未分配 %d", health.ClusterName, health.Status, health.Nodes, health.DataNodes, health.Active, health.Unassigned), status)
 	o.Measurements = map[string]float64{"nodes": float64(health.Nodes), "activeShards": float64(health.Active), "unassignedShards": float64(health.Unassigned)}
+	o.Attributes = map[string]string{"clusterName": health.ClusterName, "health": health.Status}
 	o.Threshold = "green 正常；yellow 存在未分配副本，需核对；red 存在不可用主分片。"
 	if status == "UNKNOWN" {
 		o.Reason = "健康请求超时或返回了无法识别的集群状态"
@@ -177,6 +180,7 @@ func rabbit(ctx context.Context, c Config) []inspection.Observation {
 	}
 	o := Observation("rabbitmq-overview", "RabbitMQ 运行概况", fmt.Sprintf("集群 %s，版本 %s；连接 %d，队列 %d，消费者 %d；待消费 %d，未确认 %d", overview.Cluster, overview.Version, overview.Object.Connections, overview.Object.Queues, overview.Object.Consumers, overview.Queue.Ready, overview.Queue.Unacked), "RECORDED")
 	o.Measurements = map[string]float64{"connections": float64(overview.Object.Connections), "queues": float64(overview.Object.Queues), "consumers": float64(overview.Object.Consumers), "readyMessages": float64(overview.Queue.Ready), "unackedMessages": float64(overview.Queue.Unacked)}
+	o.Attributes = map[string]string{"clusterName": overview.Cluster, "version": overview.Version}
 	o.Reason = "消息数量为当前快照，不能单凭积压数量认定业务异常。"
 	var nodes []struct {
 		Name       string   `json:"name"`

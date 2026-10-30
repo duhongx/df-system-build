@@ -298,10 +298,19 @@ func nativePostgreSQLObservations(name string, f nativePostgreSQLFacts, e inspec
 		}
 		switch code {
 		case "cloudhis-2":
-			o.Value = fmt.Sprintf("原生 PostgreSQL %s，%s；物理复制连接 %d，逻辑订阅连接 %d", f.Version, role, f.PhysicalPeers, f.LogicalPeers)
+			architecture := "集群"
 			if standalone {
-				o.Value += "；当前未发现物理复制连接或物理复制槽，逻辑订阅不作为高可用副本"
+				architecture = "单机"
+			} else if !f.Recovery && !f.StatsVisible {
+				architecture = "未识别"
+				o.Status, o.Reason = "UNKNOWN", "读取复制统计的权限不足，无法判断部署架构"
 			}
+			o.Value = architecture
+			o.Attributes = map[string]string{"architecture": architecture, "version": f.Version, "role": role}
+			if f.StatsVisible {
+				o.Measurements = map[string]float64{"physicalReplicas": float64(f.PhysicalPeers), "logicalConsumers": float64(f.LogicalPeers), "physicalSlots": float64(f.PhysicalSlots)}
+			}
+			o.Tables = []inspection.Table{{Columns: []string{"部署架构", "版本", "角色"}, Rows: [][]string{{architecture, f.Version, role}}}}
 		case "cloudhis-16":
 			o.Status = "NORMAL"
 			o.Value = "原生 PostgreSQL 连接成功，当前角色：" + role
@@ -323,7 +332,13 @@ func nativePostgreSQLObservations(name string, f nativePostgreSQLFacts, e inspec
 				}
 			}
 		case "cloudhis-19":
+			o.Attributes = map[string]string{"archiveState": "已开启"}
+			o.Measurements = map[string]float64{"archivedCount": float64(f.Archived), "archiveFailedCount": float64(f.Failed)}
+			if f.LastArchived != nil {
+				o.Attributes["lastArchivedAt"] = f.LastArchived.Format(time.RFC3339)
+			}
 			if f.ArchiveMode == "off" || !f.ArchiveConfigured {
+				o.Attributes["archiveState"] = "未开启"
 				o.Status = "WARNING"
 				o.ConfigurationState = "NOT_CONFIGURED"
 				o.Value = "WAL 归档未开启或归档命令未配置"

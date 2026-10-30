@@ -11,8 +11,8 @@ import (
 	"strings"
 )
 
-// mc may run on a management machine. Its executor is not automatically a
-// storage node; use actual admin-info members instead.
+// Use actual admin-info members, from either API or legacy mc output. A client
+// machine or a configured load balancer is not automatically a storage node.
 func minioMemberAddresses(observations []inspection.Observation) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -22,14 +22,18 @@ func minioMemberAddresses(observations []inspection.Observation) []string {
 		}
 		for _, table := range o.Tables {
 			for _, row := range table.Rows {
-				if len(row) < 2 || row[0] != "节点" {
+				var v string
+				if len(table.Columns) > 0 && table.Columns[0] == "节点地址" && len(row) > 0 {
+					v = row[0]
+				} else if len(row) >= 2 && row[0] == "节点" {
+					fields := strings.Fields(row[1])
+					if len(fields) >= 2 {
+						v = fields[1]
+					}
+				}
+				if v == "" {
 					continue
 				}
-				fields := strings.Fields(row[1])
-				if len(fields) < 2 {
-					continue
-				}
-				v := fields[1]
 				if !strings.Contains(v, "://") {
 					v = "http://" + v
 				}
@@ -52,7 +56,7 @@ func (s *OperationsService) collectMinIOHosts(ctx context.Context, row model.Com
 	codes := []string{"cloudhis-36", "cloudhis-37"}
 	addresses := minioMemberAddresses(r.ReportChecks)
 	if len(addresses) == 0 {
-		r.ReportChecks = append(r.ReportChecks, relatedFailure(codes, "mc 未返回可定位的 MinIO 成员地址，不能将 mc 执行主机当作存储节点")...)
+		r.ReportChecks = append(r.ReportChecks, relatedFailure(codes, "管理接口未返回可定位的 MinIO 成员地址，无法匹配存储节点的主机资源")...)
 		return
 	}
 	seen := map[uint]bool{}
@@ -80,7 +84,7 @@ func (s *OperationsService) collectMinIOHosts(ctx context.Context, row model.Com
 		}
 		hosts, e := s.matchingServers(ctx, []string{address}, explicit)
 		if e != nil || len(hosts) != 1 {
-			r.ReportChecks = append(r.ReportChecks, relatedFailure(codes, "MinIO 成员 "+address+" 未唯一匹配到纳管主机，未使用 mc 客户端主机代替")...)
+			r.ReportChecks = append(r.ReportChecks, relatedFailure(codes, "MinIO 成员 "+address+" 未唯一匹配到纳管主机，主机资源及 inode 补充项尚未取得；API 运行数据独立采集")...)
 			continue
 		}
 		host := hosts[0]
@@ -103,7 +107,7 @@ func (s *OperationsService) collectMinIOHosts(ctx context.Context, row model.Com
 				}
 			}
 			if !found {
-				r.ReportChecks = append(r.ReportChecks, relatedFailure(codes, "mc 返回回环地址，但执行主机未发现本地 MinIO 服务，尚不能确认存储节点位置")...)
+				r.ReportChecks = append(r.ReportChecks, relatedFailure(codes, "管理接口返回回环地址，但关联主机未发现本地 MinIO 服务，尚不能确认存储节点位置")...)
 				continue
 			}
 		}

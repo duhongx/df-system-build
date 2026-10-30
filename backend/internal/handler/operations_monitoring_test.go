@@ -18,4 +18,9 @@ func TestMonitoringAndServiceControlRoutesRequireAuthentication(t *testing.T) {
 			t.Fatalf("unauthorized %s %s returned %d", item.method, item.path, w.Code)
 		}
 	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/operations/monitoring/component/1?view=dashboard", nil))
+	if w.Code != 401 {
+		t.Fatal("dashboard view bypassed authentication")
+	}
 }

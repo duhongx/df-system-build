@@ -35,6 +35,9 @@ func TestDeploymentNativePostgreSQLDistinguishesLogicalConsumerArchiveAndMissing
 	f := nativePostgreSQLFacts{Endpoint: "host:5432/his", Version: "14.8", StatsVisible: true, LogicalPeers: 1, ArchiveMode: "on", ArchiveConfigured: true, Archived: 1567, LastArchived: &now}
 	e := inspection.Execution{Kind: "sql", ExitCode: 0, Stdout: "actual result"}
 	got := nativePostgreSQLObservations("pg", f, e, nil)
+	if got["cloudhis-2"].Value != "单机" || got["cloudhis-2"].Attributes["version"] != "14.8" || got["cloudhis-2"].Measurements["logicalConsumers"] != 1 {
+		t.Fatal("logical consumer obscured the standalone deployment")
+	}
 	if got["cloudhis-17"].Status != "NOT_APPLICABLE" || got["cloudhis-18"].Status != "NOT_APPLICABLE" {
 		t.Fatal("logical consumer treated as physical HA")
 	}
@@ -55,6 +58,31 @@ func TestDeploymentNativePostgreSQLDistinguishesLogicalConsumerArchiveAndMissing
 	got = nativePostgreSQLObservations("pg", f, inspection.Execution{ExitCode: 1}, fmt.Errorf("connection unavailable"))
 	if got["cloudhis-16"].Status != "UNKNOWN" || len(got["cloudhis-16"].Gaps) == 0 {
 		t.Fatal("connection failure masked")
+	}
+}
+
+func TestDeploymentNativePostgreSQLTopologyIsExplicit(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		facts        nativePostgreSQLFacts
+		architecture string
+	}{
+		{"standalone", nativePostgreSQLFacts{StatsVisible: true}, "单机"},
+		{"logical consumer", nativePostgreSQLFacts{StatsVisible: true, LogicalPeers: 1}, "单机"},
+		{"primary", nativePostgreSQLFacts{StatsVisible: true, PhysicalPeers: 1}, "集群"},
+		{"standby", nativePostgreSQLFacts{Recovery: true}, "集群"},
+		{"disconnected configured standby", nativePostgreSQLFacts{StatsVisible: true, PhysicalSlots: 1}, "集群"},
+		{"insufficient permissions", nativePostgreSQLFacts{}, "未识别"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nativePostgreSQLObservations("pg", tc.facts, inspection.Execution{ExitCode: 0}, nil)["cloudhis-2"]
+			if got.Value != tc.architecture || got.Attributes["architecture"] != tc.architecture {
+				t.Fatalf("ambiguous architecture: %+v", got)
+			}
+			if tc.architecture == "未识别" && got.Status != "UNKNOWN" {
+				t.Fatal("missing permissions became a normal architecture")
+			}
+		})
 	}
 }
 

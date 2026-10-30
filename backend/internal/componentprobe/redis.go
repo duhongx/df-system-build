@@ -81,6 +81,7 @@ func redis(ctx context.Context, c Config) []inspection.Observation {
 	}
 	o := Observation("redis-info", "Redis 运行情况", fmt.Sprintf("版本 %s，角色 %s，连接 %s，已用内存 %s，上限 %s，淘汰键累计 %s", m["redis_version"], m["role"], m["connected_clients"], m["used_memory_human"], m["maxmemory_human"], m["evicted_keys"]), "NORMAL")
 	o.Measurements = map[string]float64{}
+	o.Attributes = map[string]string{"version": m["redis_version"], "role": m["role"]}
 	for key, field := range map[string]string{"connections": "connected_clients", "memoryBytes": "used_memory", "maxMemoryBytes": "maxmemory", "operationsPerSecond": "instantaneous_ops_per_sec", "evictedKeys": "evicted_keys"} {
 		if value, err := strconv.ParseFloat(m[field], 64); err == nil {
 			o.Measurements[key] = value
@@ -97,6 +98,7 @@ func redis(ctx context.Context, c Config) []inspection.Observation {
 		o.Reason += " 内存使用达到配置上限的 85%"
 	}
 	p := Observation("redis-persistence", "Redis 持久化与复制", fmt.Sprintf("RDB 最近状态 %s；AOF 启用 %s，写入状态 %s；连接副本 %s，主从连接 %s", m["rdb_last_bgsave_status"], m["aof_enabled"], m["aof_last_write_status"], m["connected_slaves"], m["master_link_status"]), "RECORDED")
+	p.Attributes = map[string]string{"rdbStatus": m["rdb_last_bgsave_status"], "aofEnabled": m["aof_enabled"]}
 	if m["rdb_last_bgsave_status"] == "err" || (m["aof_enabled"] == "1" && m["aof_last_write_status"] == "err") {
 		p.Status = "WARNING"
 		p.Reason = "持久化最近一次执行/写入失败"

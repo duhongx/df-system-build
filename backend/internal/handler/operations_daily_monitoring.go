@@ -16,6 +16,15 @@ func (h *OperationsHandler) MonitoringOverview(c *gin.Context) {
 	response.OK(c, rows)
 }
 func (h *OperationsHandler) MonitoringDetail(c *gin.Context) {
+	if c.Query("view") == "dashboard" {
+		row, err := h.svc.MonitoringDashboard(c.Request.Context(), c.Param("kind"), opsID(c))
+		if err != nil {
+			opsFail(c, err)
+			return
+		}
+		response.OK(c, row)
+		return
+	}
 	row, err := h.svc.MonitoringDetail(c.Request.Context(), c.Param("kind"), opsID(c))
 	if err != nil {
 		opsFail(c, err)

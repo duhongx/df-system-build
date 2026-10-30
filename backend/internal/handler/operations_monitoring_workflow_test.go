@@ -148,6 +148,11 @@ func TestMonitoringWorkflowCollectsPersistsAndArchivesThroughAuthenticatedAPI(t 
 	if requests.Load() != 2 || result.Coverage == nil || result.Coverage.Planned != 2 || result.Coverage.Completed != 2 || result.Coverage.Warning != 1 {
 		t.Fatalf("collection/coverage: calls=%d %+v", requests.Load(), result.Coverage)
 	}
+	var dashboard service.MonitoringView
+	api("GET", fmt.Sprintf("/monitoring/component/%d?view=dashboard", connection.ID), nil, &dashboard)
+	if dashboard.Result == nil || len(dashboard.Lanes) != 0 || dashboard.Indicators["activeShards"] != 10 || dashboard.Result.ReportChecks[0].Attributes["clusterName"] != "workflow-cluster" || requests.Load() != 2 {
+		t.Fatal("dashboard API lost current data or started another collection")
+	}
 	var run model.InspectionRun
 	api("POST", "/configured-inspections", map[string]any{"name": "系统巡检报告 · 本地流程自检", "targets": []service.InspectionTargetRequest{{Type: "component", ID: connection.ID}}}, &run)
 	deadline := time.Now().Add(15 * time.Second)

@@ -19,7 +19,6 @@ const tabs = [
     <header>
       <div>
         <h2>监控中心</h2>
-        <p>持续采集系统运行情况，自动更新；监控历史保留 48 小时，巡检报告独立存档。</p>
       </div>
       <el-button
         @click="router.push('/settings/environment#inspection-components')"

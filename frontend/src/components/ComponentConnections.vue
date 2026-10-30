@@ -24,7 +24,7 @@ const empty = (): ComponentInput => ({
   clearSecret: false,
   serverId: 0,
   enabled: true,
-  options: { alias: "prod" },
+  options: {},
 });
 const form = ref<ComponentInput>(empty());
 const label = (v: string) =>
@@ -54,7 +54,18 @@ function edit(row?: ComponentConnection) {
 async function save() {
   saving.value = true;
   try {
-    await saveComponent(form.value);
+    const input = { ...form.value, options: { ...form.value.options } };
+    if (input.kind === "minio") {
+      input.endpoint = input.endpoint.trim();
+      if (input.endpoint && !input.endpoint.includes("://")) {
+        input.endpoint = `http://${input.endpoint}`;
+      }
+      if (!input.serverId) {
+        delete input.options.dailyFile;
+        delete input.options.backupDirectory;
+      }
+    }
+    await saveComponent(input);
     dialog.value = false;
     form.value.secret = "";
     await load();
@@ -170,9 +181,9 @@ onMounted(load);
                     ? 'http://192.168.1.10:15672'
                     : form.kind === 'elasticsearch'
                       ? 'http://192.168.1.10:9200'
-                      : '可留空复用主机已有 mc 别名'
+                      : 'http://192.168.199.102:9000'
               "
-          /></el-form-item>
+          /><small v-if="form.kind === 'minio'">填写 MinIO API 地址，直接通过 API 采集，无需 mc 或 SSH。仅填写 IP:端口时按 HTTP 保存；启用 TLS 请填写 https://。请勿填写控制台地址。</small></el-form-item>
           <el-form-item :label="form.kind === 'minio' ? 'Access Key' : '账号'"
             ><el-input v-model="form.username" autocomplete="off"
           /></el-form-item>
@@ -183,14 +194,14 @@ onMounted(load);
               show-password
               autocomplete="new-password"
               :placeholder="
-                form.id ? '留空保留已保存凭据' : '可选，按实际认证配置填写'
+                form.id ? '留空保留已保存凭据' : form.kind === 'minio' ? '填写具有监控读取权限的 Secret Key' : '可选，按实际认证配置填写'
               "
           /></el-form-item>
           <el-form-item v-if="form.id" label="清除已存凭据"
             ><el-switch v-model="form.clearSecret"
           /></el-form-item>
         </template>
-        <el-form-item label="关联主机"
+        <el-form-item label="关联主机（可选）"
           ><el-select v-model="form.serverId" filterable style="width: 100%"
             ><el-option label="不关联主机" :value="0" /><el-option
               v-for="h in hosts"
@@ -198,19 +209,19 @@ onMounted(load);
               :value="h.id"
               :label="`${h.remark || h.host} · ${h.host}`" /></el-select
           ><small
-            >MinIO 需关联可执行 mc 的主机；其他组件用于关联主机资源和低频专项。</small
+            >仅用于主机资源、备份文件等补充检查，不影响 API 日常监控。</small
           ></el-form-item
         >
         <template v-if="form.kind === 'minio'"
-          ><el-form-item v-if="!form.endpoint" label="已有 mc 别名"
+          ><el-form-item v-if="form.id && !form.endpoint" label="旧连接 mc 别名"
             ><el-input
               v-model="form.options.alias"
               placeholder="prod" /></el-form-item
-          ><el-form-item label="已有每日记录"
+          ><el-form-item v-if="form.serverId" label="已有每日记录"
             ><el-input
               v-model="form.options.dailyFile"
               placeholder="可选，主机上的采样文件绝对路径" /></el-form-item
-          ><el-form-item label="备份目录"
+          ><el-form-item v-if="form.serverId" label="备份目录"
             ><el-input
               v-model="form.options.backupDirectory"
               placeholder="可选，主机上的实际备份目录" /></el-form-item
