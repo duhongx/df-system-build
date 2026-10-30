@@ -34,6 +34,9 @@ type OperationsService struct {
 	logSlots            chan struct{}
 	runSlots            chan struct{}
 	reportSlots         chan struct{}
+	monitorSlots        chan struct{}
+	factsSlots          chan struct{}
+	deepSlots           chan struct{}
 }
 type diagnosticCache struct {
 	at       time.Time
@@ -44,7 +47,7 @@ type diagnosticCache struct {
 
 func NewOperationsService(db *gorm.DB, workspace string) *OperationsService {
 	base, _ := filepath.Abs(filepath.Join(workspace, "operations"))
-	return &OperationsService{db: db, workspace: base, owner: fmt.Sprintf("worker-%d", time.Now().UnixNano()), collecting: map[uint]bool{}, syncing: map[uint]bool{}, active: map[uint]bool{}, diagnosing: map[uint]bool{}, diagnostics: map[uint]diagnosticCache{}, componentCollecting: map[string]bool{}, hostSlots: make(chan struct{}, 2), logSlots: make(chan struct{}, 1), runSlots: make(chan struct{}, 2), reportSlots: make(chan struct{}, 2)}
+	return &OperationsService{db: db, workspace: base, owner: fmt.Sprintf("worker-%d", time.Now().UnixNano()), collecting: map[uint]bool{}, syncing: map[uint]bool{}, active: map[uint]bool{}, diagnosing: map[uint]bool{}, diagnostics: map[uint]diagnosticCache{}, componentCollecting: map[string]bool{}, hostSlots: make(chan struct{}, 2), logSlots: make(chan struct{}, 1), runSlots: make(chan struct{}, 2), reportSlots: make(chan struct{}, 2), monitorSlots: make(chan struct{}, 4), factsSlots: make(chan struct{}, 2), deepSlots: make(chan struct{}, 1)}
 }
 func (s *OperationsService) Start(ctx context.Context) {
 	s.cleanupOperations(ctx)
@@ -55,11 +58,20 @@ func (s *OperationsService) Start(ctx context.Context) {
 		cleanup := time.NewTicker(time.Hour)
 		defer cleanup.Stop()
 		var lastAccessAuditCheck time.Time
+		var lastMonitorDiscovery time.Time
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
+				if ctx.Err() != nil {
+					return
+				}
+				if time.Since(lastMonitorDiscovery) >= 30*time.Second {
+					_ = s.syncMonitoringSources(ctx)
+					lastMonitorDiscovery = time.Now()
+				}
+				s.scheduleMonitoring(ctx)
 				if time.Since(lastAccessAuditCheck) > time.Minute {
 					s.db.WithContext(ctx).Model(&model.DatabaseQueryRecord{}).Where("kind='access' AND status='RUNNING' AND started_at<?", time.Now().Add(-2*time.Minute)).Updates(map[string]any{"status": "UNKNOWN", "error": "操作未记录最终状态，请核对实际用户与权限后再操作"})
 					lastAccessAuditCheck = time.Now()
@@ -74,6 +86,7 @@ func (s *OperationsService) Start(ctx context.Context) {
 	}()
 }
 func (s *OperationsService) cleanupOperations(ctx context.Context) {
+	s.db.WithContext(ctx).Model(&model.MonitoringState{}).Where("last_success_at < ?", time.Now().Add(-48*time.Hour)).Updates(map[string]any{"result_json": nil, "last_success_at": nil})
 	s.db.WithContext(ctx).Where("collected_at < ?", time.Now().Add(-48*time.Hour)).Delete(&model.CollectionSample{})
 	s.db.WithContext(ctx).Where("collected_at < ?", time.Now().Add(-48*time.Hour)).Delete(&model.HostMetricSample{})
 	s.db.WithContext(ctx).Where("event_time < ? OR created_at < ?", time.Now().Add(-48*time.Hour), time.Now().Add(-48*time.Hour)).Delete(&model.DatabaseLogEvent{})
@@ -87,7 +100,7 @@ func (s *OperationsService) connect(ctx context.Context, id uint) (*opsremote.Co
 }
 func (s *OperationsService) connectServer(ctx context.Context, server model.Server) (*opsremote.Conn, error) {
 	id := server.ID
-	config := model.HostMonitorConfig{ServerID: id, IntervalSeconds: 60}
+	config := model.HostMonitorConfig{ServerID: id, IntervalSeconds: 60, Enabled: true}
 	if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&config).Error; err != nil {
 		return nil, err
 	}

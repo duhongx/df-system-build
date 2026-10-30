@@ -6,11 +6,12 @@ import ComponentInspectionPanel from "../components/ComponentInspectionPanel.vue
 import { componentKinds } from "../api/monitoring";
 const route = useRoute(),
   router = useRouter();
-const kind = computed(() => String(route.params.kind || "reports"));
+const kind = computed(() => String(route.params.kind || "overview"));
 const tabs = [
-  { value: "reports", label: "巡检报告" },
+  { value: "overview", label: "运行概况" },
   { value: "hosts", label: "Linux 主机" },
   ...componentKinds,
+  { value: "reports", label: "巡检报告" },
 ];
 </script>
 <template>
@@ -18,7 +19,7 @@ const tabs = [
     <header>
       <div>
         <h2>监控中心</h2>
-        <p>按需检查系统运行情况，形成可阅读、可存档的巡检报告。</p>
+        <p>持续采集系统运行情况，自动更新；监控历史保留 48 小时，巡检报告独立存档。</p>
       </div>
       <el-button
         @click="router.push('/settings/environment#inspection-components')"
@@ -29,7 +30,7 @@ const tabs = [
       <router-link
         v-for="t in tabs"
         :key="t.value"
-        :to="t.value === 'reports' ? '/monitoring' : `/monitoring/${t.value}`"
+        :to="t.value === 'overview' ? '/monitoring' : `/monitoring/${t.value}`"
         :class="{ active: kind === t.value }"
         >{{ t.label }}</router-link
       >

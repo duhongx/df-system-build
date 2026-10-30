@@ -265,23 +265,22 @@ onUnmounted(() => {
           ><el-input v-model="name" maxlength="128"
         /></el-form-item>
         <div class="scope">
-          <strong>本次采集范围</strong>
+          <strong>本次报告范围</strong>
           <p v-if="route.query.host">
-            服务器 #{{ route.query.host }}，自动执行 Linux
-            基础检查并识别本机部署的组件。
+            服务器 #{{ route.query.host }} 的运行指标与已识别组件专项结果。
           </p>
           <p v-else>
             全部已纳管服务器、数据库工作台已登记的
             PostgreSQL，以及环境配置中已启用的组件连接。
           </p>
           <p>
-            自动采集当前状态，正常项简要汇总，异常及缺少结果的原因单独展示。已生成的历史报告保持原有结果。
+            汇总当前有效监控数据，缺失或过期项目自动更新；正常项简要汇总，异常及采集缺口单独展示。已生成的历史报告保持冻结结果。
           </p>
         </div></el-form
       ><template #footer
         ><el-button @click="dialog = false">取消</el-button
         ><el-button type="primary" :loading="saving" @click="create"
-          >开始采集并生成</el-button
+          >汇总并生成</el-button
         ></template
       ></el-dialog
     >

@@ -58,7 +58,7 @@ func (s *OperationsService) CreateConfiguredInspection(ctx context.Context, name
 	}
 	var result *model.InspectionRun
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		run := model.InspectionRun{Name: name, CollectionMode: "configured", Status: "QUEUED", Trigger: "MANUAL", Operator: operator, HTMLStatus: "PENDING", PDFStatus: "PENDING", Message: "等待现场采集"}
+		run := model.InspectionRun{Name: name, CollectionMode: "configured", Status: "QUEUED", Trigger: "MANUAL", Operator: operator, HTMLStatus: "PENDING", PDFStatus: "PENDING", Message: "等待汇总监控数据"}
 		seen := map[string]bool{}
 		var targets []model.InspectionTargetRun
 		var components []model.ComponentConnection
@@ -77,7 +77,7 @@ func (s *OperationsService) CreateConfiguredInspection(ctx context.Context, name
 				continue
 			}
 			seen[key] = true
-			t := model.InspectionTargetRun{Type: ref.Type, TargetID: ref.ID, Status: "QUEUED", Stage: "等待现场采集", ServicesJSON: "[]"}
+			t := model.InspectionTargetRun{Type: ref.Type, TargetID: ref.ID, Status: "QUEUED", Stage: "等待汇总监控数据", ServicesJSON: "[]"}
 			switch ref.Type {
 			case "host":
 				var row model.Server

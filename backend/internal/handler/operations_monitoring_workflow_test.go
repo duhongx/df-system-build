@@ -64,7 +64,7 @@ func TestMonitoringWorkflowCollectsPersistsAndArchivesThroughAuthenticatedAPI(t 
 		parent, _ := base.DB()
 		_ = parent.Close()
 	})
-	if err := db.AutoMigrate(&model.Server{}, &model.HostMonitorConfig{}, &model.HostMetricSample{}, &model.OperationsDatabase{}, &model.DatabaseQueryRecord{}, &model.DatabaseLogCursor{}, &model.DatabaseLogEvent{}, &model.InspectionPlan{}, &model.InspectionRun{}, &model.InspectionTargetRun{}, &model.ComponentConnection{}, &model.CollectionSample{}, &model.ManagedService{}, &model.ServiceOperation{}, &model.Settings{}, &model.User{}); err != nil {
+	if err := db.AutoMigrate(&model.Server{}, &model.HostMonitorConfig{}, &model.HostMetricSample{}, &model.OperationsDatabase{}, &model.DatabaseQueryRecord{}, &model.DatabaseLogCursor{}, &model.DatabaseLogEvent{}, &model.InspectionPlan{}, &model.InspectionRun{}, &model.InspectionTargetRun{}, &model.ComponentConnection{}, &model.MonitoringState{}, &model.CollectionSample{}, &model.ManagedService{}, &model.ServiceOperation{}, &model.Settings{}, &model.User{}); err != nil {
 		t.Fatal(err)
 	}
 	requests := &atomic.Int32{}
@@ -130,14 +130,26 @@ func TestMonitoringWorkflowCollectsPersistsAndArchivesThroughAuthenticatedAPI(t 
 	if strings.Contains(list.Body.String(), "fixture-key") || strings.Contains(list.Body.String(), "secretEncrypted") {
 		t.Fatal("component credentials were returned")
 	}
-	var result opsprobe.JobResult
-	api("POST", fmt.Sprintf("/components/%d/collect", connection.ID), map[string]any{}, &result)
+	// No viewer or manual collection request is needed to create the first sample.
+	svc.Start(ctx)
+	var monitor service.MonitoringView
+	automaticDeadline := time.Now().Add(10 * time.Second)
+	for {
+		api("GET", fmt.Sprintf("/monitoring/component/%d", connection.ID), nil, &monitor)
+		if monitor.Result != nil {
+			break
+		}
+		if time.Now().After(automaticDeadline) {
+			t.Fatal("background monitoring did not produce a first sample")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	result := *monitor.Result
 	if requests.Load() != 2 || result.Coverage == nil || result.Coverage.Planned != 2 || result.Coverage.Completed != 2 || result.Coverage.Warning != 1 {
 		t.Fatalf("collection/coverage: calls=%d %+v", requests.Load(), result.Coverage)
 	}
 	var run model.InspectionRun
 	api("POST", "/configured-inspections", map[string]any{"name": "系统巡检报告 · 本地流程自检", "targets": []service.InspectionTargetRequest{{Type: "component", ID: connection.ID}}}, &run)
-	svc.Start(ctx)
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if err := db.First(&run, run.ID).Error; err != nil {
@@ -162,6 +174,9 @@ func TestMonitoringWorkflowCollectsPersistsAndArchivesThroughAuthenticatedAPI(t 
 	}
 	var frozen inspection.Report
 	api("GET", fmt.Sprintf("/inspection-runs/%d/report-data", run.ID), nil, &frozen)
+	if frozen.FinishedAt.Before(frozen.StartedAt) || frozen.StartedAt.After(result.FinishedAt) {
+		t.Fatal("monitoring report has an inverted or fabricated collection time range", frozen.StartedAt, frozen.FinishedAt)
+	}
 	if saved.Coverage == nil || mustMonitoringJSON(saved.Coverage) != mustMonitoringJSON(frozen.Summary) {
 		t.Fatal("component page and report use different coverage")
 	}

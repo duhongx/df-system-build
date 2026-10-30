@@ -9,6 +9,33 @@ export const componentKinds = [
   { value: "redis", label: "Redis" },
   { value: "rabbitmq", label: "RabbitMQ" },
 ];
+export interface MonitoringLane {
+  lane: string;
+  intervalSeconds: number;
+  collectedAt: string | null;
+  lastAttemptAt: string | null;
+  lastError: string;
+  stale: boolean;
+  collecting: boolean;
+  result?: InspectionResult;
+}
+export interface MonitoringView extends MonitoringLane {
+  targetType: string;
+  id: number;
+  kind: string;
+  name: string;
+  endpoint: string;
+  enabled: boolean;
+  status: string;
+  summary: string;
+  indicators: Record<string, number>;
+  lanes?: MonitoringLane[];
+}
+export interface MonitoringPoint { collectedAt: string; indicators: Record<string, number> }
+export const listMonitoring = () => request.get<any, MonitoringView[]>("/operations/monitoring");
+export const getMonitoring = (kind: string, id: number) => request.get<any, MonitoringView>(`/operations/monitoring/${kind}/${id}`);
+export const getMonitoringHistory = (kind: string, id: number, hours: number) => request.get<any, {samples: MonitoringPoint[]; stepSeconds: number}>(`/operations/monitoring/${kind}/${id}/history`, {params: {hours}});
+export const refreshMonitoring = (kind: string, id: number) => request.post(`/operations/monitoring/${kind}/${id}/refresh`);
 export interface ComponentOptions {
   namespace?: string;
   alias?: string;

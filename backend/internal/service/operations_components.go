@@ -178,7 +178,7 @@ func (s *OperationsService) LatestCollection(ctx context.Context, kind string, i
 		return nil, fmt.Errorf("采集对象类型无效")
 	}
 	var row model.CollectionSample
-	err := s.db.WithContext(ctx).Where("target_type=? AND target_id=? AND collected_at>=?", kind, id, time.Now().Add(-48*time.Hour)).Order("id DESC").First(&row).Error
+	err := s.db.WithContext(ctx).Where("target_type=? AND target_id=? AND lane='' AND collected_at>=?", kind, id, time.Now().Add(-48*time.Hour)).Order("id DESC").First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -278,6 +278,10 @@ func redactCollection(r *opsprobe.JobResult) {
 }
 
 func (s *OperationsService) collectMinIO(ctx context.Context, row model.ComponentConnection, secret string) []inspection.Observation {
+	return s.collectMinIOPhase(ctx, row, secret, true)
+}
+
+func (s *OperationsService) collectMinIOPhase(ctx context.Context, row model.ComponentConnection, secret string, supplemental bool) []inspection.Observation {
 	fail := func(err error) []inspection.Observation {
 		return []inspection.Observation{componentprobe.Failed("cloudhis-38", "MinIO 集群运行", err)}
 	}
@@ -327,6 +331,9 @@ func (s *OperationsService) collectMinIO(ctx context.Context, row model.Componen
 	o.Executions = []inspection.Execution{{Kind: "command", Command: "mc admin info [巡检连接]", Stdout: string(data), StartedAt: start, FinishedAt: time.Now()}}
 	architecture := opsprobe.InspectMinIOArchitectureText(string(data))
 	out := []inspection.Observation{architecture, o}
+	if !supplemental {
+		return out
+	}
 	if opt.DailyFile != "" {
 		data, err := conn.ReadFile(opt.DailyFile, 1<<20)
 		if err != nil {

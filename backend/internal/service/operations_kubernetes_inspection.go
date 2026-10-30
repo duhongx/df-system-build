@@ -105,6 +105,19 @@ func (s *OperationsService) collectKubernetesInto(ctx context.Context, row model
 		}
 		o.Tables = []inspection.Table{t}
 		out = append(out, componentprobe.Observation("cloudhis-1", "Kubernetes 部署情况", fmt.Sprintf("节点 %d，控制平面标签节点 %d；依据实际节点与角色标签记录", len(nodes.Items), masters), "RECORDED"), o)
+		if result != nil {
+			if result.Indicators == nil {
+				result.Indicators = map[string]float64{}
+			}
+			result.Indicators["nodes"] = float64(len(nodes.Items))
+			notReady := 0
+			for _, row := range t.Rows {
+				if row[2] != "Ready" || row[3] != "" {
+					notReady++
+				}
+			}
+			result.Indicators["unhealthyNodes"] = float64(notReady)
+		}
 	}
 	var pods []corev1.Pod
 	next := ""
@@ -123,6 +136,34 @@ func (s *OperationsService) collectKubernetesInto(ctx context.Context, row model
 		}
 	}
 	var services []corev1.Pod
+	if result != nil {
+		if result.Indicators == nil {
+			result.Indicators = map[string]float64{}
+		}
+		result.Counters = map[string]float64{}
+		unready := 0
+		for _, p := range pods {
+			ready := 0
+			restarts := int32(0)
+			for _, c := range p.Status.ContainerStatuses {
+				if c.Ready {
+					ready++
+				}
+				restarts += c.RestartCount
+			}
+			for _, c := range p.Status.InitContainerStatuses {
+				restarts += c.RestartCount
+			}
+			if p.UID != "" {
+				result.Counters[string(p.UID)] = float64(restarts)
+			}
+			if p.Status.Phase != corev1.PodSucceeded && (p.Status.Phase != corev1.PodRunning || ready != len(p.Spec.Containers) || p.DeletionTimestamp != nil) {
+				unready++
+			}
+		}
+		result.Indicators["pods"] = float64(len(pods))
+		result.Indicators["unreadyPods"] = float64(unready)
+	}
 	for _, p := range pods {
 		if strings.HasPrefix(p.Name, "nacos-") || strings.HasPrefix(p.Name, "seata-") {
 			services = append(services, p)

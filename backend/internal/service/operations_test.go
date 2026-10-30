@@ -35,7 +35,7 @@ func operationsTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	testutil.IsolatedPostgresConfig(t)
 	db := testutil.OpenGormPostgres(t)
-	if err := db.AutoMigrate(&model.Server{}, &model.HostMonitorConfig{}, &model.HostMetricSample{}, &model.OperationsDatabase{}, &model.DatabaseQueryRecord{}, &model.DatabaseWorkspace{}, &model.DatabaseSavedQuery{}, &model.DatabaseLogCursor{}, &model.DatabaseLogEvent{}, &model.InspectionPlan{}, &model.InspectionRun{}, &model.InspectionTargetRun{}, &model.ComponentConnection{}, &model.CollectionSample{}, &model.ManagedService{}, &model.ServiceOperation{}, &model.Settings{}, &model.User{}); err != nil {
+	if err := db.AutoMigrate(&model.Server{}, &model.HostMonitorConfig{}, &model.HostMetricSample{}, &model.OperationsDatabase{}, &model.DatabaseQueryRecord{}, &model.DatabaseWorkspace{}, &model.DatabaseSavedQuery{}, &model.DatabaseLogCursor{}, &model.DatabaseLogEvent{}, &model.InspectionPlan{}, &model.InspectionRun{}, &model.InspectionTargetRun{}, &model.ComponentConnection{}, &model.MonitoringState{}, &model.CollectionSample{}, &model.ManagedService{}, &model.ServiceOperation{}, &model.Settings{}, &model.User{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -443,7 +443,7 @@ func TestOperationsHostHistoryUsesLastPointPerBucket(t *testing.T) {
 	}
 	base := time.Now().Truncate(30 * time.Second).Add(-5 * time.Minute)
 	for i, offset := range []time.Duration{time.Second, 10 * time.Second, 60 * time.Second} {
-		sample := model.HostMetricSample{ServerID: server.ID, CollectedAt: base.Add(offset), MetricsJSON: mustJSON(opsprobe.HostMetrics{CPUUsagePercent: float64(i + 1)})}
+		sample := model.HostMetricSample{ServerID: server.ID, CollectedAt: base.Add(offset), MetricsJSON: mustJSON(opsprobe.HostMetrics{Source: "node_exporter", SourceURL: "http://192.0.2.9:9100/metrics", CPUUsagePercent: float64(i + 1)})}
 		if err := db.Create(&sample).Error; err != nil {
 			t.Fatal(err)
 		}

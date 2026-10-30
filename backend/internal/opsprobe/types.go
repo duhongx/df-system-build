@@ -178,6 +178,8 @@ type InspectionDatabaseBinding struct {
 	Error  string          `json:"error,omitempty"`
 }
 type JobResult struct {
+	Indicators      map[string]float64       `json:"indicators,omitempty"`
+	Counters        map[string]float64       `json:"counters,omitempty"`
 	Coverage        *inspection.Summary      `json:"coverage,omitempty"`
 	MemberGroups    [][]string               `json:"memberGroups,omitempty"`
 	ExpectedChecks  []string                 `json:"expectedChecks,omitempty"`

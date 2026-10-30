@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-// ComponentConnection stores inspection sources, not a continuous monitoring job.
+// ComponentConnection supplies both daily monitoring and archived reports.
 // PostgreSQL connections continue to use OperationsDatabase.
 type ComponentConnection struct {
 	ID                uint      `gorm:"primaryKey" json:"id"`
@@ -24,12 +24,35 @@ type ComponentConnection struct {
 // CollectionSample is a disposable last inspection result. Formal reports have
 // their own immutable snapshot and are never deleted by the 48-hour cleanup.
 type CollectionSample struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	TargetType  string    `gorm:"size:24;index:idx_collection_target,priority:1" json:"targetType"`
-	TargetID    uint      `gorm:"index:idx_collection_target,priority:2" json:"targetId"`
-	Revision    uint      `json:"revision"`
-	CollectedAt time.Time `gorm:"index" json:"collectedAt"`
-	ResultJSON  string    `gorm:"type:jsonb;not null" json:"resultJSON"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	TargetType   string    `gorm:"size:24;index:idx_collection_target,priority:1" json:"targetType"`
+	TargetID     uint      `gorm:"index:idx_collection_target,priority:2" json:"targetId"`
+	Revision     uint      `json:"revision"`
+	Lane         string    `gorm:"size:24;not null;default:''" json:"lane"`
+	SourceDigest string    `gorm:"size:64" json:"-"`
+	CollectedAt  time.Time `gorm:"index" json:"collectedAt"`
+	ResultJSON   string    `gorm:"type:jsonb;not null" json:"resultJSON"`
+}
+
+// MonitoringState keeps the latest bounded snapshot separately from the
+// compact 48-hour time series. A database lease prevents duplicate collectors.
+type MonitoringState struct {
+	ID              uint       `gorm:"primaryKey" json:"-"`
+	TargetType      string     `gorm:"size:24;uniqueIndex:idx_monitoring_target,priority:1" json:"targetType"`
+	TargetID        uint       `gorm:"uniqueIndex:idx_monitoring_target,priority:2" json:"targetId"`
+	Lane            string     `gorm:"size:24;uniqueIndex:idx_monitoring_target,priority:3" json:"lane"`
+	SourceDigest    string     `gorm:"size:64" json:"-"`
+	Revision        uint       `json:"revision"`
+	Enabled         bool       `json:"enabled"`
+	IntervalSeconds int        `json:"intervalSeconds"`
+	LastAttemptAt   *time.Time `json:"lastAttemptAt"`
+	LastSuccessAt   *time.Time `json:"lastSuccessAt"`
+	NextAttemptAt   time.Time  `gorm:"index" json:"nextAttemptAt"`
+	LeaseUntil      *time.Time `json:"-"`
+	LeaseToken      string     `gorm:"size:128" json:"-"`
+	Failures        int        `json:"-"`
+	LastError       string     `gorm:"type:text" json:"lastError"`
+	ResultJSON      string     `gorm:"type:jsonb;default:null" json:"-"`
 }
 
 type ManagedService struct {

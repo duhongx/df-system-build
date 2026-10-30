@@ -297,8 +297,8 @@ func (s *OperationsService) executeInspectionTarget(parent context.Context, t *m
 		s.finishInspectionTarget(t, "FAILED", "读取巡检任务失败", nil)
 		return
 	}
-	if run.CollectionMode == "configured" && t.Type != "host" {
-		s.executeConfiguredTarget(parent, t)
+	if run.CollectionMode == "configured" {
+		s.executeMonitoringReportTarget(parent, t)
 		return
 	}
 	timeout := 180 * time.Second

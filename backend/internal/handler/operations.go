@@ -31,6 +31,10 @@ func NewOperationsHandler(svc *service.OperationsService) *OperationsHandler {
 func (h *OperationsHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g := r.Group("/operations")
 	g.Use(middleware.AuthRequired())
+	g.GET("/monitoring", h.MonitoringOverview)
+	g.GET("/monitoring/:kind/:id", h.MonitoringDetail)
+	g.GET("/monitoring/:kind/:id/history", h.MonitoringHistory)
+	g.POST("/monitoring/:kind/:id/refresh", h.RefreshMonitoring)
 	g.GET("/hosts/:id/services", h.ManagedServices)
 	g.POST("/hosts/:id/services", h.SaveManagedService)
 	g.PUT("/hosts/:id/services/:serviceId", h.SaveManagedService)

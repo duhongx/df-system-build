@@ -78,9 +78,9 @@ onMounted(load);
   <section class="component-config">
     <div class="heading">
       <div>
-        <h3>巡检组件连接</h3>
+        <h3>组件连接与监控</h3>
         <p>
-          维护一次，在生成报告或手动核对时读取。PostgreSQL
+          维护连接后按周期自动采集，监控页面和报告共用数据。PostgreSQL
           复用数据库工作台连接，环境 Kubernetes 自动接入。
         </p>
       </div>
@@ -198,7 +198,7 @@ onMounted(load);
               :value="h.id"
               :label="`${h.remark || h.host} · ${h.host}`" /></el-select
           ><small
-            >MinIO 需关联可执行 mc 的主机；其他组件用于关联主机巡检范围。</small
+            >MinIO 需关联可执行 mc 的主机；其他组件用于关联主机资源和低频专项。</small
           ></el-form-item
         >
         <template v-if="form.kind === 'minio'"

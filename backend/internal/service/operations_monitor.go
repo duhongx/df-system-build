@@ -20,7 +20,7 @@ func (s *OperationsService) HostMonitor(id uint) (model.HostMonitorConfig, *opsp
 	if err := s.db.First(&server, id).Error; err != nil {
 		return model.HostMonitorConfig{}, nil, err
 	}
-	cfg := model.HostMonitorConfig{ServerID: id, IntervalSeconds: 60}
+	cfg := model.HostMonitorConfig{ServerID: id, IntervalSeconds: 60, Enabled: true}
 	if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&cfg).Error; err != nil {
 		return cfg, nil, err
 	}
@@ -34,7 +34,13 @@ func (s *OperationsService) HostMonitor(id uint) (model.HostMonitorConfig, *opsp
 		if err := json.Unmarshal([]byte(sample.MetricsJSON), &m); err != nil {
 			return cfg, nil, err
 		}
-		metrics = &m
+		expected := cfg.MetricsURL
+		if expected == "" {
+			expected = "http://" + net.JoinHostPort(server.Host, "9100") + "/metrics"
+		}
+		if m.SourceURL == expected {
+			metrics = &m
+		}
 	}
 	return cfg, metrics, nil
 }
@@ -53,6 +59,11 @@ func (s *OperationsService) ConfigureMonitor(id uint, enabled bool, interval int
 			u, e := url.Parse(raw)
 			if e != nil || u.Hostname() == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Fragment != "" {
 				return cfg, fmt.Errorf("指标地址必须是 HTTP(S) URL，不允许内嵌账号密码")
+			}
+		}
+		if cfg.MetricsURL != raw {
+			if err := s.db.Model(&cfg).Updates(map[string]any{"last_attempt_at": nil, "last_sample_at": nil, "last_error": ""}).Error; err != nil {
+				return cfg, err
 			}
 		}
 		cfg.MetricsURL = raw
@@ -78,7 +89,7 @@ func (s *OperationsService) CollectHostAsync(ctx context.Context, id uint) error
 		qctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 		defer cancel()
 		now := time.Now()
-		cfg := model.HostMonitorConfig{ServerID: id, IntervalSeconds: 60}
+		cfg := model.HostMonitorConfig{ServerID: id, IntervalSeconds: 60, Enabled: true}
 		if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&cfg).Error; err != nil {
 			return
 		}
@@ -130,11 +141,23 @@ func (s *OperationsService) HostHistory(ctx context.Context, id uint, hours int)
 		return nil, 0, fmt.Errorf("历史范围应为 1～48 小时")
 	}
 	step := max(30, (hours*3600+599)/600)
+	cfg, _, err := s.HostMonitor(id)
+	if err != nil {
+		return nil, 0, err
+	}
+	var server model.Server
+	if err := s.db.First(&server, id).Error; err != nil {
+		return nil, 0, err
+	}
+	expected := cfg.MetricsURL
+	if expected == "" {
+		expected = "http://" + net.JoinHostPort(server.Host, "9100") + "/metrics"
+	}
 	step = ((step + 29) / 30) * 30
 	var samples []model.HostMetricSample
 	// Compute the bucket once: PostgreSQL treats separate bind parameters as
 	// different expressions even when they hold the same interval value.
-	err := s.db.WithContext(ctx).Raw(`SELECT * FROM (SELECT DISTINCT ON (bucket) id,server_id,collected_at,metrics_json FROM (SELECT *,floor(extract(epoch FROM collected_at)/?) AS bucket FROM host_metric_samples WHERE server_id=? AND collected_at>=?) raw ORDER BY bucket,collected_at DESC,id DESC) s ORDER BY collected_at ASC`, step, id, time.Now().Add(-time.Duration(hours)*time.Hour)).Scan(&samples).Error
+	err = s.db.WithContext(ctx).Raw(`SELECT * FROM (SELECT DISTINCT ON (bucket) id,server_id,collected_at,metrics_json FROM (SELECT *,floor(extract(epoch FROM collected_at)/?) AS bucket FROM host_metric_samples WHERE server_id=? AND collected_at>=? AND metrics_json->>'sourceURL'=?) raw ORDER BY bucket,collected_at DESC,id DESC) s ORDER BY collected_at ASC`, step, id, time.Now().Add(-time.Duration(hours)*time.Hour), expected).Scan(&samples).Error
 	if err != nil {
 		return nil, step, err
 	}

@@ -17,6 +17,28 @@ import (
 // A component's host-side facts use the same private, read-only runner as a
 // system report. The persisted result is then shared by its page and report.
 func (s *OperationsService) collectHostFacts(parent context.Context, serverID uint, opt opsprobe.ManualOptions, bindings []opsprobe.InspectionDatabaseBinding) (*opsprobe.JobResult, error) {
+	// Kubernetes and MinIO can share a machine. Reuse its one low-frequency
+	// scan rather than walking the same log/heap/image directories per page.
+	if parent.Value(dailyMonitoringContext{}) == true && parent.Value(dailyHostOwner{}) != serverID && opt.Auto && len(bindings) == 0 && opt.ArchiveDirectory == "" && opt.PostgresBackupDirectory == "" && opt.MinIOBackupDirectory == "" {
+		t, err := s.findMonitoringTarget(parent, "host", serverID)
+		if err != nil {
+			return nil, err
+		}
+		if !t.Enabled {
+			return nil, fmt.Errorf("关联主机后台监控已停用")
+		}
+		view, err := s.ensureMonitoringLane(parent, t, "facts")
+		if err != nil {
+			return nil, err
+		}
+		if view.Result == nil || view.Stale {
+			return nil, fmt.Errorf("关联主机专项数据缺失或过期：%s", view.LastError)
+		}
+		if view.LastError != "" && (view.LastAttemptAt == nil || view.CollectedAt == nil || view.CollectedAt.Before(*view.LastAttemptAt)) {
+			return nil, fmt.Errorf("关联主机专项采集失败：%s", view.LastError)
+		}
+		return cloneMonitoringResult(view.Result), nil
+	}
 	ctx, cancel := context.WithTimeout(parent, 125*time.Second)
 	defer cancel()
 	var server model.Server

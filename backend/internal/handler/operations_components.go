@@ -89,7 +89,7 @@ func (h *OperationsHandler) CreateConfiguredRun(c *gin.Context) {
 		opsFail(c, err)
 		return
 	}
-	c.JSON(202, gin.H{"code": 0, "message": "开始现场采集并生成报告", "data": row})
+	c.JSON(202, gin.H{"code": 0, "message": "开始汇总后台监控数据并生成报告", "data": row})
 }
 
 func (h *OperationsHandler) SetPlanEnabled(c *gin.Context) {

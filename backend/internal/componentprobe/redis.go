@@ -80,6 +80,12 @@ func redis(ctx context.Context, c Config) []inspection.Observation {
 		return fail(fmt.Errorf("Redis INFO 缺少必要字段"))
 	}
 	o := Observation("redis-info", "Redis 运行情况", fmt.Sprintf("版本 %s，角色 %s，连接 %s，已用内存 %s，上限 %s，淘汰键累计 %s", m["redis_version"], m["role"], m["connected_clients"], m["used_memory_human"], m["maxmemory_human"], m["evicted_keys"]), "NORMAL")
+	o.Measurements = map[string]float64{}
+	for key, field := range map[string]string{"connections": "connected_clients", "memoryBytes": "used_memory", "maxMemoryBytes": "maxmemory", "operationsPerSecond": "instantaneous_ops_per_sec", "evictedKeys": "evicted_keys"} {
+		if value, err := strconv.ParseFloat(m[field], 64); err == nil {
+			o.Measurements[key] = value
+		}
+	}
 	if m["role"] == "slave" && m["master_link_status"] != "up" {
 		o.Status = "WARNING"
 		o.Reason = "副本与主节点连接未处于 up 状态"
