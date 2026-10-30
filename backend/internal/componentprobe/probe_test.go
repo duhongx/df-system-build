@@ -35,7 +35,11 @@ func TestHTTPCollectorsReportPartialAndResourceFailures(t *testing.T) {
 	for _, kind := range []string{"elasticsearch", "rabbitmq"} {
 		c := Config{Kind: kind, Endpoint: srv.URL, Username: "reader", Secret: "fixture"}
 		out := Collect(context.Background(), c)
-		if len(out) != 2 || out[1].Status != "WARNING" {
+		expected := 2
+		if kind == "rabbitmq" {
+			expected = 3
+		}
+		if len(out) != expected || out[1].Status != "WARNING" {
 			t.Fatalf("%s: %+v", kind, out)
 		}
 		c.Secret = "bad"
@@ -106,6 +110,12 @@ func TestRedisCollectorUsesOnlyInspectionCommands(t *testing.T) {
 			case "INFO":
 				body := "redis_version:7.2\r\nrole:slave\r\nconnected_clients:3\r\nused_memory:90\r\nmaxmemory:100\r\nused_memory_human:90B\r\nmaxmemory_human:100B\r\nmaster_link_status:down\r\nrdb_last_bgsave_status:ok\r\naof_enabled:1\r\naof_last_write_status:err\r\n"
 				fmt.Fprintf(conn, "$%d\r\n%s\r\n", len(body), body)
+			case "SLOWLOG":
+				if args[1] == "LEN" {
+					fmt.Fprint(conn, ":0\r\n")
+				} else {
+					fmt.Fprint(conn, "*0\r\n")
+				}
 			default:
 				fmt.Fprint(conn, "-unsupported\r\n")
 			}
@@ -113,11 +123,11 @@ func TestRedisCollectorUsesOnlyInspectionCommands(t *testing.T) {
 		done <- commands
 	}()
 	out := Collect(context.Background(), Config{Kind: "redis", Endpoint: "redis://" + listener.Addr().String(), Username: "reader", Secret: "fixture"})
-	if len(out) != 2 || out[0].Status != "WARNING" || out[1].Status != "WARNING" {
+	if len(out) != 3 || out[0].Status != "WARNING" || out[1].Status != "WARNING" || out[2].Status != "NORMAL" {
 		t.Fatalf("bad facts: %+v", out)
 	}
 	commands := <-done
-	if strings.Join(commands, ";") != "AUTH reader fixture;PING;INFO" {
+	if strings.Join(commands, ";") != "AUTH reader fixture;PING;INFO;SLOWLOG LEN;SLOWLOG GET 50" {
 		t.Fatalf("unexpected commands: %v", commands)
 	}
 }

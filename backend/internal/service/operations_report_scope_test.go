@@ -17,7 +17,7 @@ func TestExpectedCoverageSurvivesEmptyAndPartialCollectors(t *testing.T) {
 	for _, observations := range [][]inspection.Observation{nil, {{Code: "redis-info", Status: "NORMAL"}}} {
 		r := opsprobe.JobResult{Type: "redis", ExpectedChecks: inspection.RequiredCodes("redis"), ReportChecks: observations}
 		setCollectionCoverage(&r)
-		if r.Coverage.Total != 2 || r.Coverage.Planned != 2 || r.Coverage.Completed != len(observations) || r.Coverage.Unknown != 2-len(observations) || r.Coverage.NotRun != 0 {
+		if r.Coverage.Total != 3 || r.Coverage.Planned != 3 || r.Coverage.Completed != len(observations) || r.Coverage.Unknown != 3-len(observations) || r.Coverage.NotRun != 0 {
 			t.Fatalf("omitted checks disappeared: %+v", r.Coverage)
 		}
 	}

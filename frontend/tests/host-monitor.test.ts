@@ -80,6 +80,27 @@ it("tolerates absent optional network and disk inventories", async () => {
   expect(errors).toEqual([]);
 });
 
+it("shows mountpoints rather than device paths in the capacity and inode table",async()=>{
+ api.getHostMonitor.mockResolvedValue({config:{enabled:true,intervalSeconds:60},collecting:false,metrics:{...metric(),disks:[{mountpoint:"/",device:"/dev/mapper/openeuler-root",totalBytes:107374182400,availableBytes:53687091200,usedPercent:50,inodes:100000,inodeUsedPercent:10}]}});
+ const root=mount();
+ await vi.waitFor(()=>expect(root.textContent).toContain("磁盘容量与 inode"));
+ expect(root.querySelector(".el-table")?.textContent).toContain("/");
+ expect(root.textContent).not.toContain("/dev/mapper/openeuler-root");
+ expect(Array.from(root.querySelectorAll("th")).some(th=>th.textContent?.trim()==="设备")).toBe(false);
+ expect(errors).toEqual([]);
+});
+
+it("switches the shared Linux monitor directly to the 35th host from the dropdown",async()=>{
+ api.listMonitoring.mockResolvedValue(Array.from({length:35},(_,i)=>({id:i+1,targetType:"host",kind:"hosts",name:`主机-${i+1}`,endpoint:`192.0.2.${i+1}`,enabled:true,status:"NORMAL",intervalSeconds:60,indicators:{}})));
+ const root=mount(true);
+ await vi.waitFor(()=>expect(api.getHostMonitor).toHaveBeenCalledWith(1));
+ (root.querySelector('[aria-label="切换监控主机"]') as HTMLElement).click();
+ await vi.waitFor(()=>expect(Array.from(document.querySelectorAll(".el-select-dropdown__item")).filter(o=>o.textContent?.includes("主机-")).length).toBe(35));
+ const option=Array.from(document.querySelectorAll(".el-select-dropdown__item")).find(o=>o.textContent?.includes("主机-35")) as HTMLElement;option.click();
+ await vi.waitFor(()=>expect(api.getHostMonitor).toHaveBeenCalledWith(35));
+ expect(root.querySelector(".instance-table")).toBeNull();expect(api.collectHostMetric).not.toHaveBeenCalled();expect(errors).toEqual([]);
+});
+
 it("shows the actual disk used by I/O charts and allows switching devices", async () => {
   const m = { ...metric(), diskIO: ["sda", "sdb"].map((device, i) => ({ device, kind: "disk", mountpoints: i ? ["/data"] : ["/"], readPerSecond: 1024, writePerSecond: 2048, readAwaitMs: 1, writeAwaitMs: 2 })) };
   api.getHostMonitor.mockResolvedValue({ config: { enabled: true, intervalSeconds: 60 }, metrics: m, collecting: false });

@@ -22,11 +22,11 @@ func RequiredCodes(kind string) []string {
 	case "minio":
 		return []string{"cloudhis-3", "cloudhis-5", "cloudhis-36", "cloudhis-37", "cloudhis-38", "cloudhis-39"}
 	case "redis":
-		return []string{"redis-info", "redis-persistence"}
+		return []string{"redis-info", "redis-persistence", "redis-slowlog"}
 	case "elasticsearch":
 		return []string{"elasticsearch-health", "elasticsearch-resources"}
 	case "rabbitmq":
-		return []string{"rabbitmq-overview", "rabbitmq-nodes"}
+		return []string{"rabbitmq-overview", "rabbitmq-nodes", "rabbitmq-queues"}
 	}
 	return nil
 }
@@ -39,6 +39,9 @@ func CheckDefinition(code string) Definition {
 	}
 	names := map[string]string{"host_identity": "Linux 系统信息", "host_cpu": "CPU 与负载", "host_memory": "内存与 Swap", "host_filesystems": "实际文件系统容量与 inode", "host-discovery": "主机部署识别", "postgresql-archive": "PostgreSQL 归档配置与执行统计", "redis-info": "Redis 运行情况", "redis-persistence": "Redis 持久化与复制", "elasticsearch-health": "Elasticsearch 集群状态", "elasticsearch-resources": "Elasticsearch 节点资源", "rabbitmq-overview": "RabbitMQ 运行概况", "rabbitmq-nodes": "RabbitMQ 节点与告警"}
 	name := names[code]
+	if name == "" {
+		name = map[string]string{"redis-slowlog": "Redis 慢查询", "rabbitmq-queues": "RabbitMQ 队列与积压", "postgresql-slots": "复制槽与 WAL 保留", "postgresql-table-health": "表空间与 VACUUM", "postgresql-slow-history": "慢 SQL 日志（48 小时）"}[code]
+	}
 	if name == "" {
 		name = code
 	}

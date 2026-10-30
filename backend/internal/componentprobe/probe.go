@@ -190,7 +190,7 @@ func rabbit(ctx context.Context, c Config) []inspection.Observation {
 		Partitions []string `json:"partitions"`
 	}
 	if err := getJSON(ctx, c, "/api/nodes?columns=name,running,mem_alarm,disk_free_alarm,partitions", &nodes); err != nil {
-		return []inspection.Observation{o, Failed("rabbitmq-nodes", "RabbitMQ 节点与告警", err)}
+		return []inspection.Observation{o, Failed("rabbitmq-nodes", "RabbitMQ 节点与告警", err), rabbitQueues(ctx, c, overview.Object.Queues)}
 	}
 	n := Observation("rabbitmq-nodes", "RabbitMQ 节点与告警", fmt.Sprintf("检查 %d 个节点", len(nodes)), "NORMAL")
 	t := inspection.Table{Columns: []string{"节点", "运行", "内存告警", "磁盘告警", "网络分区"}}
@@ -210,7 +210,7 @@ func rabbit(ctx context.Context, c Config) []inspection.Observation {
 		n.Reason = "未返回节点，核对管理接口权限"
 	}
 	n.Tables = []inspection.Table{t}
-	return []inspection.Observation{o, n}
+	return []inspection.Observation{o, n, rabbitQueues(ctx, c, overview.Object.Queues)}
 }
 func boolText(v *bool) string {
 	if v == nil {

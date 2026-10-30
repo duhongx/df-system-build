@@ -15,7 +15,7 @@ import (
 	"df-build-server/internal/inspection"
 )
 
-// The collector only sends AUTH, PING, INFO and CLUSTER INFO. It never reads keys.
+// Only authentication and read-only runtime/slow-log commands are issued.
 func redis(ctx context.Context, c Config) []inspection.Observation {
 	fail := func(err error) []inspection.Observation {
 		return []inspection.Observation{Failed("redis-info", "Redis 运行情况", err)}
@@ -47,16 +47,27 @@ func redis(ctx context.Context, c Config) []inspection.Observation {
 	}
 	conn.SetDeadline(deadline)
 	r := bufio.NewReader(conn)
-	command := func(args ...string) (string, error) {
+	commandValue := func(args ...string) (any, error) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "*%d\r\n", len(args))
 		for _, a := range args {
 			fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
 		}
 		if _, err := io.WriteString(conn, b.String()); err != nil {
+			return nil, err
+		}
+		return redisValue(r)
+	}
+	command := func(args ...string) (string, error) {
+		value, err := commandValue(args...)
+		if err != nil {
 			return "", err
 		}
-		return redisReply(r)
+		s, ok := value.(string)
+		if !ok {
+			return "", fmt.Errorf("Redis 响应类型不支持")
+		}
+		return s, nil
 	}
 	if c.Secret != "" {
 		args := []string{"AUTH"}
@@ -103,7 +114,7 @@ func redis(ctx context.Context, c Config) []inspection.Observation {
 		p.Status = "WARNING"
 		p.Reason = "持久化最近一次执行/写入失败"
 	}
-	out := []inspection.Observation{o, p}
+	out := []inspection.Observation{o, p, redisSlowlog(commandValue)}
 	if m["cluster_enabled"] == "1" {
 		text, err := command("CLUSTER", "INFO")
 		if err != nil {
@@ -129,37 +140,13 @@ func redisInfo(s string) map[string]string {
 	return m
 }
 func redisReply(r *bufio.Reader) (string, error) {
-	data, err := r.ReadSlice('\n')
-	line := string(data)
+	value, err := redisValue(r)
 	if err != nil {
 		return "", err
 	}
-	if len(line) > 4096 {
-		return "", fmt.Errorf("响应头过长")
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("Redis 响应类型不支持")
 	}
-	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-	if len(line) == 0 {
-		return "", fmt.Errorf("空响应")
-	}
-	switch line[0] {
-	case '+':
-		return line[1:], nil
-	case '-':
-		return "", fmt.Errorf("Redis 命令被拒绝")
-	case '$':
-		n, err := strconv.Atoi(line[1:])
-		if err != nil || n < 0 || n > 4<<20 {
-			return "", fmt.Errorf("Redis 响应长度异常")
-		}
-		b := make([]byte, n+2)
-		_, err = io.ReadFull(r, b)
-		if err != nil {
-			return "", err
-		}
-		if string(b[n:]) != "\r\n" {
-			return "", fmt.Errorf("Redis 响应结尾无效")
-		}
-		return string(b[:n]), nil
-	}
-	return "", fmt.Errorf("Redis 响应类型不支持")
+	return text, nil
 }

@@ -233,6 +233,9 @@ type nativePostgreSQLFacts struct {
 	Failed            int64      `json:"failed"`
 	LastArchived      *time.Time `json:"lastArchived"`
 	LastFailed        *time.Time `json:"lastFailed"`
+	LastArchivedWAL   string     `json:"lastArchivedWal"`
+	LastFailedWAL     string     `json:"lastFailedWal"`
+	ArchiveStatsReset *time.Time `json:"archiveStatsReset"`
 }
 
 const nativePostgreSQLSQL = `SELECT current_setting('server_version'),pg_is_in_recovery(),
@@ -241,7 +244,7 @@ const nativePostgreSQLSQL = `SELECT current_setting('server_version'),pg_is_in_r
  (SELECT count(*) FROM pg_stat_replication r JOIN pg_replication_slots s ON s.active_pid=r.pid WHERE s.slot_type='logical'),
  (SELECT count(*) FROM pg_replication_slots WHERE slot_type='physical'),
  current_setting('archive_mode'),length(trim(current_setting('archive_command')))>0,
- archived_count,failed_count,last_archived_time,last_failed_time,current_setting('archive_command') FROM pg_stat_archiver`
+ archived_count,failed_count,last_archived_time,last_failed_time,current_setting('archive_command'),COALESCE(last_archived_wal,''),COALESCE(last_failed_wal,''),stats_reset FROM pg_stat_archiver`
 
 func inspectNativePostgreSQL(parent context.Context, binding InspectionDatabaseBinding) (nativePostgreSQLFacts, inspection.Execution, error) {
 	f := nativePostgreSQLFacts{}
@@ -260,7 +263,7 @@ func inspectNativePostgreSQL(parent context.Context, binding InspectionDatabaseB
 		if openErr != nil {
 			err = openErr
 		} else {
-			err = conn.QueryRow(ctx, nativePostgreSQLSQL).Scan(&f.Version, &f.Recovery, &f.StatsVisible, &f.PhysicalPeers, &f.LogicalPeers, &f.PhysicalSlots, &f.ArchiveMode, &f.ArchiveConfigured, &f.Archived, &f.Failed, &f.LastArchived, &f.LastFailed, &f.ArchiveCommand)
+			err = conn.QueryRow(ctx, nativePostgreSQLSQL).Scan(&f.Version, &f.Recovery, &f.StatsVisible, &f.PhysicalPeers, &f.LogicalPeers, &f.PhysicalSlots, &f.ArchiveMode, &f.ArchiveConfigured, &f.Archived, &f.Failed, &f.LastArchived, &f.LastFailed, &f.ArchiveCommand, &f.LastArchivedWAL, &f.LastFailedWAL, &f.ArchiveStatsReset)
 			conn.Close(context.WithoutCancel(ctx))
 		}
 		if err != nil {
@@ -354,6 +357,7 @@ func nativePostgreSQLObservations(name string, f nativePostgreSQLFacts, e inspec
 				}
 			}
 			o.Threshold = "记录归档配置与执行统计；不据此宣称归档目录保留策略已核验"
+			o.Tables = []inspection.Table{{Columns: []string{"归档状态", "成功累计", "失败累计", "最近成功文件", "最近成功时间", "最近失败文件", "最近失败时间", "统计重置时间"}, Rows: [][]string{{o.Attributes["archiveState"], strconv.FormatInt(f.Archived, 10), strconv.FormatInt(f.Failed, 10), emptyDash(f.LastArchivedWAL), pgTime(f.LastArchived), emptyDash(f.LastFailedWAL), pgTime(f.LastFailed), pgTime(f.ArchiveStatsReset)}}}}
 		}
 		out[code] = o
 	}

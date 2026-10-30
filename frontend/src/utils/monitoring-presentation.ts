@@ -29,6 +29,9 @@ const specs: Record<string, MetricSpec[]> = {
     { label: "当前连接", key: "connections" }, { label: "连接上限", key: "maxConnections" },
     { label: "锁等待", key: "lockWaits" }, { label: "慢 SQL", key: "slowQueries" },
     { label: "长事务", key: "longTransactions" }, { label: "物理备库连接", key: "physicalReplicas" },
+    { label: "复制槽", key: "slots" }, { label: "未活跃 Slot", key: "inactiveSlots" },
+    { label: "最大 Slot 保留 WAL", key: "maxSlotRetainedBytes", unit: "GiB", divisor: 1073741824, decimals: 2 },
+    { label: "累计归档失败", key: "archiveFailedCount" }, { label: "慢日志记录（48h）", key: "historicalSlowLogs" },
   ],
   kubernetes: [
     { label: "节点", key: "nodes" }, { label: "异常节点", key: "unhealthyNodes" },
@@ -46,10 +49,13 @@ const specs: Record<string, MetricSpec[]> = {
     { label: "连接", key: "connections" }, { label: "操作速率", key: "operationsPerSecond", unit: "次/s" },
     { label: "已用内存", key: "memoryBytes", unit: "MiB", divisor: 1048576, decimals: 1 },
     { label: "累计淘汰键", key: "evictedKeys" },
+    { label: "慢日志缓存", key: "slowLogLength", unit: "条" }, { label: "近期慢日志最大耗时", key: "slowLogMaxMs", unit: "ms", decimals: 2 },
   ],
   rabbitmq: [
     { label: "连接", key: "connections" }, { label: "消费者", key: "consumers" },
     { label: "待消费消息", key: "readyMessages" }, { label: "未确认消息", key: "unackedMessages" },
+    { label: "队列", key: "queueCount" }, { label: "有待消费的队列", key: "backlogQueues" },
+    { label: "待消费且无消费者", key: "noConsumerQueues" }, { label: "待消费增加的队列", key: "growingQueues" },
   ],
 };
 export function metricCards(kind: string, view?: MonitoringView) {
@@ -102,10 +108,15 @@ export function monitoringSummary(view: MonitoringView): string {
   }
 }
 export function currentIssues(view?: MonitoringView) {
-  return liveChecks(view).filter(c => ["WARNING", "CRITICAL", "UNKNOWN", "NOT_RUN"].includes(c.status)).map(c => ({
+  return liveChecks(view).filter(c => !sectionCodes.includes(c.code) && ["WARNING", "CRITICAL", "UNKNOWN", "NOT_RUN"].includes(c.status)).map(c => ({
     name: c.name,
     status: c.status === "UNKNOWN" || c.status === "NOT_RUN" ? "数据不可用" : c.status === "CRITICAL" ? "异常" : "需关注",
     message: c.reason || c.value || "未取得数据",
     tables: (c.tables || []).filter(t => t.title === "当前异常 Pod"),
   }));
+}
+
+const sectionCodes = ["postgresql-slots","postgresql-archive","cloudhis-33","postgresql-slow-history","postgresql-table-health","postgresql-table-bloat","postgresql-index-bloat","redis-slowlog","rabbitmq-queues"];
+export function monitoringSections(view?:MonitoringView) {
+  return liveChecks(view).filter(c=>sectionCodes.includes(c.code)).sort((a,b)=>sectionCodes.indexOf(a.code)-sectionCodes.indexOf(b.code));
 }

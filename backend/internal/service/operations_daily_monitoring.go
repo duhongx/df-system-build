@@ -168,7 +168,7 @@ func monitoringLaneCodes(t monitoringTarget, lane string) []string {
 	}
 	if t.Type == "database" {
 		if lane == "live" {
-			return []string{"cloudhis-2", "cloudhis-16", "postgresql-archive", "cloudhis-27", "cloudhis-28", "cloudhis-30", "cloudhis-33"}
+			return []string{"cloudhis-2", "cloudhis-16", "postgresql-archive", "cloudhis-27", "cloudhis-28", "cloudhis-30", "cloudhis-33", "postgresql-slots", "postgresql-table-health", "postgresql-slow-history"}
 		}
 		if lane == "facts" {
 			return []string{"cloudhis-4", "cloudhis-15", "cloudhis-17", "cloudhis-18", "cloudhis-19"}
@@ -550,8 +550,8 @@ func (s *OperationsService) MonitoringDetail(ctx context.Context, kind string, i
 }
 
 // MonitoringDashboard returns current display data only. Report evidence remains
-// in the original snapshots; page polling never reads host/deep SQL lanes or
-// transfers SQL texts, command executions, raw sessions, and host inventories.
+// in the original snapshots. Only bounded diagnostic tables and transformed
+// bloat estimates reach the page; GET never starts collection or a deep scan.
 func (s *OperationsService) MonitoringDashboard(ctx context.Context, kind string, id uint) (MonitoringView, error) {
 	t, err := s.findMonitoringTarget(ctx, kind, id)
 	if err != nil {
@@ -565,7 +565,9 @@ func (s *OperationsService) MonitoringDashboard(ctx context.Context, kind string
 	out := &opsprobe.JobResult{Type: r.Type, Name: r.Name, Version: r.Version, StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, Indicators: r.Indicators}
 	for _, check := range r.ReportChecks {
 		display := inspection.Observation{Code: check.Code, Name: check.Name, Status: check.Status, Value: check.Value, Reason: check.Reason, CollectedAt: check.CollectedAt, Attributes: check.Attributes, Measurements: check.Measurements}
-		if check.Status == "WARNING" || check.Status == "CRITICAL" {
+		if monitoringOperationalTable(check.Code) {
+			display.Tables = check.Tables
+		} else if check.Status == "WARNING" || check.Status == "CRITICAL" {
 			for _, table := range check.Tables {
 				if table.Title == "当前异常 Pod" {
 					display.Tables = append(display.Tables, table)
@@ -574,8 +576,19 @@ func (s *OperationsService) MonitoringDashboard(ctx context.Context, kind string
 		}
 		out.ReportChecks = append(out.ReportChecks, display)
 	}
+	if t.Type == "database" {
+		out.ReportChecks = append(out.ReportChecks, s.monitoringBloatSections(ctx, t)...)
+	}
 	v.Result = out
 	return v, nil
+}
+
+func monitoringOperationalTable(code string) bool {
+	switch code {
+	case "postgresql-slots", "postgresql-table-health", "postgresql-archive", "postgresql-slow-history", "cloudhis-33", "redis-slowlog", "rabbitmq-queues":
+		return true
+	}
+	return false
 }
 func (s *OperationsService) MonitoringHistory(ctx context.Context, kind string, id uint, hours int) ([]MonitoringPoint, int, error) {
 	if hours < 1 || hours > 48 {

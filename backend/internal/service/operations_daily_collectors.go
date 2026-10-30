@@ -94,6 +94,11 @@ func (s *OperationsService) collectMonitoring(ctx context.Context, t monitoringT
 					status = "WARNING"
 				}
 				o := componentprobe.Observation(spec.code, spec.name, fmt.Sprintf("%d 个", count), status)
+				if spec.key == "slowQueries" {
+					o.Name = "当前慢 SQL（≥5 秒）"
+					o.CollectedAt = d.CheckedAt
+					o.Tables = []inspection.Table{opsprobe.PostgreSQLSlowQueryTable(d)}
+				}
 				if !d.StatsVisible || d.Truncated {
 					o.Status = "UNKNOWN"
 					o.Reason = "会话可见范围不足或返回达到上限，不能认定无异常"
@@ -108,6 +113,8 @@ func (s *OperationsService) collectMonitoring(ctx context.Context, t monitoringT
 			}
 			r.ReportChecks = append(r.ReportChecks, o)
 			r.ReportChecks = append(r.ReportChecks, opsprobe.InspectionPostgreSQLDeployment(ctx, row.Name, cfg)...)
+			r.ReportChecks = append(r.ReportChecks, opsprobe.InspectionPostgreSQLMonitoring(ctx, cfg)...)
+			r.ReportChecks = append(r.ReportChecks, s.monitoringPostgresSlowHistory(ctx, row))
 		}
 	} else {
 		var row model.ComponentConnection
@@ -162,11 +169,24 @@ func (s *OperationsService) collectMonitoring(ctx context.Context, t monitoringT
 			}
 		}
 	}
-	if t.Kind == "kubernetes" && lane == "live" {
+	if (t.Kind == "kubernetes" || t.Kind == "rabbitmq") && lane == "live" {
 		var previous model.MonitoringState
 		if s.db.Where("target_type=? AND target_id=? AND lane='live' AND source_digest=?", t.Type, t.ID, t.Digest).First(&previous).Error == nil {
 			var old opsprobe.JobResult
 			if json.Unmarshal([]byte(previous.ResultJSON), &old) == nil {
+				if t.Kind == "rabbitmq" {
+					if !old.FinishedAt.After(r.StartedAt) && time.Since(old.FinishedAt) <= time.Duration(t.Interval*3)*time.Second {
+						componentprobe.CompareRabbitQueues(r.ReportChecks, old.ReportChecks)
+						for _, o := range r.ReportChecks {
+							if o.Code == "rabbitmq-queues" {
+								if value, ok := o.Measurements["growingQueues"]; ok {
+									r.Indicators["growingQueues"] = value
+								}
+							}
+						}
+					}
+					return r, nil
+				}
 				matched := 0
 				delta := 0.0
 				for uid, value := range r.Counters {

@@ -178,18 +178,44 @@ it.each(["postgresql","kubernetes","minio","elasticsearch","redis","rabbitmq"])(
  const el=mount(()=>h(ComponentInspectionPanel,{kind}));
  await vi.waitFor(()=>expect(api.getMonitoring).toHaveBeenCalled());
  expect(el.querySelectorAll(".metric-card").length).toBeGreaterThanOrEqual(4);
- expect(el.querySelectorAll(".metric-panel")).toHaveLength(2);
+ expect(el.querySelectorAll(".metric-panel")).toHaveLength(["postgresql","redis"].includes(kind)?4:2);
  expect(el.querySelector("pre")).toBeNull();
 });
 
-it("highlights the current instance and keeps unavailable values distinct from zero", async () => {
+it("uses a searchable instance picker and keeps unavailable values distinct from zero", async () => {
  api.listMonitoring.mockResolvedValue([{id:8,targetType:"component",kind:"minio",name:"存储实例",endpoint:"fixture",status:"PARTIAL",enabled:true,intervalSeconds:60,indicators:{offlineDisks:0}}]);
  api.getMonitoring.mockResolvedValue({status:"PARTIAL",intervalSeconds:60,indicators:{offlineDisks:0},result:{reportChecks:[]}});
  const el=mount(()=>h(ComponentInspectionPanel,{kind:"minio"}));
- await vi.waitFor(()=>expect(el.querySelector(".el-table__body tr.current-row")?.textContent).toContain("存储实例"));
+ await vi.waitFor(()=>expect(el.querySelector(".instance-picker")?.textContent).toContain("存储实例"));
+ expect(el.querySelector(".instance-table")).toBeNull();
  const cards=Array.from(el.querySelectorAll(".metric-card"));
  expect(cards.find(c=>c.textContent?.includes("离线磁盘"))?.querySelector("strong")?.textContent).toBe("0");
  const missing=cards.find(c=>c.textContent?.includes("最高磁盘使用率"));
  expect(missing?.querySelector("strong")?.textContent).toBe("—");
  expect(missing?.querySelector("small")).toBeNull();
+});
+
+it("switches among 35 instances using name or address search and discards late data", async () => {
+ api.listMonitoring.mockResolvedValue(Array.from({length:35},(_,i)=>({id:i+1,targetType:"component",kind:"redis",name:`Redis-${i+1}`,endpoint:`192.0.2.${i+1}:6379`,enabled:true,status:"NORMAL",intervalSeconds:30,indicators:{}})));
+ let resolveOld:(v:unknown)=>void=()=>{};
+ api.getMonitoring.mockImplementation((_kind:string,id:number)=>id===1?new Promise(resolve=>{resolveOld=resolve;}):Promise.resolve({status:"NORMAL",intervalSeconds:30,indicators:{connections:35},result:{reportChecks:[]}}));
+ const el=mount(()=>h(ComponentInspectionPanel,{kind:"redis"}));
+ await vi.waitFor(()=>expect(api.getMonitoring).toHaveBeenCalledWith("component",1));
+ const input=el.querySelector('[aria-label="切换监控实例"]') as HTMLInputElement;
+ input.click(); input.value="192.0.2.35"; input.dispatchEvent(new Event("input",{bubbles:true}));
+ await vi.waitFor(()=>expect(Array.from(document.querySelectorAll(".el-select-dropdown__item")).some(o=>o.textContent?.includes("Redis-35"))).toBe(true));
+ const option=Array.from(document.querySelectorAll(".el-select-dropdown__item")).find(o=>o.textContent?.includes("Redis-35")) as HTMLElement;option.click();
+ resolveOld({status:"CRITICAL",intervalSeconds:30,indicators:{connections:9999},result:{reportChecks:[]}});
+ await vi.waitFor(()=>expect(api.getMonitoring).toHaveBeenCalledWith("component",35));
+ await vi.waitFor(()=>expect(el.querySelector(".metric-cards")?.textContent).toContain("连接35"));
+ expect(el.querySelector(".metric-cards")?.textContent).not.toContain("9999");
+ expect(el.querySelector(".instance-table")).toBeNull();
+});
+
+it.each(["postgresql-slots","postgresql-archive","cloudhis-33","postgresql-table-bloat","postgresql-index-bloat","redis-slowlog","rabbitmq-queues"])("shows the operational table for %s without raw evidence",async code=>{
+ api.listMonitoring.mockResolvedValue([{id:1,targetType:"database",kind:"postgresql",name:"业务库",endpoint:"pg:5432",enabled:true,status:"NORMAL",intervalSeconds:30,indicators:{}}]);
+ api.getMonitoring.mockResolvedValue({status:"NORMAL",intervalSeconds:30,result:{reportChecks:[{code,name:code,status:"RECORDED",tables:[{columns:["对象","统计值"],rows:[["业务对象", "123"]]}],executions:[{stdout:"private-raw"}]}]}});
+ const el=mount(()=>h(ComponentInspectionPanel,{kind:"postgresql"}));
+ await vi.waitFor(()=>expect(el.querySelector(".monitor-data-table")?.textContent).toContain("业务对象"));
+ expect(el.textContent).toContain("123");expect(el.textContent).not.toContain("private-raw");expect(el.textContent).not.toContain("已记录");
 });
