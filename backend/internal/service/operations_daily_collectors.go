@@ -22,20 +22,9 @@ func (s *OperationsService) collectMonitoring(ctx context.Context, t monitoringT
 	r := &opsprobe.JobResult{Type: t.Kind, Name: t.Name, Version: opsprobe.Version, StartedAt: time.Now(), Indicators: map[string]float64{}}
 	defer func() { r.FinishedAt = time.Now() }()
 	if t.Type == "host" {
-		var bindings []opsprobe.InspectionDatabaseBinding
-		var databases []model.OperationsDatabase
-		if err := s.db.WithContext(ctx).Where("server_id=?", t.ID).Find(&databases).Error; err != nil {
+		bindings, err := s.monitoringHostDatabaseBindings(ctx, t.ID)
+		if err != nil {
 			return nil, err
-		}
-		for _, d := range databases {
-			cfg, err := s.databaseConfig(d)
-			binding := opsprobe.InspectionDatabaseBinding{Name: d.Name}
-			if err != nil {
-				binding.Error = err.Error()
-			} else {
-				binding.Config = &cfg
-			}
-			bindings = append(bindings, binding)
 		}
 		opt := opsprobe.ManualOptions{Auto: true}
 		var components []model.ComponentConnection
@@ -193,6 +182,34 @@ func (s *OperationsService) collectMonitoring(ctx context.Context, t monitoringT
 		}
 	}
 	return r, nil
+}
+
+func (s *OperationsService) monitoringHostDatabaseBindings(ctx context.Context, serverID uint) ([]opsprobe.InspectionDatabaseBinding, error) {
+	var rows []model.OperationsDatabase
+	if err := s.db.WithContext(ctx).Where("server_id=? OR COALESCE(server_id,0)=0", serverID).Order("id").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	bindings := []opsprobe.InspectionDatabaseBinding{}
+	for _, row := range rows {
+		if row.ServerID == 0 {
+			hosts, err := s.matchingServers(ctx, []string{row.Host}, 0)
+			if err != nil {
+				return nil, err
+			}
+			if len(hosts) != 1 || hosts[0].ID != serverID {
+				continue
+			}
+		}
+		cfg, err := s.databaseConfig(row)
+		binding := opsprobe.InspectionDatabaseBinding{Name: row.Name}
+		if err != nil {
+			binding.Error = err.Error()
+		} else {
+			binding.Config = &cfg
+		}
+		bindings = append(bindings, binding)
+	}
+	return bindings, nil
 }
 
 func monitoringResultError(r *opsprobe.JobResult) string {

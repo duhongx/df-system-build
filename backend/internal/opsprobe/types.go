@@ -51,6 +51,7 @@ type CPUPressure struct {
 	Avg300 float64 `json:"avg300"`
 }
 type HostMetrics struct {
+	CapabilityNotes            []string     `json:"capabilityNotes,omitempty"`
 	Source                     string       `json:"source"`
 	SourceURL                  string       `json:"sourceURL"`
 	SampleSeconds              float64      `json:"sampleSeconds"`

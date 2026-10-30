@@ -382,3 +382,29 @@ func TestDailyMonitoringHostSourceChangeDoesNotReuseOldEndpointHistory(t *testin
 		t.Fatal("changed endpoint retained the old curve", history, err)
 	}
 }
+
+func TestDailyMonitoringHostInfersOnlyUniqueDatabaseAddresses(t *testing.T) {
+	s, db := dailyFixture(t)
+	hosts := []model.Server{{Host: "192.0.2.31", Username: "fixture"}, {Host: "192.0.2.32", Username: "fixture"}}
+	if err := db.Create(&hosts).Error; err != nil {
+		t.Fatal(err)
+	}
+	rows := []model.OperationsDatabase{{Name: "implicit", Host: hosts[0].Host, Port: 5432, Database: "fixture", Username: "fixture", Revision: 1}, {Name: "explicit-wins", Host: hosts[0].Host, Port: 5433, Database: "fixture", Username: "fixture", ServerID: hosts[1].ID, Revision: 1}}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	bindings, err := s.monitoringHostDatabaseBindings(context.Background(), hosts[0].ID)
+	if err != nil || len(bindings) != 1 || bindings[0].Name != "implicit" {
+		t.Fatalf("unique address was not associated: %+v %v", bindings, err)
+	}
+	bindings, err = s.monitoringHostDatabaseBindings(context.Background(), hosts[1].ID)
+	if err != nil || len(bindings) != 1 || bindings[0].Name != "explicit-wins" {
+		t.Fatalf("explicit association lost priority: %+v %v", bindings, err)
+	}
+	duplicate := model.Server{Host: hosts[0].Host, Username: "other"}
+	db.Create(&duplicate)
+	bindings, err = s.monitoringHostDatabaseBindings(context.Background(), hosts[0].ID)
+	if err != nil || len(bindings) != 0 {
+		t.Fatal("ambiguous address was guessed", bindings, err)
+	}
+}

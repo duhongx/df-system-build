@@ -78,7 +78,7 @@ func (s *OperationsService) monitoringTargets(ctx context.Context) ([]monitoring
 	for _, c := range components {
 		bindings = append(bindings, []any{c.ID, c.Revision, c.Enabled, c.ServerID})
 	}
-	factsDigest := monitorDigest([]any{hostKeys, bindings})
+	factsDigest := monitorDigest([]any{"host-bindings-v2", hostKeys, bindings})
 	var configs []model.HostMonitorConfig
 	if err := s.db.WithContext(ctx).Find(&configs).Error; err != nil {
 		return nil, err

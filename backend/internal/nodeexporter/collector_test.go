@@ -2,6 +2,7 @@ package nodeexporter
 
 import (
 	"context"
+	"df-build-server/internal/opsprobe"
 	"fmt"
 	"math"
 	"net/http"
@@ -81,6 +82,42 @@ func TestCounterRatesLatencyAndMappings(t *testing.T) {
 	m, e = calculate(a, b, "fixture")
 	if e != nil || m.DiskIO[0].ReadAwaitMs != nil {
 		t.Fatalf("idle read latency %v %+v", e, m)
+	}
+}
+
+func TestOptionalDeviceIdentityDoesNotInvalidateRequiredMetrics(t *testing.T) {
+	strip := func(text, prefix string) string {
+		lines := []string{}
+		for _, line := range strings.Split(text, "\n") {
+			if !strings.HasPrefix(line, prefix) {
+				lines = append(lines, line)
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	now := time.Now()
+	a := fixtureSnapshot(t, strip(fixtureMetrics(0), "node_disk_device_mapper_info"), now)
+	b := fixtureSnapshot(t, strip(fixtureMetrics(1), "node_disk_device_mapper_info"), now.Add(2*time.Second))
+	m, err := calculate(a, b, "http://fixture/metrics")
+	if err != nil || len(m.CapabilityNotes) != 1 || len(m.Warnings) != 0 {
+		t.Fatalf("optional metadata marked collection as incomplete: %+v %v", m, err)
+	}
+	for _, c := range opsprobe.HostChecks(m) {
+		if c.Status == "UNKNOWN" {
+			t.Fatal("valid CPU/memory/filesystems reported as missing", c)
+		}
+	}
+	b = fixtureSnapshot(t, strip(strip(fixtureMetrics(1), "node_disk_device_mapper_info"), "node_filesystem_avail_bytes"), now.Add(2*time.Second))
+	m, err = calculate(a, b, "http://fixture/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown := false
+	for _, c := range opsprobe.HostChecks(m) {
+		unknown = unknown || c.Status == "UNKNOWN"
+	}
+	if !unknown {
+		t.Fatal("missing filesystem capacity was treated as optional")
 	}
 }
 func TestHTTPOnlyCollectionAndFailure(t *testing.T) {

@@ -436,7 +436,7 @@ func enrichFromExporter(s snapshot, m *opsprobe.HostMetrics) {
 	}
 	for _, d := range m.DiskIO {
 		if d.Kind == "mapper" && d.MappedName == "" {
-			m.Warnings = append(m.Warnings, "exporter 未导出 "+d.Device+" 的映射名称与上下游关系，此处无法确认挂载用途")
+			m.CapabilityNotes = append(m.CapabilityNotes, "exporter 未导出 "+d.Device+" 的映射名称与上下游关系，此处无法确认挂载用途")
 		}
 	}
 }
