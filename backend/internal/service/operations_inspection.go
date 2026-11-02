@@ -141,7 +141,11 @@ func (s *OperationsService) scheduleInspections(ctx context.Context) {
 				return err
 			}
 			now, until := time.Now(), time.Now().Add(30*time.Second)
-			updates := map[string]any{"status": "RUNNING", "lease_owner": s.owner, "lease_until": until, "message": "后台巡检中"}
+			message := "后台巡检中"
+			if run.CollectionMode == "configured" {
+				message = "正在生成报告，数据快照已保存"
+			}
+			updates := map[string]any{"status": "RUNNING", "lease_owner": s.owner, "lease_until": until, "message": message}
 			if run.StartedAt == nil {
 				updates["started_at"] = now
 			}
@@ -248,13 +252,13 @@ func (s *OperationsService) processInspection(parent context.Context, id uint) {
 		}
 	}
 	status := "COMPLETED"
-	if unknown > 0 {
+	if unknown > 0 && run.CollectionMode != "configured" {
 		status = "PARTIAL"
 	}
 	if run.CancelRequested {
 		status = "CANCELED"
 	}
-	r := s.db.Model(&run).Where("lease_owner=?", s.owner).Updates(map[string]any{"completed_targets": len(targets), "warning_count": warnings, "critical_count": critical, "error_count": unknown, "message": "采集已结束，正在生成报告"})
+	r := s.db.Model(&run).Where("lease_owner=?", s.owner).Updates(map[string]any{"completed_targets": len(targets), "warning_count": warnings, "critical_count": critical, "error_count": unknown, "message": "数据汇总完成，正在生成报告"})
 	if r.Error != nil || r.RowsAffected != 1 {
 		return
 	}
@@ -267,14 +271,14 @@ func (s *OperationsService) processInspection(parent context.Context, id uint) {
 	}
 	if reportUnknown > unknown {
 		unknown = reportUnknown
-		if status == "COMPLETED" {
+		if status == "COMPLETED" && run.CollectionMode != "configured" {
 			status = "PARTIAL"
 		}
 	}
 	if reportErr != nil && status == "COMPLETED" {
 		status = "PARTIAL"
 	}
-	final := map[string]any{"status": status, "finished_at": time.Now(), "error_count": unknown}
+	final := map[string]any{"status": status, "finished_at": time.Now(), "error_count": unknown, "message": "报告已生成"}
 	if reportErr != nil {
 		final["message"] = reportErr.Error()
 	}

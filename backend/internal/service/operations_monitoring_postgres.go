@@ -13,37 +13,16 @@ import (
 )
 
 func (s *OperationsService) monitoringPostgresSlowHistory(ctx context.Context, row model.OperationsDatabase) inspection.Observation {
-	o := componentprobe.Observation("postgresql-slow-history", "慢 SQL 日志（48 小时）", "未接入慢 SQL 日志", "RECORDED")
-	if !row.LogEnabled {
-		o.Attributes = map[string]string{"availability": "not_configured"}
-		return o
+	page, err := s.MonitoringSlowQueries(ctx, row.ID, SlowQueryFilter{Page: 1, Size: 1})
+	if err != nil {
+		return componentprobe.Failed("postgresql-slow-history", "已发生慢 SQL（CSV 日志）", fmt.Errorf("读取已保存慢 SQL 失败"))
 	}
-	base := s.db.WithContext(ctx).Model(&model.DatabaseLogEvent{}).Where("database_id=? AND type='slow_sql' AND event_time>=?", row.ID, time.Now().Add(-48*time.Hour))
-	var count int64
-	if err := base.Count(&count).Error; err != nil {
-		return componentprobe.Failed(o.Code, o.Name, fmt.Errorf("读取慢 SQL 日志统计失败"))
+	page.List = nil
+	o := slowQueryReportObservation(page)
+	o.Tables = nil
+	if page.Total > 0 || page.Availability == "available" {
+		o.Measurements = map[string]float64{"slowSQLRecords": float64(page.Total)}
 	}
-	var events []model.DatabaseLogEvent
-	if err := s.db.WithContext(ctx).Where("database_id=? AND type='slow_sql' AND event_time>=?", row.ID, time.Now().Add(-48*time.Hour)).Order("event_time DESC,id DESC").Limit(50).Find(&events).Error; err != nil {
-		return componentprobe.Failed(o.Code, o.Name, fmt.Errorf("读取慢 SQL 日志失败"))
-	}
-	o.Value = fmt.Sprintf("最近 48 小时已采集 %d 条慢 SQL 日志", count)
-	o.Measurements = map[string]float64{"historicalSlowLogs": float64(count)}
-	t := inspection.Table{Columns: []string{"发生时间", "耗时 ms", "阶段", "用户", "客户端", "SQL 摘要"}, Note: "显示最近 50 条已采集日志；同一 SQL 的多个执行阶段分别计为日志记录。"}
-	for _, e := range events {
-		t.Rows = append(t.Rows, []string{e.EventTime.Format(time.RFC3339), fmt.Sprintf("%.2f", e.DurationMs), e.Phase, e.Username, e.Client, inspection.Preview(e.SQL, 1000)})
-	}
-	if row.LastLogSyncAt != nil {
-		o.CollectedAt = *row.LastLogSyncAt
-	}
-	if row.LastLogSyncAt == nil || time.Since(*row.LastLogSyncAt) > 3*time.Minute || row.LogError != "" {
-		o.Status = "UNKNOWN"
-		o.Reason = "日志同步尚未完成或数据已延迟，以下仅为已采集记录"
-		if row.LogError != "" {
-			o.Reason += "；" + inspection.Preview(row.LogError, 200)
-		}
-	}
-	o.Tables = []inspection.Table{t}
 	return o
 }
 
@@ -85,9 +64,9 @@ func (s *OperationsService) monitoringBloatSections(ctx context.Context, t monit
 
 func monitoringBloatObservation(source inspection.Observation, code, name string) inspection.Observation {
 	o := inspection.Observation{Code: code, Name: name, Status: "RECORDED", CollectedAt: source.CollectedAt, Attributes: map[string]string{"estimated": "true"}}
-	t := inspection.Table{Columns: []string{"表名", "膨胀倍数估算", "浪费空间估算 MiB"}, Note: "每 6 小时更新，展示最近 Top5 结果中的业务对象；估算受统计信息影响，不代表精确可回收空间。"}
+	t := inspection.Table{Columns: []string{"数据库", "表名", "膨胀倍数估算", "浪费空间估算 MiB"}, Note: "每 6 小时更新，展示各数据库最近 Top5 结果中的业务对象；估算受统计信息影响，不代表精确可回收空间。"}
 	if code == "postgresql-index-bloat" {
-		t.Columns = []string{"索引", "所属表", "膨胀倍数估算", "浪费空间估算 MiB"}
+		t.Columns = []string{"数据库", "索引", "所属表", "膨胀倍数估算", "浪费空间估算 MiB"}
 	}
 	if source.Status == "UNKNOWN" {
 		o.Status = "UNKNOWN"
@@ -111,6 +90,7 @@ func monitoringBloatObservation(source inspection.Observation, code, name string
 			if schema == "" || tableName == "" || strings.HasPrefix(schema, "pg_") || schema == "information_schema" {
 				continue
 			}
+			database := get(row, "数据库")
 			name := schema + "." + tableName
 			ratioKey, wasteKey := "tbloat", "wastedbytes"
 			if code == "postgresql-index-bloat" {
@@ -121,10 +101,11 @@ func monitoringBloatObservation(source inspection.Observation, code, name string
 				name = schema + "." + index
 				ratioKey, wasteKey = "ibloat", "wastedibytes"
 			}
-			if seen[name] {
+			identity := database + "/" + name
+			if seen[identity] {
 				continue
 			}
-			seen[name] = true
+			seen[identity] = true
 			ratio, waste := "—", "—"
 			if value, err := strconv.ParseFloat(get(row, ratioKey), 64); err == nil && value >= 1 {
 				ratio = fmt.Sprintf("%.1f", value)
@@ -132,9 +113,9 @@ func monitoringBloatObservation(source inspection.Observation, code, name string
 					waste = fmt.Sprintf("%.2f", bytes/(1<<20))
 				}
 			}
-			cells := []string{name, ratio, waste}
+			cells := []string{database, name, ratio, waste}
 			if code == "postgresql-index-bloat" {
-				cells = []string{name, schema + "." + tableName, ratio, waste}
+				cells = []string{database, name, schema + "." + tableName, ratio, waste}
 			}
 			t.Rows = append(t.Rows, cells)
 		}

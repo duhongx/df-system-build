@@ -42,10 +42,10 @@ func TestDailyMonitoringDashboardKeepsMetricsAndIssuesWithoutReportEvidence(t *t
 		}
 	}
 	dashboard, err := s.MonitoringDashboard(context.Background(), "database", row.ID)
-	if err != nil || dashboard.Result == nil || dashboard.Status != "WARNING" || dashboard.Indicators["connections"] != 12 || len(dashboard.Lanes) != 0 {
+	if err != nil || dashboard.Result == nil || dashboard.Status != "NORMAL" || dashboard.Indicators["connections"] != 12 || len(dashboard.Lanes) != 0 {
 		t.Fatalf("current monitoring data missing: %+v %v", dashboard, err)
 	}
-	if dashboard.Result.ReportChecks[0].Attributes["architecture"] != "单机" || dashboard.Result.ReportChecks[1].Reason != "存在锁等待" {
+	if dashboard.Result.ReportChecks[0].Attributes["architecture"] != "单机" || dashboard.Result.ReportChecks[1].Value != "1 个" || dashboard.Result.ReportChecks[1].Status != "RECORDED" {
 		t.Fatal("dashboard lost facts or actionable issues")
 	}
 	encoded, _ := json.Marshal(dashboard)

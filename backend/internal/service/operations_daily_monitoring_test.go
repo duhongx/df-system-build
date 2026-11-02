@@ -351,8 +351,8 @@ func TestDailyMonitoringReportMergesTimesAndMarksOldFailedDataUnknown(t *testing
 	for _, o := range r.ReportChecks {
 		if o.Code == "cloudhis-27" {
 			found = true
-			if o.Status != "UNKNOWN" || !strings.Contains(o.Reason, "fixture connection failed") {
-				t.Fatal("last good value was reported as current normal", o)
+			if o.Status != "RECORDED" || o.Attributes["lastCollectionError"] != "fixture connection failed" {
+				t.Fatal("last good value and failed collection metadata were lost", o)
 			}
 		}
 		if strings.HasPrefix(o.Code, "monitoring-") {

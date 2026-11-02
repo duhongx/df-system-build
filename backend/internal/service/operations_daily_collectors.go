@@ -20,7 +20,7 @@ type dailyHostOwner struct{}
 func (s *OperationsService) collectMonitoring(ctx context.Context, t monitoringTarget, lane string) (*opsprobe.JobResult, error) {
 	ctx = context.WithValue(ctx, dailyMonitoringContext{}, true)
 	r := &opsprobe.JobResult{Type: t.Kind, Name: t.Name, Version: opsprobe.Version, StartedAt: time.Now(), Indicators: map[string]float64{}}
-	defer func() { r.FinishedAt = time.Now() }()
+	defer func() { r.FinishedAt = time.Now(); applyMonitoringFacts(r) }()
 	if t.Type == "host" {
 		bindings, err := s.monitoringHostDatabaseBindings(ctx, t.ID)
 		if err != nil {
@@ -71,49 +71,11 @@ func (s *OperationsService) collectMonitoring(ctx context.Context, t monitoringT
 		case "facts":
 			s.collectDatabaseHosts(ctx, row, cfg, r)
 		case "deep":
-			r.ReportChecks = opsprobe.InspectionDatabase(ctx, cfg)
+			s.collectAllPostgreSQLDatabases(ctx, cfg, lane, r)
 		default:
-			d, err := opsprobe.Diagnose(ctx, cfg)
-			if err != nil {
-				return nil, fmt.Errorf("数据库监控采集失败：%s", SQLExecutionErrorMessage(err))
-			}
-			r.Database = d
-			r.Checks = opsprobe.DatabaseChecks(d)
-			r.Indicators["connections"] = float64(d.Connections)
-			r.Indicators["maxConnections"] = float64(d.MaxConnections)
-			r.Indicators["deadlocks"] = float64(d.Deadlocks)
-			for _, spec := range []struct{ code, name, key string }{{"cloudhis-28", "当前锁等待", "lockWaits"}, {"cloudhis-30", "长事务", "longTransactions"}, {"cloudhis-33", "当前慢 SQL", "slowQueries"}} {
-				count := 0
-				for _, a := range d.Activities {
-					if (spec.key == "lockWaits" && a.WaitEventType == "Lock") || (spec.key == "longTransactions" && a.TransactionSeconds >= 300) || (spec.key == "slowQueries" && a.State == "active" && a.ElapsedSeconds >= 5) {
-						count++
-					}
-				}
-				status := "NORMAL"
-				if count > 0 {
-					status = "WARNING"
-				}
-				o := componentprobe.Observation(spec.code, spec.name, fmt.Sprintf("%d 个", count), status)
-				if spec.key == "slowQueries" {
-					o.Name = "当前慢 SQL（≥5 秒）"
-					o.CollectedAt = d.CheckedAt
-					o.Tables = []inspection.Table{opsprobe.PostgreSQLSlowQueryTable(d)}
-				}
-				if !d.StatsVisible || d.Truncated {
-					o.Status = "UNKNOWN"
-					o.Reason = "会话可见范围不足或返回达到上限，不能认定无异常"
-				} else {
-					r.Indicators[spec.key] = float64(count)
-				}
-				r.ReportChecks = append(r.ReportChecks, o)
-			}
-			o := componentprobe.Observation("cloudhis-27", "连接使用情况", fmt.Sprintf("%d / %d", d.Connections, d.MaxConnections), "NORMAL")
-			if d.MaxConnections > 0 && float64(d.Connections)/float64(d.MaxConnections) >= 0.8 {
-				o.Status = "WARNING"
-			}
-			r.ReportChecks = append(r.ReportChecks, o)
+			s.collectAllPostgreSQLDatabases(ctx, cfg, lane, r)
 			r.ReportChecks = append(r.ReportChecks, opsprobe.InspectionPostgreSQLDeployment(ctx, row.Name, cfg)...)
-			r.ReportChecks = append(r.ReportChecks, opsprobe.InspectionPostgreSQLMonitoring(ctx, cfg)...)
+			r.ReportChecks = append(r.ReportChecks, opsprobe.PostgreSQLSlots(ctx, cfg))
 			r.ReportChecks = append(r.ReportChecks, s.monitoringPostgresSlowHistory(ctx, row))
 		}
 	} else {

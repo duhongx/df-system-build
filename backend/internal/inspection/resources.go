@@ -5,7 +5,7 @@ import "strings"
 // ResourceTables combines host snapshots instead of repeating a metric/value
 // table for every component installed on the same host.
 func ResourceTables(r *Report) []Table {
-	base := Table{Title: "主机资源快照", Columns: []string{"主机", "CPU / 核数", "内存使用 / 可用", "负载 1 / 5 / 15 分钟", "Swap 使用 / 总量"}}
+	base := Table{Title: "主机资源快照", Columns: []string{"主机", "采集时间", "CPU / 核数", "内存使用 / 可用", "负载 1 / 5 / 15 分钟", "Swap 使用 / 总量"}}
 	disks := Table{Title: "实际文件系统容量", Columns: []string{"主机", "挂载点", "总量 GiB", "可用 GiB", "使用率", "inode 使用"}}
 	for _, o := range r.Objects {
 		for _, t := range o.Tables {
@@ -16,7 +16,7 @@ func ResourceTables(r *Report) []Table {
 						values[row[0]] = row[1]
 					}
 				}
-				base.Rows = append(base.Rows, []string{o.Name, values["CPU / 核数"], values["内存使用 / 可用"], values["负载 1 / 5 / 15 分钟"], values["Swap 使用 / 总量"]})
+				base.Rows = append(base.Rows, []string{o.Name, values["采集时间"], values["CPU / 核数"], values["内存使用 / 可用"], values["负载 1 / 5 / 15 分钟"], values["Swap 使用 / 总量"]})
 			}
 			if t.Title == "文件系统容量与 inode" {
 				for _, row := range t.Rows {

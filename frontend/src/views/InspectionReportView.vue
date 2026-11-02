@@ -9,6 +9,7 @@ import {
   type InspectionRun,
   type InspectionCoverage,
 } from "../api/operations";
+import HistoricalSlowQueries from "../components/HistoricalSlowQueries.vue";
 import InspectionCoveragePanel from "../components/InspectionCoveragePanel.vue";
 const route = useRoute(),
   router = useRouter(),
@@ -95,6 +96,7 @@ onBeforeUnmount(() => controller?.abort());
       show-icon
     />
     <InspectionCoveragePanel v-if="run" :run="run" :coverage="coverage" />
+    <HistoricalSlowQueries v-if="run?.collectionMode === 'configured' && run?.frozenAt" :report-id="id" />
     <div v-loading="loading" class="report-frame">
       <iframe
         v-if="html"

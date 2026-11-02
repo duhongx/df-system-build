@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"df-build-server/internal/inspection"
 	"df-build-server/internal/model"
 	"df-build-server/internal/opsprobe"
@@ -12,18 +13,6 @@ import (
 
 // Resolve sources once; later connection edits cannot redirect queued tasks.
 func (s *OperationsService) CreateConfiguredInspection(ctx context.Context, name, operator string, refs []InspectionTargetRequest) (*model.InspectionRun, error) {
-	if err := s.EnsureInspectionSources(ctx); err != nil {
-		return nil, err
-	}
-	cfg, err := NewPostgreSQLService().loadConfig()
-	if err != nil {
-		return nil, err
-	}
-	if cfg.Host != "" && cfg.Database != "" && cfg.User != "" && cfg.Password != "" {
-		if _, err := s.ImportCurrentDatabase(""); err != nil {
-			return nil, err
-		}
-	}
 	if len(refs) == 0 {
 		var hosts []model.Server
 		var databases []model.OperationsDatabase
@@ -57,8 +46,19 @@ func (s *OperationsService) CreateConfiguredInspection(ctx context.Context, name
 		return nil, fmt.Errorf("当前没有可巡检对象，或对象数超过 500")
 	}
 	var result *model.InspectionRun
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		run := model.InspectionRun{Name: name, CollectionMode: "configured", Status: "QUEUED", Trigger: "MANUAL", Operator: operator, HTMLStatus: "PENDING", PDFStatus: "PENDING", Message: "等待汇总监控数据"}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		frozenAt := time.Now()
+		ctx = context.WithValue(ctx, reportFreezeTime{}, frozenAt)
+		reader := &OperationsService{db: tx, collecting: map[uint]bool{}}
+		sources, err := reader.loadMonitoringTargets(ctx, false)
+		if err != nil {
+			return err
+		}
+		sourceByKey := map[string]monitoringTarget{}
+		for _, source := range sources {
+			sourceByKey[fmt.Sprintf("%s:%d", source.Type, source.ID)] = source
+		}
+		run := model.InspectionRun{Name: name, CollectionMode: "configured", Status: "QUEUED", Trigger: "MANUAL", Operator: operator, HTMLStatus: "PENDING", PDFStatus: "PENDING", Message: "数据快照已保存，等待生成报告", FrozenAt: &frozenAt}
 		seen := map[string]bool{}
 		var targets []model.InspectionTargetRun
 		var components []model.ComponentConnection
@@ -133,6 +133,7 @@ func (s *OperationsService) CreateConfiguredInspection(ctx context.Context, name
 			targets = append(targets, t)
 		}
 		run.TotalTargets = len(targets)
+		run.CompletedTargets = len(targets)
 		if err := tx.Create(&run).Error; err != nil {
 			return err
 		}
@@ -142,9 +143,50 @@ func (s *OperationsService) CreateConfiguredInspection(ctx context.Context, name
 		if err := tx.Create(&targets).Error; err != nil {
 			return err
 		}
+		for i := range targets {
+			target := &targets[i]
+			source, ok := sourceByKey[fmt.Sprintf("%s:%d", target.Type, target.TargetID)]
+			if !ok {
+				return fmt.Errorf("报告对象不存在")
+			}
+			snapshot, err := reader.monitoringReportResult(ctx, source)
+			if err != nil {
+				return err
+			}
+			if target.Type == "database" {
+				if _, err := reader.freezeInspectionSlowQueries(ctx, run.ID, target.ID, target.TargetID); err != nil {
+					return err
+				}
+				page, err := reader.InspectionSlowQueries(ctx, run.ID, SlowQueryFilter{Page: 1, Size: 5, TargetRunID: target.ID})
+				if err != nil {
+					return err
+				}
+				meta, err := reader.MonitoringSlowQueries(ctx, target.TargetID, SlowQueryFilter{Page: 1, Size: 1})
+				if err != nil {
+					return err
+				}
+				page.CollectedAt = meta.CollectedAt
+				page.Availability = meta.Availability
+				page.Message = meta.Message
+				slow := slowQueryReportObservation(page)
+				replaced := false
+				for j := range snapshot.ReportChecks {
+					if snapshot.ReportChecks[j].Code == slow.Code {
+						snapshot.ReportChecks[j] = slow
+						replaced = true
+					}
+				}
+				if !replaced {
+					snapshot.ReportChecks = append(snapshot.ReportChecks, slow)
+				}
+			}
+			if err := tx.Model(target).Updates(map[string]any{"status": "COMPLETED", "stage": "快照已保存", "message": "已冻结已有监控数据", "result_json": mustJSON(snapshot), "started_at": frozenAt, "finished_at": time.Now(), "heartbeat_at": time.Now()}).Error; err != nil {
+				return err
+			}
+		}
 		result = &run
 		return nil
-	})
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	return result, err
 }
 

@@ -34,11 +34,12 @@ func (r inspectionReport) Document() *inspection.Report {
 	}
 	doc := inspection.Report{RunID: r.Run.ID, Name: r.Run.Name, Operator: r.Run.Operator, GeneratedAt: time.Now(), Objects: []inspection.Object{}}
 	doc.Mode = r.Run.CollectionMode
+	doc.FrozenAt = r.Run.FrozenAt
 
-	if r.Run.StartedAt != nil {
+	if r.Run.StartedAt != nil && doc.Mode != "configured" {
 		doc.StartedAt = *r.Run.StartedAt
 	}
-	if r.Run.FinishedAt != nil {
+	if r.Run.FinishedAt != nil && doc.Mode != "configured" {
 		doc.FinishedAt = *r.Run.FinishedAt
 	}
 	pgHosts := map[uint]bool{}
@@ -92,7 +93,7 @@ func (r inspectionReport) Document() *inspection.Report {
 						count++
 					}
 				}
-				obs := inspection.Observation{Code: code, Status: "NORMAL", Value: fmt.Sprintf("CPU %.1f%%，内存 %.1f%%，%d 个实际文件系统；资源明细在本机汇总中列出", m.CPUUsagePercent, m.MemUsagePercent, count), Source: m.SourceURL, CollectedAt: m.CollectedAt, Threshold: "CPU 80%/95%、内存 85%/95%、磁盘空间 80%/90% 分别提醒/严重；本次快照。", Advice: "结合业务负载和持续时间核对，本次为资源快照。"}
+				obs := inspection.Observation{Code: code, Status: "NORMAL", Value: fmt.Sprintf("CPU %.1f%%，内存 %.1f%%，%d 个实际文件系统；资源明细在本机汇总中列出", m.CPUUsagePercent, m.MemUsagePercent, count), Source: m.SourceURL, CollectedAt: m.CollectedAt, Threshold: "磁盘容量或 inode 使用率超过 75% 提示异常。"}
 				if obs.Source == "" {
 					obs.Source = "原远端执行器 /proc 与文件系统快照"
 				}
@@ -153,6 +154,7 @@ func (r inspectionReport) Document() *inspection.Report {
 			if len(expected) > 0 {
 				result.ExpectedChecks = expected
 			}
+			applyMonitoringFacts(&result)
 			configuredObject(&o, result)
 			o.Supplement = nil
 			if len(o.Tables) > 2 {
@@ -161,7 +163,7 @@ func (r inspectionReport) Document() *inspection.Report {
 		}
 		doc.Objects = append(doc.Objects, o)
 	}
-	if doc.FinishedAt.IsZero() {
+	if doc.FinishedAt.IsZero() && doc.Mode != "configured" {
 		doc.FinishedAt = doc.GeneratedAt
 	}
 	if doc.Mode == "configured" {
@@ -243,7 +245,7 @@ func hostReportTables(m *opsprobe.HostMetrics) []inspection.Table {
 		if d.Inodes > 0 {
 			inode = fmt.Sprintf("%.1f%%", d.InodeUsedPercent)
 		}
-		disks.Rows = append(disks.Rows, []string{d.Device + " / " + d.Mountpoint, fmt.Sprintf("%.2f", float64(d.TotalBytes)/(1<<30)), fmt.Sprintf("%.2f", float64(d.AvailableBytes)/(1<<30)), fmt.Sprintf("%.1f%%", d.UsedPercent), inode})
+		disks.Rows = append(disks.Rows, []string{d.Mountpoint, fmt.Sprintf("%.2f", float64(d.TotalBytes)/(1<<30)), fmt.Sprintf("%.2f", float64(d.AvailableBytes)/(1<<30)), fmt.Sprintf("%.1f%%", d.UsedPercent), inode})
 	}
 	io := inspection.Table{Title: "磁盘 I/O", Columns: []string{"设备", "读 MiB/s", "写 MiB/s", "读/写 IOPS", "读/写时延 ms", "忙碌时间"}, Rows: [][]string{}, Note: "不同层级的设备不能相加；没有完成请求时，平均时延未取得。"}
 	for _, d := range m.DiskIO {

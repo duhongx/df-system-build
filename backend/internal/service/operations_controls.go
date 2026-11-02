@@ -99,6 +99,9 @@ func (s *OperationsService) DeleteInspection(id uint) error {
 		if rendering {
 			return fmt.Errorf("报告正在生成，不能删除")
 		}
+		if err := tx.Where("run_id=?", id).Delete(&model.InspectionSlowQuery{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("run_id=?", id).Delete(&model.InspectionTargetRun{}).Error; err != nil {
 			return err
 		}

@@ -36,6 +36,11 @@ export const listMonitoring = () => request.get<any, MonitoringView[]>("/operati
 export const getMonitoring = (kind: string, id: number) => request.get<any, MonitoringView>(`/operations/monitoring/${kind}/${id}`, { params: { view: "dashboard" } });
 export const getMonitoringHistory = (kind: string, id: number, hours: number) => request.get<any, {samples: MonitoringPoint[]; stepSeconds: number}>(`/operations/monitoring/${kind}/${id}/history`, {params: {hours}});
 export const refreshMonitoring = (kind: string, id: number) => request.post(`/operations/monitoring/${kind}/${id}/refresh`);
+export interface SlowQueryRecord { id: number; instance: string; targetRunId?: number; database: string; eventTime: string; durationMs: number; phase: string; username: string; client: string; sql: string; collectedAt: string }
+export interface SlowQueryPage { list: SlowQueryRecord[]; total: number; page: number; size: number; asOfId: number; targets: Array<{id: number; name: string}>; frozenAt?: string; collectedAt?: string; availability: string; message?: string }
+export interface SlowQueryFilter { page: number; size: number; keyword?: string; database?: string; targetRunId?: number; asOfId?: number }
+export const getMonitoringSlowQueries = (id: number, params: SlowQueryFilter) => request.get<any, SlowQueryPage>(`/operations/monitoring/database/${id}/slow-queries`, {params});
+export const getReportSlowQueries = (id: number, params: SlowQueryFilter) => request.get<any, SlowQueryPage>(`/operations/inspection-runs/${id}/slow-queries`, {params});
 export interface ComponentOptions {
   namespace?: string;
   alias?: string;

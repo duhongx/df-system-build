@@ -51,6 +51,24 @@ func InspectionExecutionLabel(status string, uncertainTargets int) string {
 	return "检查已结束"
 }
 
+func InspectionRunLabel(run model.InspectionRun, uncertain int) string {
+	if run.CollectionMode == "configured" {
+		switch run.Status {
+		case "QUEUED":
+			return "快照已保存，等待生成报告"
+		case "RUNNING":
+			return "正在生成报告"
+		case "COMPLETED":
+			return "报告已生成"
+		case "PARTIAL":
+			return "报告生成未完整完成"
+		case "FAILED":
+			return "报告生成失败"
+		}
+	}
+	return InspectionExecutionLabel(run.Status, uncertain)
+}
+
 func (s *OperationsService) InspectionSummaries(ctx context.Context, ids []uint) (map[uint]InspectionListSummary, error) {
 	out := map[uint]InspectionListSummary{}
 	if len(ids) == 0 {
@@ -104,7 +122,8 @@ func (s *OperationsService) InspectionCoverage(ctx context.Context, run model.In
 			out.UncertainTargets++
 		}
 	}
-	out.ExecutionLabel = InspectionExecutionLabel(run.Status, out.UncertainTargets)
+	out.ExecutionLabel = InspectionRunLabel(run, out.UncertainTargets)
+
 	var row struct{ Document string }
 	if err := s.db.WithContext(ctx).Raw(inspectionCoverageProjection, run.ID).Scan(&row).Error; err != nil {
 		return nil, err

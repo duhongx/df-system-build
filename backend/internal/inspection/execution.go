@@ -5,6 +5,7 @@ import "time"
 // Execution is the actual command/SQL and its captured result, not a diagnosis
 // derived from a separately configured environment baseline.
 type Execution struct {
+	Database   string    `json:"database,omitempty"`
 	Kind       string    `json:"kind"`
 	Command    string    `json:"command"`
 	Stdout     string    `json:"stdout"`

@@ -283,7 +283,7 @@ func ReportableMountpoint(mount string) bool {
 }
 
 func HostChecks(m *HostMetrics) []Check {
-	checks := []Check{{Code: "host_identity", Name: "系统信息", Status: "NORMAL", Value: m.OS + " / " + m.Kernel, Evidence: m.Hostname}, {Code: "host_cpu", Name: "CPU 本次采样", Status: level(m.CPUUsagePercent, 80, 95), Value: fmt.Sprintf("%.1f%%，I/O 等待 %.1f%%", m.CPUUsagePercent, m.CPUWaitPercent), Evidence: "两次 /proc/stat 计数差值；采样间隔约 1 秒", Advice: "持续偏高时结合进程和历史趋势排查"}, {Code: "host_memory", Name: "可用内存", Status: level(m.MemUsagePercent, 85, 95), Value: fmt.Sprintf("使用 %.1f%%，可用 %.2f GiB", m.MemUsagePercent, float64(m.MemAvailableBytes)/(1<<30)), Advice: "核对进程内存与 Swap 使用"}}
+	checks := []Check{{Code: "host_identity", Name: "系统信息", Status: "NORMAL", Value: m.OS + " / " + m.Kernel, Evidence: m.Hostname}, {Code: "host_cpu", Name: "CPU 本次采样", Status: "RECORDED", Value: fmt.Sprintf("%.1f%%，I/O 等待 %.1f%%", m.CPUUsagePercent, m.CPUWaitPercent), Evidence: "两次 /proc/stat 计数差值；采样间隔约 1 秒", Advice: ""}, {Code: "host_memory", Name: "可用内存", Status: "RECORDED", Value: fmt.Sprintf("使用 %.1f%%，可用 %.2f GiB", m.MemUsagePercent, float64(m.MemAvailableBytes)/(1<<30)), Advice: ""}}
 	if m.Source == "node_exporter" {
 		checks[1].Evidence = "两次 node_exporter HTTP 计数差值；采样间隔约 1 秒"
 	}
@@ -293,9 +293,9 @@ func HostChecks(m *HostMetrics) []Check {
 			continue
 		}
 		count++
-		checks = append(checks, Check{Code: "disk:" + d.Mountpoint, Name: "磁盘 " + d.Mountpoint, Status: level(d.UsedPercent, 80, 90), Value: fmt.Sprintf("使用 %.1f%%，可用 %.2f GiB", d.UsedPercent, float64(d.AvailableBytes)/(1<<30)), Evidence: d.Device, Advice: "核对增长来源并按运维流程清理或扩容"})
+		checks = append(checks, Check{Code: "disk:" + d.Mountpoint, Name: "磁盘 " + d.Mountpoint, Status: spaceLevel(d.UsedPercent), Value: fmt.Sprintf("使用 %.1f%%，可用 %.2f GiB", d.UsedPercent, float64(d.AvailableBytes)/(1<<30)), Evidence: d.Mountpoint})
 		if d.Inodes > 0 {
-			checks = append(checks, Check{Code: "inode:" + d.Mountpoint, Name: "inode " + d.Mountpoint, Status: level(d.InodeUsedPercent, 80, 90), Value: fmt.Sprintf("使用 %.1f%%", d.InodeUsedPercent)})
+			checks = append(checks, Check{Code: "inode:" + d.Mountpoint, Name: "inode " + d.Mountpoint, Status: spaceLevel(d.InodeUsedPercent), Value: fmt.Sprintf("使用 %.1f%%", d.InodeUsedPercent)})
 		}
 	}
 	if count == 0 {
@@ -305,6 +305,12 @@ func HostChecks(m *HostMetrics) []Check {
 		checks = append(checks, Check{Code: "collection_warning", Name: "采集完整性", Status: "UNKNOWN", Error: w})
 	}
 	return checks
+}
+func spaceLevel(v float64) string {
+	if v > 75 {
+		return "CRITICAL"
+	}
+	return "RECORDED"
 }
 func level(v, w, c float64) string {
 	if v >= c {

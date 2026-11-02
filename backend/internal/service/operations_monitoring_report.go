@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"df-build-server/internal/inspection"
@@ -11,12 +12,9 @@ import (
 	"df-build-server/internal/opsprobe"
 )
 
-// Reports freeze the same snapshots as the monitoring pages. Only missing,
-// stale or failed lanes are refreshed, with the same database lease as the
-// background scheduler. Regenerating an existing report never reaches here.
-func (s *OperationsService) monitoringReportResult(parent context.Context, t monitoringTarget) (*opsprobe.JobResult, error) {
-	ctx, cancel := context.WithTimeout(parent, 200*time.Second)
-	defer cancel()
+// Reports read existing platform snapshots only. Missing, delayed or failed
+// collectors never cause report generation to run or wait for collection.
+func (s *OperationsService) monitoringReportResult(ctx context.Context, t monitoringTarget) (*opsprobe.JobResult, error) {
 	kind := t.Kind
 	if t.Type == "database" {
 		kind = "database"
@@ -25,82 +23,73 @@ func (s *OperationsService) monitoringReportResult(parent context.Context, t mon
 		kind = "host"
 	}
 	r := &opsprobe.JobResult{Type: kind, Name: t.Name, Version: opsprobe.Version}
-	if !t.Enabled {
-		r.Error = "该对象已停用后台监控"
-		r.ReportChecks = inspection.EnsureResults(inspection.RequiredCodes(kind), nil, r.Error)
-		r.ExpectedChecks = inspection.RequiredCodes(kind)
-		r.FinishedAt = time.Now()
-		return r, nil
+	view, err := s.monitoringView(ctx, t, true)
+	if err != nil {
+		return nil, err
 	}
-	lanes := targetLanes(t)
-	// Low-frequency evidence first; current running metrics win overlapping
-	// check codes, while original SQL executions retain their own timestamps.
-	order := []string{"deep", "facts", "live"}
-	for _, lane := range order {
-		if lane == "live" && t.Type == "host" {
-			live, err := s.monitoringHostForReport(ctx, t)
-			if err != nil {
-				r.Metrics = nil
-				r.Checks = nil
-				mergeMonitoringResult(r, &opsprobe.JobResult{ReportChecks: inspection.EnsureResults(monitoringLaneCodes(t, lane), nil, err.Error())})
-				continue
-			}
-			mergeMonitoringResult(r, live)
+	lanes := map[string]MonitoringLane{}
+	for _, lane := range view.Lanes {
+		lanes[lane.Lane] = lane
+	}
+	for _, name := range []string{"deep", "facts", "live"} {
+		lane, ok := lanes[name]
+		if !ok {
 			continue
 		}
-		wanted := false
-		for _, l := range lanes {
-			wanted = wanted || l == lane
-		}
-		if !wanted {
-			continue
-		}
-		view, err := s.ensureMonitoringLane(ctx, t, lane)
-		if err != nil {
-			r.ReportChecks = append(r.ReportChecks, inspection.EnsureResults(monitoringLaneCodes(t, lane), nil, err.Error())...)
-			continue
-		}
-		part := cloneMonitoringResult(view.Result)
+		part := cloneMonitoringResult(lane.Result)
 		if part == nil {
-			part = &opsprobe.JobResult{}
-		}
-		oldFailure := view.LastError != "" && (view.CollectedAt == nil || view.LastAttemptAt == nil || view.CollectedAt.Before(*view.LastAttemptAt))
-		if oldFailure || view.Result == nil || view.Stale {
-			reason := view.LastError
-			if reason == "" {
-				reason = "后台数据缺失或已过期"
+			reason := "尚无已保存的监控数据"
+			if lane.LastError != "" {
+				reason = reportDataReason(lane.LastError)
 			}
+			if !t.Enabled {
+				reason = "后台监控已停用；" + reason
+			}
+			part = &opsprobe.JobResult{ReportChecks: inspection.EnsureResults(monitoringLaneCodes(t, name), nil, reason)}
+		} else {
 			for i := range part.ReportChecks {
-				part.ReportChecks[i].Status = "UNKNOWN"
-				part.ReportChecks[i].Reason = reason + "；保留上次采集时间供核对"
+				o := &part.ReportChecks[i]
+				if o.Attributes == nil {
+					o.Attributes = map[string]string{}
+				}
+				if lane.Stale {
+					o.Attributes["delayed"] = "true"
+				}
+				if lane.LastError != "" {
+					o.Attributes["lastCollectionError"] = reportDataReason(lane.LastError)
+				}
 			}
-			for i := range part.Checks {
-				part.Checks[i].Status = "UNKNOWN"
-				part.Checks[i].Error = reason + "；上次有效快照"
-			}
-			part.ReportChecks = inspection.EnsureResults(monitoringLaneCodes(t, lane), part.ReportChecks, reason)
+			// Existing values remain facts at their original collection time. A later
+			// failure must not replace successful CPU/memory/filesystem results.
+			s.overlayMonitoringHostMetrics(ctx, part)
 		}
-		s.overlayMonitoringHostMetrics(ctx, part)
+		part.ReportChecks = inspection.EnsureResults(monitoringLaneCodes(t, name), part.ReportChecks, "尚无已保存的本项数据")
 		mergeMonitoringResult(r, part)
 	}
 	r.ExpectedChecks = inspection.RequiredCodes(kind)
-	r.ReportChecks = inspection.EnsureResults(r.ExpectedChecks, r.ReportChecks, "本次后台监控未取得此项数据；请查看对应采集缺口和实际采集时间")
-	if r.FinishedAt.IsZero() {
-		r.FinishedAt = time.Now()
-	}
-	if r.StartedAt.IsZero() {
-		r.StartedAt = r.FinishedAt
-	}
+	r.ReportChecks = inspection.EnsureResults(r.ExpectedChecks, r.ReportChecks, "尚无已保存的本项数据")
+	applyMonitoringFacts(r)
 	redactCollection(r)
 	setCollectionCoverage(r)
 	return r, nil
 }
+
+func reportDataReason(reason string) string {
+	if strings.Contains(reason, "context deadline exceeded") || strings.Contains(reason, "等待后台采集超时") {
+		return "后台采集未在时限内完成；此项尚无可用结果"
+	}
+	return inspection.Preview(reason, 500)
+}
 func mergeMonitoringResult(dst, src *opsprobe.JobResult) {
 	start := src.StartedAt
+	finish := src.FinishedAt
 	if start.IsZero() {
 		start = src.FinishedAt
 	}
 	for _, o := range src.ReportChecks {
+		if o.CollectedAt.After(finish) {
+			finish = o.CollectedAt
+		}
 		if !o.CollectedAt.IsZero() && (start.IsZero() || o.CollectedAt.Before(start)) {
 			start = o.CollectedAt
 		}
@@ -118,8 +107,8 @@ func mergeMonitoringResult(dst, src *opsprobe.JobResult) {
 	if len(src.Checks) > 0 {
 		dst.Checks = src.Checks
 	}
-	if src.FinishedAt.After(dst.FinishedAt) {
-		dst.FinishedAt = src.FinishedAt
+	if finish.After(dst.FinishedAt) {
+		dst.FinishedAt = finish
 	}
 	dst.RelatedHosts = append(dst.RelatedHosts, src.RelatedHosts...)
 	for _, o := range src.ReportChecks {
@@ -173,9 +162,13 @@ func (s *OperationsService) ensureMonitoringLane(ctx context.Context, t monitori
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if err := s.db.WithContext(ctx).First(&state, state.ID).Error; err != nil {
+		var latest model.MonitoringState
+		if err := s.db.WithContext(ctx).First(&latest, state.ID).Error; err != nil {
 			return view, err
 		}
+		// GORM does not clear an existing *time.Time when a SQL NULL is read
+		// into the same struct. A fresh value releases a completed lease.
+		state = latest
 		view = monitoringLane(state, t)
 		if !view.Collecting {
 			return view, nil
@@ -183,40 +176,6 @@ func (s *OperationsService) ensureMonitoringLane(ctx context.Context, t monitori
 		select {
 		case <-ctx.Done():
 			return view, fmt.Errorf("等待后台采集超时：%w", ctx.Err())
-		case <-tick.C:
-		}
-	}
-}
-func (s *OperationsService) monitoringHostForReport(ctx context.Context, t monitoringTarget) (*opsprobe.JobResult, error) {
-	view, err := s.monitoringView(ctx, t, true)
-	if err != nil {
-		return nil, err
-	}
-	if view.Result != nil && !view.Stale && view.LastError == "" {
-		return view.Result, nil
-	}
-	if err := s.CollectHostAsync(ctx, t.ID); err != nil {
-		return nil, err
-	}
-	tick := time.NewTicker(200 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		view, err = s.monitoringView(ctx, t, false)
-		if err != nil {
-			return nil, err
-		}
-		if !view.Collecting {
-			if view.LastError != "" {
-				return nil, fmt.Errorf("主机指标采集失败：%s", view.LastError)
-			}
-			if view.Result != nil && !view.Stale {
-				return view.Result, nil
-			}
-			return nil, fmt.Errorf("未取得当前 node_exporter 指标")
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
 		case <-tick.C:
 		}
 	}
@@ -294,8 +253,8 @@ func (s *OperationsService) overlayMonitoringHostMetrics(ctx context.Context, r 
 	for i := range r.RelatedHosts {
 		h := &r.RelatedHosts[i]
 		var server model.Server
-		cfg, m, err := s.HostMonitor(h.ServerID)
-		usable := err == nil && cfg.Enabled && cfg.LastError == "" && m != nil && time.Since(m.CollectedAt) <= time.Duration(max(90, cfg.IntervalSeconds*3))*time.Second
+		cfg, m, err := s.hostMonitor(ctx, h.ServerID, false)
+		usable := err == nil && m != nil
 		if s.db.WithContext(ctx).First(&server, h.ServerID).Error != nil || serverEndpoint(server) != h.Endpoint {
 			usable = false
 		}
@@ -303,7 +262,7 @@ func (s *OperationsService) overlayMonitoringHostMetrics(ctx context.Context, r 
 			if usable {
 				h.Result.Metrics = m
 				h.Result.Checks = opsprobe.HostChecks(m)
-			} else {
+			} else if h.Result.Metrics != nil && time.Since(h.Result.Metrics.CollectedAt) >= 48*time.Hour {
 				h.Result.Metrics = nil
 			}
 		}

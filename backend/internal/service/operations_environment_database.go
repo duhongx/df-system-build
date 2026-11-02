@@ -63,6 +63,16 @@ func (s *OperationsService) SyncEnvironmentDatabase(ctx context.Context, create 
 			row.Source, row.EnvironmentDigest, row.Host, row.Port, row.Database, row.Username = "environment", digest, cfg.Host, port, cfg.Database, cfg.User
 			row.PasswordEncrypted = ""
 			row.Revision++
+			if changedEndpoint && row.ID > 0 {
+				if err := tx.Where("database_id=?", row.ID).Delete(&model.DatabaseLogEvent{}).Error; err != nil {
+					return err
+				}
+				if err := tx.Where("database_id=?", row.ID).Delete(&model.DatabaseLogCursor{}).Error; err != nil {
+					return err
+				}
+				row.LastLogSyncAt = nil
+				row.LogStartAt = nil
+			}
 			if changedEndpoint {
 				var host model.Server
 				tx.Where("host=?", cfg.Host).Order("id").First(&host)

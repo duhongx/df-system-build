@@ -105,6 +105,7 @@ type InspectionPlan struct {
 	UpdatedAt    time.Time  `json:"updatedAt"`
 }
 type InspectionRun struct {
+	FrozenAt           *time.Time `json:"frozenAt"`
 	CollectionMode     string     `gorm:"size:24" json:"collectionMode"`
 	ReportSnapshotJSON string     `gorm:"type:jsonb;default:null" json:"-"`
 	LeaseOwner         string     `gorm:"size:64" json:"-"`

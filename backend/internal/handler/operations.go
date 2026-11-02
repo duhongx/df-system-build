@@ -34,6 +34,7 @@ func (h *OperationsHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g.GET("/monitoring", h.MonitoringOverview)
 	g.GET("/monitoring/:kind/:id", h.MonitoringDetail)
 	g.GET("/monitoring/:kind/:id/history", h.MonitoringHistory)
+	g.GET("/monitoring/database/:id/slow-queries", h.MonitoringSlowQueries)
 	g.POST("/monitoring/:kind/:id/refresh", h.RefreshMonitoring)
 	g.GET("/hosts/:id/services", h.ManagedServices)
 	g.POST("/hosts/:id/services", h.SaveManagedService)
@@ -87,6 +88,7 @@ func (h *OperationsHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g.GET("/inspection-runs/:id", h.Run)
 	g.GET("/inspection-runs/:id/targets/:targetId", h.Target)
 	g.GET("/inspection-runs/:id/report-data", h.ReportData)
+	g.GET("/inspection-runs/:id/slow-queries", h.InspectionSlowQueries)
 	g.POST("/inspection-runs/:id/cancel", h.CancelRun)
 	g.POST("/inspection-runs/:id/reconcile", h.ReconcileRun)
 	g.POST("/inspection-runs/:id/reports", h.RegenerateReports)
@@ -223,6 +225,18 @@ func (h *OperationsHandler) SaveDatabase(c *gin.Context) {
 		}
 		if row.Source == "environment" && (req.Host != row.Host || req.Port != row.Port || req.Database != row.Database || req.Username != row.Username || req.Password != "") {
 			return fmt.Errorf("此连接引用环境配置，请在环境配置中修改地址、账号或密码")
+		}
+		if row.ID > 0 && (row.Host != req.Host || row.Port != req.Port || row.ServerID != req.ServerID || row.LogDirectory != req.LogDirectory || row.LogFormat != req.LogFormat || row.LogTimezone != req.LogTimezone) {
+			if err := tx.Where("database_id=?", row.ID).Delete(&model.DatabaseLogEvent{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("database_id=?", row.ID).Delete(&model.DatabaseLogCursor{}).Error; err != nil {
+				return err
+			}
+			row.LastLogSyncAt = nil
+			row.LogStartAt = nil
+			row.LogCapability = ""
+			row.LogError = ""
 		}
 		if req.Password != "" {
 			encrypted, err := crypto.Encrypt(req.Password)
@@ -409,7 +423,7 @@ func (h *OperationsHandler) Runs(c *gin.Context) {
 	entries := make([]entry, 0, len(rows))
 	for _, row := range rows {
 		extra := summaries[row.ID]
-		entries = append(entries, entry{row, extra.Summary, service.InspectionExecutionLabel(row.Status, extra.UncertainTargets)})
+		entries = append(entries, entry{row, extra.Summary, service.InspectionRunLabel(row, extra.UncertainTargets)})
 	}
 	response.OKWithPage(c, entries, total, page, size)
 }

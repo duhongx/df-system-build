@@ -4,6 +4,7 @@ import { useRouter, useRoute } from "vue-router";
 import { ElMessage } from "element-plus";
 import { listMonitoring, getMonitoring, getMonitoringHistory, refreshMonitoring, createConfiguredInspection, type MonitoringView, type MonitoringPoint } from "../api/monitoring";
 import { componentLabels, monitorStatusLabels, metricCards, instanceFacts, monitoringSummary, currentIssues, liveChecks, monitoringSections } from "../utils/monitoring-presentation";
+import HistoricalSlowQueries from "./HistoricalSlowQueries.vue";
 import MonitoringDataTable from "./MonitoringDataTable.vue";
 import MetricChart from "./MetricChart.vue";
 import ServerMonitorView from "../views/ServerMonitorView.vue";
@@ -27,7 +28,7 @@ const statusType = (s: string) => s === "NORMAL" ? "success" : ["CRITICAL", "ERR
 const time = (s?: string | null) => s ? new Date(s).toLocaleString("zh-CN", { hour12: false }) : "—";
 const times = computed(() => history.value.map(p => p.collectedAt));
 const groups: Record<string, Array<{ title: string; unit: string; keys: Array<[string, string, number?]> }>> = {
-  postgresql: [{ title: "连接数", unit: "个", keys: [["connections", "当前连接"]] }, { title: "锁等待与长时间运行", unit: "个", keys: [["lockWaits", "锁等待"], ["slowQueries", "慢 SQL"], ["longTransactions", "长事务"]] }],
+  postgresql: [{ title: "连接数", unit: "个", keys: [["connections", "当前连接"]] }, { title: "锁等待与长时间运行", unit: "个", keys: [["lockWaits", "锁等待"], ["longTransactions", "长事务"]] }],
   kubernetes: [{ title: "节点与 Pod", unit: "个", keys: [["nodes", "节点"], ["pods", "Pod"]] }, { title: "当前异常", unit: "个", keys: [["unhealthyNodes", "异常节点"], ["unreadyPods", "异常 Pod"], ["restartIncrease", "新增重启"]] }],
   minio: [{ title: "磁盘状态", unit: "个", keys: [["onlineDisks", "在线"], ["offlineDisks", "离线"]] }, { title: "最高磁盘使用率", unit: "%", keys: [["maxDiskPercent", "磁盘使用率"]] }],
   elasticsearch: [{ title: "分片状态", unit: "个", keys: [["activeShards", "活跃分片"], ["unassignedShards", "未分配分片"]] }, { title: "节点资源最高使用率", unit: "%", keys: [["maxDiskPercent", "磁盘"], ["maxHeapPercent", "JVM 堆"]] }],
@@ -127,6 +128,7 @@ onUnmounted(() => { disposed = true; ++epoch; if (timer) clearInterval(timer); }
         <div class="metric-cards"><div v-for="card in cards" :key="card.key" class="metric-card"><span>{{ card.label }}</span><strong>{{ card.value }}<small v-if="card.unit && card.value !== '—'">{{ card.unit }}</small></strong></div></div>
         <div class="history-toolbar"><h4>运行趋势</h4><el-select v-model="hours" style="width:140px"><el-option v-for="h in [1, 6, 24, 48]" :key="h" :value="h" :label="`最近 ${h} 小时`" /></el-select></div>
         <div class="charts"><MetricChart v-for="chart in charts" :key="chart.title" :title="chart.title" :times="times" :series="chart.series" :unit="chart.unit" :gap-seconds="Math.max(step * 2, (detail?.intervalSeconds || 60) * 3)" /></div>
+        <HistoricalSlowQueries v-if="kind === 'postgresql'" :database-id="selected" />
         <MonitoringDataTable v-for="section in sections" :key="section.code" :check="section" />
         <section v-if="issues.length" class="issues">
           <h4>当前异常</h4>

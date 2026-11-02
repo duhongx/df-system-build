@@ -9,7 +9,7 @@ import (
 // used by the detailed chapters and raw execution records.
 func Components(r *Report) Table {
 	if r.Mode == "configured" {
-		t := Table{Title: "组件运行情况汇总", Columns: []string{"组件", "检查范围", "需关注/严重", "结果不完整"}}
+		t := Table{Title: "组件运行情况汇总", Columns: []string{"组件", "检查范围", "空间异常", "数据缺口"}}
 		for _, g := range configuredSections(r) {
 			total, warnings, unknown := 0, 0, 0
 			for _, item := range g.Items {
@@ -17,14 +17,20 @@ func Components(r *Report) Table {
 					for _, e := range item.Evidence {
 						for _, v := range e.Tables {
 							total += len(v.Rows)
+							if item.Status == "UNKNOWN" {
+								unknown += len(v.Rows)
+							}
 						}
 					}
 				} else {
 					total += len(item.Evidence)
-					if item.Status == "UNKNOWN" {
-						unknown += len(item.Evidence)
-					} else {
-						warnings += len(item.Evidence)
+					for _, e := range item.Evidence {
+						if e.Status == "UNKNOWN" || len(e.Gaps) > 0 {
+							unknown++
+						}
+						if e.Status == "CRITICAL" {
+							warnings++
+						}
 					}
 				}
 			}

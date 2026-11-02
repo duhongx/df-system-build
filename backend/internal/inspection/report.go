@@ -109,26 +109,27 @@ type Summary struct {
 }
 
 type Report struct {
-	Mode        string    `json:"mode,omitempty"`
-	Version     string    `json:"version"`
-	RunID       uint      `json:"runId"`
-	Name        string    `json:"name"`
-	Operator    string    `json:"operator"`
-	StartedAt   time.Time `json:"startedAt"`
-	FinishedAt  time.Time `json:"finishedAt"`
-	GeneratedAt time.Time `json:"generatedAt"`
-	Conclusion  string    `json:"conclusion"`
-	Summary     Summary   `json:"summary"`
-	Items       []Item    `json:"items"`
-	Findings    []Finding `json:"findings"`
-	Objects     []Object  `json:"objects"`
-	Limitations []string  `json:"limitations"`
+	Mode        string     `json:"mode,omitempty"`
+	Version     string     `json:"version"`
+	RunID       uint       `json:"runId"`
+	Name        string     `json:"name"`
+	Operator    string     `json:"operator"`
+	StartedAt   time.Time  `json:"startedAt"`
+	FinishedAt  time.Time  `json:"finishedAt"`
+	GeneratedAt time.Time  `json:"generatedAt"`
+	FrozenAt    *time.Time `json:"frozenAt,omitempty"`
+	Conclusion  string     `json:"conclusion"`
+	Summary     Summary    `json:"summary"`
+	Items       []Item     `json:"items"`
+	Findings    []Finding  `json:"findings"`
+	Objects     []Object   `json:"objects"`
+	Limitations []string   `json:"limitations"`
 }
 
 func Build(r Report) Report {
 	r.Version = Version
 	if r.Mode == "configured" {
-		r.Version = "3.1"
+		r.Version = "3.2"
 	}
 	r.Items, r.Findings = []Item{}, []Finding{}
 	definitions := Catalogue()
@@ -142,6 +143,9 @@ func Build(r Report) Report {
 		o.Name, o.Endpoint, o.Message, o.ExecutorEndpoint = Redact(o.Name), Redact(o.Endpoint), Redact(o.Message), Redact(o.ExecutorEndpoint)
 		for j := range o.Observations {
 			sanitize(&o.Observations[j])
+			if r.Mode == "configured" {
+				FactualObservation(&o.Observations[j])
+			}
 		}
 		for j := range o.Supplement {
 			sanitize(&o.Supplement[j])
@@ -151,6 +155,9 @@ func Build(r Report) Report {
 		}
 	}
 	for _, def := range definitions {
+		if r.Mode == "configured" && def.Code == "cloudhis-33" {
+			def.Name = "当前运行 ≥5 秒的会话（采样）"
+		}
 		item := Item{Definition: def, Status: "RECORDED", Complete: true, Evidence: []Evidence{}}
 		for _, o := range r.Objects {
 			if !matches(def, o) {
@@ -170,7 +177,7 @@ func Build(r Report) Report {
 			}
 			for _, obs := range observations {
 				for _, entry := range obs.Executions {
-					if entry.ExitCode != 0 || entry.Error != "" || entry.Truncated {
+					if r.Mode != "configured" && (entry.ExitCode != 0 || entry.Error != "" || entry.Truncated) {
 						obs.Status = "UNKNOWN"
 						if len(obs.Gaps) == 0 {
 							obs.Gaps = append(obs.Gaps, "执行失败或输出截断，请查看原始错误与退出码。")
@@ -186,7 +193,7 @@ func Build(r Report) Report {
 				if len(obs.Gaps) > 0 || obs.Status == "UNKNOWN" || (o.Status != "COMPLETED" && obs.Status != "NOT_APPLICABLE") {
 					item.Missing++
 					item.Complete = false
-					if obs.Status == "NORMAL" || obs.Status == "RECORDED" {
+					if r.Mode != "configured" && (obs.Status == "NORMAL" || obs.Status == "RECORDED") {
 						obs.Status = "UNKNOWN"
 					}
 					if o.Status != "COMPLETED" {
@@ -289,8 +296,12 @@ func Build(r Report) Report {
 	}
 	r.Name, r.Operator = Redact(r.Name), Redact(r.Operator)
 	if r.Mode == "configured" {
-		r.Limitations = []string{"本报告按已登记的服务器及组件连接现场采集；未登记的远程组件不包含在本次范围。", "正常项目保留结论和关键数据，异常与采集缺口单独列明；命令及完整结果保存在本报告冻结证据中。", "临时采集结果保存 48 小时；本报告及其冻结结果独立存档，重新排版不重新采集。"}
-		r.Conclusion = fmt.Sprintf("本次检查 %d 个对象、%d 项内容，已取得 %d 项结果；正常 %d 项，需关注 %d 项，严重 %d 项，已记录 %d 项，未取得完整结果 %d 项。", len(r.Objects), r.Summary.Planned, r.Summary.Completed, r.Summary.Normal, r.Summary.Warning, r.Summary.Critical, r.Summary.Recorded, r.Summary.Unknown)
+		r.Limitations = []string{"本报告冻结已登记对象的已有监控数据；生成报告不触发或等待采集。", "各项保留实际采集时间与数据库归属。正文精简长表和 SQL，完整证据保存在快照；慢 SQL 完整记录可在在线报告分页查看。", "监控源记录保存 48 小时，正式报告及其冻结数据独立存档。", "仅磁盘容量与 inode 使用率超过 75% 提示空间异常，其他指标如实记录，供后续分析。"}
+		for i := range r.Findings {
+			r.Findings[i].Advice = ""
+			r.Findings[i].Impact = ""
+		}
+		r.Conclusion = fmt.Sprintf("本报告汇总 %d 个对象、%d 项内容；空间超过 75%% 的项目 %d 项，数据未完整取得 %d 项。各组件运行情况见实际数据。", len(r.Objects), r.Summary.Planned, r.Summary.Critical, r.Summary.Missing)
 	}
 	return r
 }

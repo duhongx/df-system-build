@@ -27,6 +27,56 @@ func InspectionPostgreSQLMonitoring(parent context.Context, c DatabaseConfig) []
 	return []inspection.Observation{postgresSlots(ctx, conn), postgresTableHealth(ctx, conn)}
 }
 
+// The caller collects instance-wide slots once and table statistics in each database.
+func PostgreSQLSlots(ctx context.Context, c DatabaseConfig) inspection.Observation {
+	conn, err := OpenDatabase(ctx, c)
+	if err != nil {
+		return pgMonitorFailure("postgresql-slots", "复制槽与 WAL 保留", err)
+	}
+	defer conn.Close(context.WithoutCancel(ctx))
+	return postgresSlots(ctx, conn)
+}
+func PostgreSQLTableHealth(ctx context.Context, c DatabaseConfig) inspection.Observation {
+	conn, err := OpenDatabase(ctx, c)
+	if err != nil {
+		return pgMonitorFailure("postgresql-table-health", "表空间与 VACUUM", err)
+	}
+	defer conn.Close(context.WithoutCancel(ctx))
+	return postgresTableHealth(ctx, conn)
+}
+
+type InstanceDatabase struct {
+	Name                         string
+	AllowConnections, CanConnect bool
+	Connections                  int
+}
+
+func PostgreSQLDatabases(ctx context.Context, c DatabaseConfig) ([]InstanceDatabase, int, int, error) {
+	conn, err := OpenDatabase(ctx, c)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer conn.Close(context.WithoutCancel(ctx))
+	var connections, maximum int
+	if err := conn.QueryRow(ctx, `SELECT COALESCE(sum(numbackends),0)::int,current_setting('max_connections')::int FROM pg_stat_database`).Scan(&connections, &maximum); err != nil {
+		return nil, 0, 0, err
+	}
+	rows, err := conn.Query(ctx, `SELECT d.datname,d.datallowconn,has_database_privilege(d.oid,'CONNECT'),COALESCE(s.numbackends,0) FROM pg_database d LEFT JOIN pg_stat_database s ON s.datid=d.oid ORDER BY d.datname`)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer rows.Close()
+	out := []InstanceDatabase{}
+	for rows.Next() {
+		var d InstanceDatabase
+		if err := rows.Scan(&d.Name, &d.AllowConnections, &d.CanConnect, &d.Connections); err != nil {
+			return nil, 0, 0, err
+		}
+		out = append(out, d)
+	}
+	return out, connections, maximum, rows.Err()
+}
+
 const postgresSlotsSQL = `WITH wal_position AS (
  SELECT CASE WHEN pg_is_in_recovery() THEN GREATEST(pg_last_wal_receive_lsn(),pg_last_wal_replay_lsn()) ELSE pg_current_wal_lsn() END AS lsn
 ), slots AS (

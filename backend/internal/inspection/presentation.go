@@ -20,17 +20,29 @@ func presentationTable(t Table, code string) Table {
 	out.Columns = append([]string{}, t.Columns...)
 	out.Rows = [][]string{}
 	indices := []int{}
+	for i, column := range t.Columns {
+		if column == "数据库" {
+			indices = append(indices, i)
+			break
+		}
+	}
 	preferred := map[string][]string{
-		"cloudhis-25": {"application_name", "client_addr", "statename", "sync_statename", "slave_latency_mb"},
-		"cloudhis-28": {"pid", "shemaname", "relname", "mode", "lock_duration", "query"},
-		"cloudhis-29": {"pid", "datname", "username", "state_change", "state", "sql"},
-		"cloudhis-30": {"pid", "datname", "username", "xact_start", "state", "sql"},
-		"cloudhis-33": {"pid", "datname", "username", "query_start", "wait_event_type", "sql"},
-		"cloudhis-34": {"schemaname", "tablename", "tbloat", "wastedsize", "wastedbytes", "pages"},
-		"cloudhis-35": {"schemaname", "tablename", "iname", "ibloat", "wastedisize", "wastedibytes"},
+		"postgresql-slots":        {"Slot", "类型", "活跃", "保留 WAL MiB", "WAL 状态"},
+		"postgresql-table-health": {"表名", "死元组估计", "死元组占比 %", "最近 VACUUM", "最近 ANALYZE"},
+		"postgresql-archive":      {"归档状态", "成功累计", "失败累计", "最近成功时间", "最近失败时间", "统计重置时间"},
+		"cloudhis-25":             {"application_name", "client_addr", "statename", "sync_statename", "slave_latency_mb"},
+		"cloudhis-28":             {"pid", "shemaname", "relname", "mode", "lock_duration", "query"},
+		"cloudhis-29":             {"pid", "datname", "username", "state_change", "state", "sql"},
+		"cloudhis-30":             {"pid", "datname", "username", "xact_start", "state", "sql"},
+		"cloudhis-33":             {"pid", "datname", "username", "query_start", "wait_event_type", "sql"},
+		"cloudhis-34":             {"schemaname", "tablename", "tbloat", "wastedsize", "wastedbytes", "pages"},
+		"cloudhis-35":             {"schemaname", "tablename", "iname", "ibloat", "wastedisize", "wastedibytes"},
 	}[code]
 	if len(t.Columns) > 6 {
 		for _, key := range preferred {
+			if len(indices) == 6 {
+				break
+			}
 			for i, column := range t.Columns {
 				if strings.EqualFold(strings.Split(column, "(")[0], key) {
 					indices = append(indices, i)
@@ -39,7 +51,8 @@ func presentationTable(t Table, code string) Table {
 			}
 		}
 	}
-	if len(indices) == 0 {
+	if len(indices) <= 1 {
+		indices = nil
 		for i := range t.Columns {
 			if len(indices) == 6 {
 				break
@@ -100,7 +113,12 @@ func presentationTable(t Table, code string) Table {
 				parts := strings.Split(value, "/")
 				value = parts[len(parts)-1]
 			}
-			values = append(values, presentationText(value, 180))
+			column := strings.ToLower(t.Columns[i])
+			if strings.Contains(column, "sql") || column == "query" {
+				values = append(values, Preview(value, 60))
+			} else {
+				values = append(values, presentationText(value, 180))
+			}
 		}
 		out.Rows = append(out.Rows, values)
 	}
@@ -133,6 +151,9 @@ func presentationObservation(o Observation, code string) Observation {
 			if message == "" {
 				message = e.Error
 			}
+			if strings.Contains(message, "context deadline exceeded") {
+				message = "后台采集未在时限内完成；此项缺少可用结果"
+			}
 			if message != "" && !strings.Contains(out.Reason, message) {
 				out.Reason = presentationText(strings.TrimSpace(out.Reason+" "+message), 600)
 			}
@@ -143,6 +164,9 @@ func presentationObservation(o Observation, code string) Observation {
 	}
 	out.Gaps = append([]string{}, o.Gaps...)
 	for i := range out.Gaps {
+		if strings.Contains(out.Gaps[i], "context deadline exceeded") {
+			out.Gaps[i] = "后台采集未在时限内完成；此项缺少可用结果"
+		}
 		out.Gaps[i] = presentationText(out.Gaps[i], 400)
 	}
 	out.Tables = []Table{}
@@ -168,10 +192,13 @@ func Presentation(source *Report) *Report {
 		out.Items[i].Reason = presentationText(item.Reason, 600)
 		out.Items[i].Evidence = append([]Evidence{}, item.Evidence...)
 		for j, e := range item.Evidence {
-			if source.Mode == "configured" && (e.Status == "NORMAL" || e.Status == "RECORDED") {
+			if source.Mode == "configured" && len(e.Tables) == 0 && (e.Status == "NORMAL" || e.Status == "RECORDED") {
 				e.Value = keyResult(e.Observation)
 			}
 			out.Items[i].Evidence[j].Observation = presentationObservation(e.Observation, item.Code)
+			if source.Mode == "configured" && source.Version == "3.2" {
+				FactualObservation(&out.Items[i].Evidence[j].Observation)
+			}
 			if source.Mode == "configured" && (item.Code == "cloudhis-3" || item.Code == "cloudhis-38") {
 				for k, t := range out.Items[i].Evidence[j].Tables {
 					var rows [][]string
@@ -207,6 +234,10 @@ func Presentation(source *Report) *Report {
 		out.Findings[i].Value = presentationText(f.Value, 400)
 		out.Findings[i].Reason = presentationText(f.Reason, 600)
 		out.Findings[i].Advice = presentationText(f.Advice, 400)
+	}
+	if source.Mode == "configured" {
+		out.Limitations = append([]string{}, source.Limitations...)
+		return &out
 	}
 	out.Limitations = []string{"本报告列出运行情况、关键结果、异常与配置缺项。完整命令、SQL 和原始输出保存在任务检查详情。", "长表只展示关键列及部分记录，均注明原始数量；展示精简不改变实际检查覆盖统计。", "未配置、不适用与读取失败分别记录，不据缺少统计记录推断业务正常。"}
 	return &out

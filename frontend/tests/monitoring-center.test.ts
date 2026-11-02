@@ -15,6 +15,8 @@ const api = vi.hoisted(() => ({
   listMonitoring: vi.fn(),
   getMonitoring: vi.fn(),
   getMonitoringHistory: vi.fn(),
+  getMonitoringSlowQueries: vi.fn().mockResolvedValue({list:[],total:0,targets:[]}),
+  getReportSlowQueries: vi.fn(),
   refreshMonitoring: vi.fn(),
   getCollection: vi.fn(),
   collectComponent: vi.fn(),
@@ -212,7 +214,7 @@ it("switches among 35 instances using name or address search and discards late d
  expect(el.querySelector(".instance-table")).toBeNull();
 });
 
-it.each(["postgresql-slots","postgresql-archive","cloudhis-33","postgresql-table-bloat","postgresql-index-bloat","redis-slowlog","rabbitmq-queues"])("shows the operational table for %s without raw evidence",async code=>{
+it.each(["postgresql-slots","postgresql-archive","postgresql-databases","cloudhis-28","postgresql-table-bloat","postgresql-index-bloat","redis-slowlog","rabbitmq-queues"])("shows the operational table for %s without raw evidence",async code=>{
  api.listMonitoring.mockResolvedValue([{id:1,targetType:"database",kind:"postgresql",name:"业务库",endpoint:"pg:5432",enabled:true,status:"NORMAL",intervalSeconds:30,indicators:{}}]);
  api.getMonitoring.mockResolvedValue({status:"NORMAL",intervalSeconds:30,result:{reportChecks:[{code,name:code,status:"RECORDED",tables:[{columns:["对象","统计值"],rows:[["业务对象", "123"]]}],executions:[{stdout:"private-raw"}]}]}});
  const el=mount(()=>h(ComponentInspectionPanel,{kind:"postgresql"}));

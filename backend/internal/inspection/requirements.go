@@ -40,7 +40,7 @@ func CheckDefinition(code string) Definition {
 	names := map[string]string{"host_identity": "Linux 系统信息", "host_cpu": "CPU 与负载", "host_memory": "内存与 Swap", "host_filesystems": "实际文件系统容量与 inode", "host-discovery": "主机部署识别", "postgresql-archive": "PostgreSQL 归档配置与执行统计", "redis-info": "Redis 运行情况", "redis-persistence": "Redis 持久化与复制", "elasticsearch-health": "Elasticsearch 集群状态", "elasticsearch-resources": "Elasticsearch 节点资源", "rabbitmq-overview": "RabbitMQ 运行概况", "rabbitmq-nodes": "RabbitMQ 节点与告警"}
 	name := names[code]
 	if name == "" {
-		name = map[string]string{"redis-slowlog": "Redis 慢查询", "rabbitmq-queues": "RabbitMQ 队列与积压", "postgresql-slots": "复制槽与 WAL 保留", "postgresql-table-health": "表空间与 VACUUM", "postgresql-slow-history": "慢 SQL 日志（48 小时）"}[code]
+		name = map[string]string{"redis-slowlog": "Redis 慢查询", "rabbitmq-queues": "RabbitMQ 队列", "postgresql-slots": "复制槽与 WAL 保留", "postgresql-table-health": "表空间与 VACUUM", "postgresql-slow-history": "已发生慢 SQL（CSV 日志）"}[code]
 	}
 	if name == "" {
 		name = code

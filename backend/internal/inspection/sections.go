@@ -3,6 +3,7 @@ package inspection
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Section groups evidence into report chapters without duplicating stored data.
@@ -43,7 +44,7 @@ func Sections(r *Report) []Section {
 }
 
 func configuredSections(r *Report) []Section {
-	groups := []Section{{ID: "resources", Name: "Linux 主机检查", Intro: "主机基础资源与实际文件系统；省略容器运行时重复挂载。"}, {ID: "database", Name: "PostgreSQL 检查", Intro: "实例角色、连接、复制、归档、备份及指导书数据库检查。"}, {ID: "applications", Name: "Kubernetes 与应用检查", Intro: "集群节点、Pod 当前状态和应用检查；历史重启单列。"}, {ID: "storage", Name: "MinIO 检查", Intro: "节点、磁盘及容量；备份与逐日记录按实际配置说明。"}, {ID: "elasticsearch", Name: "Elasticsearch 检查", Intro: "集群健康、分片与节点资源快照。"}, {ID: "redis", Name: "Redis 检查", Intro: "连接、内存、复制与持久化情况。"}, {ID: "rabbitmq", Name: "RabbitMQ 检查", Intro: "运行概况、节点及资源告警。"}}
+	groups := []Section{{ID: "resources", Name: "Linux 主机检查", Intro: "主机基础资源与实际文件系统；省略容器运行时重复挂载。"}, {ID: "database", Name: "PostgreSQL 检查", Intro: "实例角色、连接、复制、归档、备份及指导书数据库检查。"}, {ID: "applications", Name: "Kubernetes 与应用检查", Intro: "集群节点、Pod 当前状态和应用检查；历史重启单列。"}, {ID: "storage", Name: "MinIO 检查", Intro: "节点、磁盘及容量；备份与逐日记录按实际配置说明。"}, {ID: "elasticsearch", Name: "Elasticsearch 检查", Intro: "集群健康、分片与节点资源快照。"}, {ID: "redis", Name: "Redis 检查", Intro: "连接、内存、复制与持久化情况。"}, {ID: "rabbitmq", Name: "RabbitMQ 检查", Intro: "运行概况、节点与队列消息数据。"}}
 	known := map[string]int{}
 	for i := 1; i <= 39; i++ {
 		idx := 2
@@ -58,8 +59,10 @@ func configuredSections(r *Report) []Section {
 		}
 		known[fmt.Sprintf("cloudhis-%d", i)] = idx
 	}
+	gaps := make([]Table, len(groups))
 	summaries := make([]Table, len(groups))
 	for i := range summaries {
+		gaps[i] = Table{Title: "数据未取得的项目", Columns: []string{"项目", "对象", "说明", "采集时间"}}
 		summaries[i] = Table{Title: "关键检查结果", Columns: []string{"检查项目", "对象", "结论与关键结果"}}
 	}
 	for _, item := range r.Items {
@@ -79,6 +82,21 @@ func configuredSections(r *Report) []Section {
 			}
 		}
 		if item.Code == "cloudhis-6" || item.Code == "cloudhis-15" || item.Code == "cloudhis-36" {
+			if item.Status != "UNKNOWN" && item.Complete && len(ResourceTables(r)) > 0 {
+				continue
+			}
+			idx = map[string]int{"cloudhis-6": 2, "cloudhis-15": 1, "cloudhis-36": 3}[item.Code]
+		}
+		hasRows := false
+		for _, e := range item.Evidence {
+			for _, table := range e.Tables {
+				if len(table.Rows) > 0 {
+					hasRows = true
+				}
+			}
+		}
+		if hasRows {
+			groups[idx].Items = append(groups[idx].Items, item)
 			continue
 		}
 		if item.Status == "NORMAL" || item.Status == "RECORDED" || item.Status == "NOT_APPLICABLE" {
@@ -90,11 +108,27 @@ func configuredSections(r *Report) []Section {
 				summaries[idx].Rows = append(summaries[idx].Rows, []string{item.Name, e.ObjectName, presentationText(value, 180)})
 			}
 		} else {
-			groups[idx].Items = append(groups[idx].Items, item)
+			for _, e := range item.Evidence {
+				at := "尚无结果"
+				if !e.CollectedAt.IsZero() {
+					at = e.CollectedAt.Format(time.RFC3339)
+				}
+				reason := strings.TrimSpace(e.Reason + " " + strings.Join(e.Gaps, "；"))
+				if reason == "" {
+					reason = item.Reason
+				}
+				if reason == "" {
+					reason = "尚无已保存的本项数据"
+				}
+				gaps[idx].Rows = append(gaps[idx].Rows, []string{item.Name, e.ObjectName, presentationText(reason, 240), at})
+			}
 		}
 	}
 	var out []Section
 	for i, g := range groups {
+		if len(gaps[i].Rows) > 0 {
+			g.Items = append(g.Items, Item{Definition: Definition{Code: "summary-gaps-" + g.ID, Name: "数据缺口"}, Status: "UNKNOWN", Evidence: []Evidence{{Observation: Observation{Tables: []Table{gaps[i]}}}}})
+		}
 		if len(summaries[i].Rows) > 0 {
 			g.Items = append([]Item{{Definition: Definition{Code: "summary-" + g.ID, Name: "检查结果"}, Status: "RECORDED", Evidence: []Evidence{{Observation: Observation{Tables: []Table{summaries[i]}}}}}}, g.Items...)
 		}

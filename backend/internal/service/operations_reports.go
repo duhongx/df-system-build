@@ -409,6 +409,11 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 				widths[i] = (width - 76) * 0.55 / float64(n-1)
 			}
 		}
+		if n == 6 && t.Columns[0] == "发生时间" && strings.Contains(t.Columns[5], "SQL") {
+			for i, ratio := range []float64{0.20, 0.12, 0.10, 0.10, 0.14, 0.34} {
+				widths[i] = (width - 76) * ratio
+			}
+		}
 		wrap := func(text string, w float64) ([]string, error) {
 			var lines []string
 			line := ""
@@ -540,12 +545,17 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 		{doc.Name, 20},
 		{fmt.Sprintf("任务 #%d / 发起人 %s / 报告版本 %s", doc.RunID, doc.Operator, doc.Version), 10},
 		{"采集时间：" + reportTime(doc.StartedAt) + " 至 " + reportTime(doc.FinishedAt), 9},
-		{"结果冻结时间：" + reportTime(doc.GeneratedAt), 9}, {"整体结论", 15}, {doc.Conclusion, 11},
+		{"报告生成时间：" + reportTime(doc.GeneratedAt), 9}, {"整体结论", 15}, {doc.Conclusion, 11},
 		{fmt.Sprintf("本次执行 %d 项 / 本次范围以执行对象与检查内容为准", doc.Summary.Planned), 10},
 
 		{"正文列出关键检查结果；原始命令与输出保存在任务检查详情。“已记录”表示执行成功，不表示自动判定业务正常。", 9},
 	} {
 		if err := write(line.text, line.size); err != nil {
+			return nil, err
+		}
+	}
+	if doc.FrozenAt != nil {
+		if err := write("数据快照时间："+reportTime(*doc.FrozenAt), 9); err != nil {
 			return nil, err
 		}
 	}
@@ -556,6 +566,9 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 		if err := table(inspection.Attention(doc)); err != nil {
 			return nil, err
 		}
+	}
+	if y+120 > bottom {
+		newPage()
 	}
 	if err := write("执行对象", 15); err != nil {
 		return nil, err
@@ -703,7 +716,7 @@ func renderInspectionPDF(ctx context.Context, r inspectionReport) ([]byte, error
 						return nil, err
 					}
 				}
-				if err := write("证据："+e.ID+" / "+e.ObjectName+" / "+e.Source, 8.5); err != nil {
+				if err := write("证据："+e.ObjectName+" / "+e.Source+" / 采集时间 "+reportTime(e.CollectedAt), 8.5); err != nil {
 					return nil, err
 				}
 			}

@@ -25,7 +25,7 @@ func TestDailyMonitoringSlowHistoryIsScopedBoundedAndUsesSyncTime(t *testing.T) 
 		t.Fatalf("disabled logging became zero: %+v", o)
 	}
 	for i := 0; i < 55; i++ {
-		e := model.DatabaseLogEvent{DatabaseID: row.ID, SourceKey: "monitoring-details-" + time.Now().Add(time.Duration(i)).Format(time.RFC3339Nano), Type: "slow_sql", EventTime: now.Add(-time.Duration(i) * time.Second), SQL: "SELECT " + strings.Repeat("x", 1200), DurationMs: float64(i + 1)}
+		e := model.DatabaseLogEvent{DatabaseID: row.ID, SourceKey: "monitoring-details-" + time.Now().Add(time.Duration(i)).Format(time.RFC3339Nano), Type: "slow_sql", EventTime: now.Add(-time.Duration(i) * time.Second), SQL: "SELECT " + strings.Repeat("x", 1200), DurationMs: float64(i + 5001)}
 		if err := db.Create(&e).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -38,21 +38,21 @@ func TestDailyMonitoringSlowHistoryIsScopedBoundedAndUsesSyncTime(t *testing.T) 
 	}
 	row.LogEnabled = true
 	row.LastLogSyncAt = &now
+	db.Save(&row)
 	o = s.monitoringPostgresSlowHistory(ctx, row)
-	if o.Status != "RECORDED" || o.Measurements["historicalSlowLogs"] != 55 || len(o.Tables[0].Rows) != 50 || !o.CollectedAt.Equal(now) {
+	if o.Status != "RECORDED" || o.Measurements["slowSQLRecords"] != 55 || len(o.Tables) != 0 || !o.CollectedAt.Equal(now) {
 		t.Fatalf("slow history scope: %+v", o)
 	}
 	data, _ := json.Marshal(o)
 	if strings.Contains(string(data), "private-query") {
 		t.Fatal("excluded log leaked")
 	}
-	if len([]rune(o.Tables[0].Rows[0][5])) > 1001 {
-		t.Fatal("SQL preview is unbounded")
-	}
+
 	stale := now.Add(-4 * time.Minute)
 	row.LastLogSyncAt = &stale
+	db.Save(&row)
 	o = s.monitoringPostgresSlowHistory(ctx, row)
-	if o.Status != "UNKNOWN" || len(o.Tables[0].Rows) != 50 || !o.CollectedAt.Equal(stale) {
+	if o.Status != "RECORDED" || o.Attributes["availability"] != "delayed" || len(o.Tables) != 0 || !o.CollectedAt.Equal(stale) {
 		t.Fatalf("stale log history presented as fresh: %+v", o)
 	}
 }

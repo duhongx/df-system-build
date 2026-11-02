@@ -30,7 +30,7 @@ type rabbitQueue struct {
 
 func rabbitQueues(ctx context.Context, c Config, expected int) inspection.Observation {
 	fail := func(err error) inspection.Observation {
-		return Failed("rabbitmq-queues", "RabbitMQ 队列与积压", err)
+		return Failed("rabbitmq-queues", "RabbitMQ 队列", err)
 	}
 	var queues []rabbitQueue
 	pageTotal := -1
@@ -86,9 +86,9 @@ func rabbitQueues(ctx context.Context, c Config, expected int) inspection.Observ
 			break
 		}
 	}
-	o := Observation("rabbitmq-queues", "RabbitMQ 队列与积压", fmt.Sprintf("共 %d 个队列", len(queues)), "NORMAL")
+	o := Observation("rabbitmq-queues", "RabbitMQ 队列", fmt.Sprintf("共 %d 个队列", len(queues)), "NORMAL")
 	o.Measurements = map[string]float64{"queueCount": float64(len(queues))}
-	t := inspection.Table{Columns: []string{"VHost", "队列", "状态", "待消费", "未确认", "消费者", "生产/秒", "投递/秒", "确认/秒", "待消费变化", "判断"}}
+	t := inspection.Table{Columns: []string{"VHost", "队列", "状态", "待消费", "未确认", "消费者", "生产/秒", "投递/秒", "确认/秒", "待消费变化"}}
 	sort.Slice(queues, func(i, j int) bool {
 		a, b := int64(-1), int64(-1)
 		if queues[i].Ready != nil {
@@ -107,27 +107,27 @@ func rabbitQueues(ctx context.Context, c Config, expected int) inspection.Observ
 	var publishing, delivering, acknowledging float64
 	ratesComplete := true
 	for _, q := range queues {
-		judgment := "无待处理消息"
+
 		if q.Ready == nil || q.Unacked == nil || q.Consumers == nil || *q.Ready < 0 || *q.Unacked < 0 || *q.Consumers < 0 {
 			valid = false
-			judgment = "数据不完整"
+
 		} else {
 			if *q.Unacked > 0 {
-				judgment = "消息处理中／待确认"
+
 			}
 			if *q.Ready > 0 {
 				backlog++
-				judgment = "存在待消费积压"
+
 				if *q.Consumers == 0 {
 					noConsumer++
-					judgment = "待消费且无消费者"
-					o.Status = "WARNING"
+
+					o.Status = "RECORDED"
 				}
 			}
 		}
 		if q.State == "down" || q.State == "crashed" || q.State == "stopped" {
-			o.Status = "WARNING"
-			judgment = "队列不可用"
+			o.Status = "RECORDED"
+
 		}
 		if q.Stats.Publish.Rate == nil || q.Stats.Deliver.Rate == nil || q.Stats.Ack.Rate == nil || *q.Stats.Publish.Rate < 0 || *q.Stats.Deliver.Rate < 0 || *q.Stats.Ack.Rate < 0 {
 			ratesComplete = false
@@ -136,7 +136,7 @@ func rabbitQueues(ctx context.Context, c Config, expected int) inspection.Observ
 			delivering += *q.Stats.Deliver.Rate
 			acknowledging += *q.Stats.Ack.Rate
 		}
-		t.Rows = append(t.Rows, []string{inspection.Preview(q.VHost, 256), inspection.Preview(q.Name, 256), q.State, rabbitNumber(q.Ready), rabbitNumber(q.Unacked), rabbitNumber(q.Consumers), rabbitRateText(q.Stats.Publish.Rate), rabbitRateText(q.Stats.Deliver.Rate), rabbitRateText(q.Stats.Ack.Rate), "—", judgment})
+		t.Rows = append(t.Rows, []string{inspection.Preview(q.VHost, 256), inspection.Preview(q.Name, 256), q.State, rabbitNumber(q.Ready), rabbitNumber(q.Unacked), rabbitNumber(q.Consumers), rabbitRateText(q.Stats.Publish.Rate), rabbitRateText(q.Stats.Deliver.Rate), rabbitRateText(q.Stats.Ack.Rate), "—"})
 	}
 	if valid {
 		o.Measurements["backlogQueues"] = float64(backlog)
@@ -150,8 +150,7 @@ func rabbitQueues(ctx context.Context, c Config, expected int) inspection.Observ
 	if len(queues) != expected || !valid {
 		o.Status = "UNKNOWN"
 		o.Reason = fmt.Sprintf("读取 %d 个队列，汇总 %d 个；队列范围变化、权限或部分统计缺失，无法确认全部队列状态", len(queues), expected)
-	} else if noConsumer > 0 {
-		o.Reason = fmt.Sprintf("%d 个队列存在待消费消息且无消费者", noConsumer)
+
 	}
 	if len(queues) == 0 {
 		o.Value = "暂无队列"
@@ -181,7 +180,7 @@ func CompareRabbitQueues(current, previous []inspection.Observation) {
 		if check.Code == "rabbitmq-queues" && check.Status != "UNKNOWN" {
 			for _, table := range check.Tables {
 				for _, row := range table.Rows {
-					if len(row) < 11 {
+					if len(row) < 10 {
 						continue
 					}
 					n, err := strconv.ParseInt(row[3], 10, 64)
@@ -201,7 +200,7 @@ func CompareRabbitQueues(current, previous []inspection.Observation) {
 		for ti := range o.Tables {
 			for ri := range o.Tables[ti].Rows {
 				row := o.Tables[ti].Rows[ri]
-				if len(row) < 11 {
+				if len(row) < 10 {
 					continue
 				}
 				old, ok := prior[row[0]+"\x00"+row[1]]
@@ -214,9 +213,7 @@ func CompareRabbitQueues(current, previous []inspection.Observation) {
 				row[9] = fmt.Sprintf("%+d", delta)
 				if delta > 0 {
 					growing++
-					if row[10] == "存在待消费积压" {
-						row[10] = "待消费积压增加"
-					}
+
 				}
 			}
 		}

@@ -12,24 +12,32 @@ import (
 	"df-build-server/internal/model"
 	"df-build-server/internal/nodeexporter"
 	"df-build-server/internal/opsprobe"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 func (s *OperationsService) HostMonitor(id uint) (model.HostMonitorConfig, *opsprobe.HostMetrics, error) {
+	return s.hostMonitor(context.Background(), id, true)
+}
+
+func (s *OperationsService) hostMonitor(ctx context.Context, id uint, initialise bool) (model.HostMonitorConfig, *opsprobe.HostMetrics, error) {
+	db := s.db.WithContext(ctx)
 	var server model.Server
-	if err := s.db.First(&server, id).Error; err != nil {
+	if err := db.First(&server, id).Error; err != nil {
 		return model.HostMonitorConfig{}, nil, err
 	}
 	cfg := model.HostMonitorConfig{ServerID: id, IntervalSeconds: 60, Enabled: true}
-	if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&cfg).Error; err != nil {
-		return cfg, nil, err
+	if initialise {
+		if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&cfg).Error; err != nil {
+			return cfg, nil, err
+		}
 	}
-	if err := s.db.First(&cfg, id).Error; err != nil {
+	if err := db.First(&cfg, id).Error; err != nil && err != gorm.ErrRecordNotFound {
 		return cfg, nil, err
 	}
 	var sample model.HostMetricSample
 	var metrics *opsprobe.HostMetrics
-	if err := s.db.Where("server_id=? AND collected_at>=?", id, time.Now().Add(-48*time.Hour)).Order("collected_at DESC").First(&sample).Error; err == nil {
+	if err := db.Where("server_id=? AND collected_at>=?", id, time.Now().Add(-48*time.Hour)).Order("collected_at DESC,id DESC").First(&sample).Error; err == nil {
 		var m opsprobe.HostMetrics
 		if err := json.Unmarshal([]byte(sample.MetricsJSON), &m); err != nil {
 			return cfg, nil, err
@@ -41,6 +49,8 @@ func (s *OperationsService) HostMonitor(id uint) (model.HostMonitorConfig, *opsp
 		if m.SourceURL == expected {
 			metrics = &m
 		}
+	} else if err != gorm.ErrRecordNotFound {
+		return cfg, nil, err
 	}
 	return cfg, metrics, nil
 }

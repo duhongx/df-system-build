@@ -17,7 +17,6 @@ import (
 	"df-build-server/internal/inspection"
 	"df-build-server/internal/middleware"
 	"df-build-server/internal/model"
-	"df-build-server/internal/opsprobe"
 	"df-build-server/internal/repository"
 	"df-build-server/internal/service"
 	"df-build-server/internal/testutil"
@@ -64,7 +63,7 @@ func TestMonitoringWorkflowCollectsPersistsAndArchivesThroughAuthenticatedAPI(t 
 		parent, _ := base.DB()
 		_ = parent.Close()
 	})
-	if err := db.AutoMigrate(&model.Server{}, &model.HostMonitorConfig{}, &model.HostMetricSample{}, &model.OperationsDatabase{}, &model.DatabaseQueryRecord{}, &model.DatabaseLogCursor{}, &model.DatabaseLogEvent{}, &model.InspectionPlan{}, &model.InspectionRun{}, &model.InspectionTargetRun{}, &model.ComponentConnection{}, &model.MonitoringState{}, &model.CollectionSample{}, &model.ManagedService{}, &model.ServiceOperation{}, &model.Settings{}, &model.User{}); err != nil {
+	if err := db.AutoMigrate(&model.Server{}, &model.HostMonitorConfig{}, &model.HostMetricSample{}, &model.OperationsDatabase{}, &model.DatabaseQueryRecord{}, &model.DatabaseLogCursor{}, &model.DatabaseLogEvent{}, &model.InspectionPlan{}, &model.InspectionRun{}, &model.InspectionTargetRun{}, &model.InspectionSlowQuery{}, &model.ComponentConnection{}, &model.MonitoringState{}, &model.CollectionSample{}, &model.ManagedService{}, &model.ServiceOperation{}, &model.Settings{}, &model.User{}); err != nil {
 		t.Fatal(err)
 	}
 	requests := &atomic.Int32{}
@@ -145,7 +144,7 @@ func TestMonitoringWorkflowCollectsPersistsAndArchivesThroughAuthenticatedAPI(t 
 		time.Sleep(100 * time.Millisecond)
 	}
 	result := *monitor.Result
-	if requests.Load() != 2 || result.Coverage == nil || result.Coverage.Planned != 2 || result.Coverage.Completed != 2 || result.Coverage.Warning != 1 {
+	if requests.Load() != 2 || result.Coverage == nil || result.Coverage.Planned != 2 || result.Coverage.Completed != 2 || result.Coverage.Recorded != 2 {
 		t.Fatalf("collection/coverage: calls=%d %+v", requests.Load(), result.Coverage)
 	}
 	var dashboard service.MonitoringView
@@ -173,10 +172,10 @@ func TestMonitoringWorkflowCollectsPersistsAndArchivesThroughAuthenticatedAPI(t 
 	}
 	var sample model.CollectionSample
 	api("GET", fmt.Sprintf("/collections/component/%d", connection.ID), nil, &sample)
-	var saved opsprobe.JobResult
-	if err := json.Unmarshal([]byte(sample.ResultJSON), &saved); err != nil {
-		t.Fatal(err)
+	if sample.ID != 0 {
+		t.Fatal("report generation created a collection sample")
 	}
+	saved := result
 	var frozen inspection.Report
 	api("GET", fmt.Sprintf("/inspection-runs/%d/report-data", run.ID), nil, &frozen)
 	if frozen.FinishedAt.Before(frozen.StartedAt) || frozen.StartedAt.After(result.FinishedAt) {
@@ -192,6 +191,32 @@ func TestMonitoringWorkflowCollectsPersistsAndArchivesThroughAuthenticatedAPI(t 
 	}
 	if pdf.Code != 200 || !bytes.HasPrefix(pdf.Body.Bytes(), []byte("%PDF")) || !strings.Contains(pdf.Header().Get("Content-Disposition"), "attachment") {
 		t.Fatalf("PDF download: HTTP %d", pdf.Code)
+	}
+	logNow := time.Now()
+	database := model.OperationsDatabase{Name: "SQL 分页验证", Host: "127.0.0.1", Port: 1, Database: "default", Username: "fixture", Revision: 1, LogEnabled: true, LastLogSyncAt: &logNow}
+	if err := db.Create(&database).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 61; i++ {
+		event := model.DatabaseLogEvent{DatabaseID: database.ID, SourceKey: fmt.Sprintf("workflow-log-%d", i), Type: "slow_sql", DBName: "business", EventTime: logNow.Add(-time.Duration(i) * time.Second), DurationMs: 5001, SQL: fmt.Sprintf("select %d", i)}
+		if err := db.Create(&event).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var slowPage service.SlowQueryPage
+	api("GET", fmt.Sprintf("/monitoring/database/%d/slow-queries?page=4&size=20", database.ID), nil, &slowPage)
+	if slowPage.Total != 61 || len(slowPage.List) != 1 || slowPage.List[0].Database != "business" {
+		t.Fatal("slow SQL backend pagination failed")
+	}
+	if out := raw("GET", fmt.Sprintf("/monitoring/database/%d/slow-queries", database.ID), nil, ""); out.Code != http.StatusUnauthorized {
+		t.Fatal("slow SQL exposed without authentication")
+	}
+	var slowRun model.InspectionRun
+	api("POST", "/configured-inspections", map[string]any{"name": "慢 SQL 存档验证", "targets": []map[string]any{{"type": "database", "id": database.ID}}}, &slowRun)
+	db.Where("database_id=?", database.ID).Delete(&model.DatabaseLogEvent{})
+	api("GET", fmt.Sprintf("/inspection-runs/%d/slow-queries?page=4&size=20", slowRun.ID), nil, &slowPage)
+	if slowPage.Total != 61 || len(slowPage.List) != 1 || slowPage.FrozenAt == nil {
+		t.Fatal("report SQL archive depended on transient records")
 	}
 	frozenJSON := run.ReportSnapshotJSON
 	calls := requests.Load()

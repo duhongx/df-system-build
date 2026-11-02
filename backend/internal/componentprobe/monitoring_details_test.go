@@ -82,14 +82,14 @@ func TestRabbitQueuesPaginationAndBacklogChanges(t *testing.T) {
 	}))
 	defer srv.Close()
 	o := rabbitQueues(context.Background(), Config{Endpoint: srv.URL}, 2)
-	if o.Status != "WARNING" || fmt.Sprint(pages) != "[1 2]" || o.Measurements["backlogQueues"] != 2 || o.Measurements["noConsumerQueues"] != 1 || o.Measurements["publishRate"] != 6 {
+	if o.Status != "RECORDED" || fmt.Sprint(pages) != "[1 2]" || o.Measurements["backlogQueues"] != 2 || o.Measurements["noConsumerQueues"] != 1 || o.Measurements["publishRate"] != 6 {
 		t.Fatalf("queues: %+v pages %v", o, pages)
 	}
 	previous := inspection.Observation{Code: o.Code, Status: "NORMAL", Tables: []inspection.Table{{Rows: [][]string{{"/", "a", "running", "4", "2", "1", "—", "—", "—", "—", ""}, {"/", "new", "running", "0", "0", "0", "—", "—", "—", "—", ""}}}}}
 	current := []inspection.Observation{o}
 	CompareRabbitQueues(current, []inspection.Observation{previous})
 	rows := current[0].Tables[0].Rows
-	if current[0].Measurements["growingQueues"] != 1 || rows[1][9] != "+6" || rows[0][9] != "—" || rows[1][10] != "待消费积压增加" {
+	if current[0].Measurements["growingQueues"] != 1 || rows[1][9] != "+6" || rows[0][9] != "—" || len(rows[1]) != 10 {
 		t.Fatalf("fabricated trend: %+v", current)
 	}
 }

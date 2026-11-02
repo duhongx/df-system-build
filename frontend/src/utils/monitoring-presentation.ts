@@ -27,11 +27,11 @@ type MetricSpec = { label: string; key: string; unit?: string; divisor?: number;
 const specs: Record<string, MetricSpec[]> = {
   postgresql: [
     { label: "当前连接", key: "connections" }, { label: "连接上限", key: "maxConnections" },
-    { label: "锁等待", key: "lockWaits" }, { label: "慢 SQL", key: "slowQueries" },
+    { label: "锁等待", key: "lockWaits" }, { label: "已发生慢 SQL", key: "slowSQLRecords" },
     { label: "长事务", key: "longTransactions" }, { label: "物理备库连接", key: "physicalReplicas" },
     { label: "复制槽", key: "slots" }, { label: "未活跃 Slot", key: "inactiveSlots" },
     { label: "最大 Slot 保留 WAL", key: "maxSlotRetainedBytes", unit: "GiB", divisor: 1073741824, decimals: 2 },
-    { label: "累计归档失败", key: "archiveFailedCount" }, { label: "慢日志记录（48h）", key: "historicalSlowLogs" },
+    { label: "累计归档失败", key: "archiveFailedCount" },
   ],
   kubernetes: [
     { label: "节点", key: "nodes" }, { label: "异常节点", key: "unhealthyNodes" },
@@ -98,7 +98,7 @@ export function monitoringSummary(view: MonitoringView): string {
   const number = (key: string, digits = 0) => formatIndicator(i[key], 1, digits);
   switch (view.kind) {
     case "hosts": return `CPU ${number("cpuPercent", 1)}% · 内存 ${number("memoryPercent", 1)}% · 负载 ${number("load1", 2)}`;
-    case "postgresql": return `连接 ${number("connections")} · 锁等待 ${number("lockWaits")} · 慢 SQL ${number("slowQueries")}`;
+    case "postgresql": return `连接 ${number("connections")} · 锁等待 ${number("lockWaits")} · 已发生慢 SQL ${number("slowSQLRecords")}`;
     case "kubernetes": return `节点 ${number("nodes")} · Pod ${number("pods")} · 异常 Pod ${number("unreadyPods")}`;
     case "minio": return `节点 ${number("nodes")} · 磁盘在线 ${number("onlineDisks")} / 离线 ${number("offlineDisks")}`;
     case "elasticsearch": return `节点 ${number("nodes")} · 活跃分片 ${number("activeShards")} · 未分配 ${number("unassignedShards")}`;
@@ -116,7 +116,7 @@ export function currentIssues(view?: MonitoringView) {
   }));
 }
 
-const sectionCodes = ["postgresql-slots","postgresql-archive","cloudhis-33","postgresql-slow-history","postgresql-table-health","postgresql-table-bloat","postgresql-index-bloat","redis-slowlog","rabbitmq-queues"];
+const sectionCodes = ["postgresql-slots","postgresql-archive","postgresql-databases","cloudhis-28","cloudhis-30","postgresql-table-health","postgresql-table-bloat","postgresql-index-bloat","redis-slowlog","rabbitmq-queues","rabbitmq-nodes","elasticsearch-resources","cloudhis-38","cloudhis-3"];
 export function monitoringSections(view?:MonitoringView) {
   return liveChecks(view).filter(c=>sectionCodes.includes(c.code)).sort((a,b)=>sectionCodes.indexOf(a.code)-sectionCodes.indexOf(b.code));
 }

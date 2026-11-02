@@ -29,16 +29,12 @@ func FinalizeInspection(r *JobResult, kind string) {
 				continue
 			}
 			count++
-			if d.UsedPercent >= 80 || d.InodeUsedPercent >= 80 {
+			if d.UsedPercent > 75 || (d.Inodes > 0 && d.InodeUsedPercent > 75) {
 				bad++
-				if d.UsedPercent >= 90 || d.InodeUsedPercent >= 90 {
-					o.Status = "CRITICAL"
-				} else if o.Status != "CRITICAL" {
-					o.Status = "WARNING"
-				}
+				o.Status = "CRITICAL"
 			}
 		}
-		o.Value = fmt.Sprintf("实际文件系统 %d 个，容量或 inode 达到提醒阈值 %d 个", count, bad)
+		o.Value = fmt.Sprintf("实际文件系统 %d 个，容量或 inode 超过 75%% %d 个", count, bad)
 		if count == 0 {
 			o.Status = "UNKNOWN"
 			o.Reason = "未取得实际文件系统信息"

@@ -53,6 +53,11 @@ type MonitoringPoint struct {
 func monitorDigest(v any) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(mustJSON(v)))) }
 
 func (s *OperationsService) monitoringTargets(ctx context.Context) ([]monitoringTarget, error) {
+	return s.loadMonitoringTargets(ctx, true)
+}
+
+// Report freezing must not register sources or initialise collector state.
+func (s *OperationsService) loadMonitoringTargets(ctx context.Context, initialise bool) ([]monitoringTarget, error) {
 	var hosts []model.Server
 	var databases []model.OperationsDatabase
 	var components []model.ComponentConnection
@@ -92,6 +97,8 @@ func (s *OperationsService) monitoringTargets(ctx context.Context) ([]monitoring
 		cfg, exists := configMap[h.ID]
 		if !exists {
 			cfg = model.HostMonitorConfig{ServerID: h.ID, IntervalSeconds: 60, Enabled: true}
+		}
+		if !exists && initialise {
 			if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&cfg).Error; err != nil {
 				return nil, err
 			}
@@ -168,7 +175,7 @@ func monitoringLaneCodes(t monitoringTarget, lane string) []string {
 	}
 	if t.Type == "database" {
 		if lane == "live" {
-			return []string{"cloudhis-2", "cloudhis-16", "postgresql-archive", "cloudhis-27", "cloudhis-28", "cloudhis-30", "cloudhis-33", "postgresql-slots", "postgresql-table-health", "postgresql-slow-history"}
+			return []string{"cloudhis-2", "cloudhis-16", "postgresql-archive", "cloudhis-27", "cloudhis-28", "cloudhis-30", "postgresql-databases", "postgresql-slots", "postgresql-table-health", "postgresql-slow-history"}
 		}
 		if lane == "facts" {
 			return []string{"cloudhis-4", "cloudhis-15", "cloudhis-17", "cloudhis-18", "cloudhis-19"}
@@ -414,7 +421,7 @@ func monitoringLane(state model.MonitoringState, t monitoringTarget) MonitoringL
 func (s *OperationsService) monitoringCurrentView(ctx context.Context, t monitoringTarget) (MonitoringView, error) {
 	v := MonitoringView{TargetType: t.Type, ID: t.ID, Kind: t.Kind, Name: t.Name, Endpoint: t.Endpoint, Enabled: t.Enabled, Status: "PENDING", Indicators: map[string]float64{}, Lanes: []MonitoringLane{}}
 	if t.Type == "host" {
-		cfg, m, err := s.HostMonitor(t.ID)
+		cfg, m, err := s.hostMonitor(ctx, t.ID, false)
 		if err != nil {
 			return v, err
 		}
@@ -458,7 +465,29 @@ func (s *OperationsService) monitoringCurrentView(ctx context.Context, t monitor
 			v.Summary = strings.Join(parts, "；")
 		}
 	}
+	if t.Type == "database" && v.Result != nil {
+		slow := s.monitoringPostgresSlowHistory(ctx, model.OperationsDatabase{ID: t.ID})
+		replaced := false
+		for i := range v.Result.ReportChecks {
+			if v.Result.ReportChecks[i].Code == slow.Code {
+				v.Result.ReportChecks[i] = slow
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			v.Result.ReportChecks = append(v.Result.ReportChecks, slow)
+		}
+		if v.Indicators == nil {
+			v.Indicators = map[string]float64{}
+		}
+		delete(v.Indicators, "slowSQLRecords")
+		if value, ok := slow.Measurements["slowSQLRecords"]; ok {
+			v.Indicators["slowSQLRecords"] = value
+		}
+	}
 	if v.Result != nil {
+		applyMonitoringFacts(v.Result)
 		v.Status = "NORMAL"
 		for _, o := range v.Result.ReportChecks {
 			if o.Status == "CRITICAL" {
@@ -585,7 +614,7 @@ func (s *OperationsService) MonitoringDashboard(ctx context.Context, kind string
 
 func monitoringOperationalTable(code string) bool {
 	switch code {
-	case "postgresql-slots", "postgresql-table-health", "postgresql-archive", "postgresql-slow-history", "cloudhis-33", "redis-slowlog", "rabbitmq-queues":
+	case "postgresql-databases", "cloudhis-28", "cloudhis-30", "cloudhis-3", "elasticsearch-resources", "cloudhis-38", "rabbitmq-nodes", "postgresql-slots", "postgresql-table-health", "postgresql-archive", "postgresql-slow-history", "cloudhis-33", "redis-slowlog", "rabbitmq-queues":
 		return true
 	}
 	return false
