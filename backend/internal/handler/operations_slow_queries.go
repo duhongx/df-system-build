@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"net/http"
 	"strconv"
 
 	"df-build-server/internal/service"
@@ -16,6 +17,10 @@ func slowQueryFilter(c *gin.Context) service.SlowQueryFilter {
 	return service.SlowQueryFilter{Page: page, Size: size, Keyword: c.Query("keyword"), Database: c.Query("database"), TargetRunID: uint(target), AsOfID: uint(asOf)}
 }
 func (h *OperationsHandler) MonitoringSlowQueries(c *gin.Context) {
+	if c.Param("kind") != "database" {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
 	page, err := h.svc.MonitoringSlowQueries(c.Request.Context(), opsID(c), slowQueryFilter(c))
 	if err != nil {
 		opsFail(c, err)

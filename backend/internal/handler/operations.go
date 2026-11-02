@@ -34,7 +34,7 @@ func (h *OperationsHandler) RegisterRoutes(r *gin.RouterGroup) {
 	g.GET("/monitoring", h.MonitoringOverview)
 	g.GET("/monitoring/:kind/:id", h.MonitoringDetail)
 	g.GET("/monitoring/:kind/:id/history", h.MonitoringHistory)
-	g.GET("/monitoring/database/:id/slow-queries", h.MonitoringSlowQueries)
+	g.GET("/monitoring/:kind/:id/slow-queries", h.MonitoringSlowQueries)
 	g.POST("/monitoring/:kind/:id/refresh", h.RefreshMonitoring)
 	g.GET("/hosts/:id/services", h.ManagedServices)
 	g.POST("/hosts/:id/services", h.SaveManagedService)

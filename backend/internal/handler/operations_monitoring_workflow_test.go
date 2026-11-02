@@ -204,6 +204,15 @@ func TestMonitoringWorkflowCollectsPersistsAndArchivesThroughAuthenticatedAPI(t 
 		}
 	}
 	var slowPage service.SlowQueryPage
+	// All monitor routes share the same wildcard prefix. A static "database"
+	// branch otherwise shadows the existing details, history and refresh routes.
+	var databaseView service.MonitoringView
+	api("GET", fmt.Sprintf("/monitoring/database/%d?view=dashboard", database.ID), nil, &databaseView)
+	api("GET", fmt.Sprintf("/monitoring/database/%d/history?hours=1", database.ID), nil, nil)
+	api("POST", fmt.Sprintf("/monitoring/database/%d/refresh", database.ID), nil, nil)
+	if out := raw("GET", fmt.Sprintf("/monitoring/component/%d/slow-queries", database.ID), nil, token); out.Code != http.StatusNotFound {
+		t.Fatal("non-database slow query route was accepted")
+	}
 	api("GET", fmt.Sprintf("/monitoring/database/%d/slow-queries?page=4&size=20", database.ID), nil, &slowPage)
 	if slowPage.Total != 61 || len(slowPage.List) != 1 || slowPage.List[0].Database != "business" {
 		t.Fatal("slow SQL backend pagination failed")
